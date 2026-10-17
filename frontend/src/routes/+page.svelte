@@ -1,28 +1,22 @@
 <script lang="ts">
-    import getCustomClaims from "#lib/utils/getCustomClaims.ts";
+    import { BACKEND_URL } from "$app/env/public";
     import type { PageProps } from "./$types";
 
     let { data }: PageProps = $props();
-    let { supabase, session, user } = $derived(data);
+    let { user } = $derived(data);
 
-    const handleSignIn = async () => {
-        await supabase.auth.signInWithOAuth({
-            provider: "google",
-            options: {
-                redirectTo: `${window.location.origin}/api/auth/callback`,
-                queryParams: {
-                    access_type: "offline",
-                    prompt: "consent",
-                },
-            },
-        });
-    };
+    // A full-page navigation, not fetch: the backend redirects to Google.
+    const loginUrl = `${BACKEND_URL.replace(/\/+$/, "")}/auth/google/login?next=${encodeURIComponent("/")}`;
 </script>
 
-<button onclick={handleSignIn}> Login </button>
-
 {#if user}
-    {JSON.stringify(getCustomClaims(user), null, 2)}
+    {JSON.stringify(user, null, 2)}
 
-    <button onclick={() => supabase.auth.signOut()}> Logout</button>
+    <p><a href="/team">Team</a></p>
+
+    <form method="POST" action="/auth/logout">
+        <button type="submit"> Logout</button>
+    </form>
+{:else}
+    <a href={loginUrl}> Login </a>
 {/if}

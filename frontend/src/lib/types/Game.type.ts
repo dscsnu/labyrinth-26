@@ -1,0 +1,47 @@
+import { z } from 'zod';
+
+// GET /api/game/shapes: what the client calls pattern types, and the timing
+// rules for its countdown.
+export const GameShapeSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    patterns: z.number(),
+    points: z.array(z.number()),
+});
+
+export const GameSchema = z.object({
+    shapes: z.array(GameShapeSchema),
+    scan_window_ms: z.number(),
+    scan_grace_ms: z.number(),
+    max_pattern_points: z.number(),
+});
+
+// The team_state event and GET /api/teams/me/state.
+export const StackScanSchema = z.object({
+    waypoint_id: z.string(),
+    user_id: z.string(),
+    scanned_at: z.string(),
+    expires_at: z.string(),
+});
+
+export const TeamStateSchema = z.object({
+    team_id: z.string(),
+    waypoints: z.array(z.string()),
+    patterns: z.array(z.array(z.string())),
+    shapes: z.array(z.string()),
+    selection: z.object({ shape: z.string(), selected_by: z.string(), selected_at: z.string() }).nullable(),
+    stack: z.array(StackScanSchema),
+});
+
+// POST /api/teams/me/state/scans.
+export const ScanResultSchema = z.object({
+    outcome: z.enum(['scan_added', 'pattern_completed']),
+    pattern: z.array(z.string()).optional(),
+    already_completed: z.boolean().optional(),
+    state: TeamStateSchema,
+});
+
+export type GameShape = z.infer<typeof GameShapeSchema>;
+export type Game = z.infer<typeof GameSchema>;
+export type TeamState = z.infer<typeof TeamStateSchema>;
+export type ScanResult = z.infer<typeof ScanResultSchema>;

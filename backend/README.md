@@ -1,0 +1,165 @@
+# labyrinth-26-backend
+
+Go API server backed by plain Postgres. It handles Google sign-in itself and issues its own JWTs. There's no Supabase and no ORM.
+
+## Run locally
+
+```bash
+docker compose up -d          # Postgres 17 on localhost:5432
+cp .env.example .env          # fill in the Google OAuth client
+go run . keygen               # JWT_PRIVATE_KEY → .env, JWT_PUBLIC_KEY → ../frontend/.env
+go run .                      # applies migrations, then serves on :3000
+```
+
+`go run . migrate` applies migrations and exits. Like `go run . seed`, it takes the single-instance lock first, so both **refuse to run while a backend is serving** the same database: stop it first.
+
+### Google OAuth client
+Google Cloud Console → APIs & Services → Credentials → **OAuth client ID** (Web application):
+- Authorized redirect URI: `PUBLIC_URL` + `/auth/google/callback` (locally `http://localhost:3000/auth/google/callback`)
+
+## Tests
+
+```bash
+go test ./...                                    # unit tests
+docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t \
+  -e POSTGRES_DB=t -p 55432:5432 postgres:17-alpine
+TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test ./...
+```
+
+The end-to-end tests in `internal/server` run the full login flow against a fake Google OIDC provider, plus the team and live-stream flows. Store tests in `auth`, `user`, `teams`, `teamstate` and `platform/postgres` each use their own schema. They **wipe schemas** in `TEST_DATABASE_URL`, so never point it at a real database.
+
+## Code layout: one package per use case
+
+```
+internal/
+  auth/        Google sign-in, access tokens, the auth middleware
+  user/        players, helpers and admins
+  teams/       teams of teams.size (6) players with a leader, lobby → game
+  teamstate/   scanned waypoints and completed patterns per team
+  server/      wires the use cases together; /healthz and the live event stream
+  platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
+cmd/
+  loadtest/    load test (see below)
+  docaudit/    checks doc comments
+```
+
+Every use case has the same four files, plus a `doc.go` and a README describing how each file works, its state, API, and every rule and case. **`AGENTS.md` has the rules for adding or changing code, and new use cases must follow them.** `go run ./cmd/docaudit` checks that every declaration has a doc comment.
+
+| File | Holds |
+|---|---|
+| `api.go` | its HTTP routes |
+| `read.go` | its types and reads |
+| `write.go` | its writes |
+| `db.go` | its SQL |
+
+`teams` and `teamstate` keep their state **in memory** (`store.go` describes the layout). Reads never touch Postgres, and every write in `write.go` runs the same marked write-through steps: **lock → validate → build → persist (`db.go`) → apply → publish**. Memory only changes after Postgres commits. `auth` and `user` keep nothing in memory; their reads and writes call `db.go` directly.
+
+Operational rules that follow from keeping state in memory:
+- **Run exactly one backend instance.** A second one refuses to start (Postgres advisory lock), before migrating. The running backend re-checks the lock every **5 s** (`storage.instance_lock_check`) and shuts down (exit 1) if it has lost it, e.g. after a Postgres restart; let your supervisor restart it. Scale up the machine, not out.
+- **Don't edit game data with SQL while the backend runs.** Memory won't see the change, and could act on stale data. Use the API, or stop the backend, edit, and start it again. Content (waypoints, patterns) is only read at startup.
+- `go run . seed` loads the 2025 placeholder content (waypoints `1001`–`1011`, 359 patterns). It refuses to run while the backend is serving; stop the backend, seed, start it.
+
+## Load test
+
+```bash
+go run ./cmd/loadtest                                  # 10k players, all scenarios (~2.5 min)
+go run ./cmd/loadtest -scenarios ramp -pool 64         # one scenario, Postgres pool of 64
+go run ./cmd/loadtest -h                               # all flags
+```
+
+It builds the backend and runs it on `:3100` against its own `labyrinth_bench` database, created next to the dev one; your dev data is never touched. Players are inserted directly and their tokens signed with `JWT_PRIVATE_KEY`, so no Google login is involved. Scenarios:
+
+- **rush:** all players form teams of `teams.size` (6) and start, at random moments within `-rush-window` (30 s).
+- **sse:** every player holds an event stream during a rush; measures how long a ready-up or start takes to reach teammates.
+- **reads:** players poll `GET /api/teams/me` flat out (streams still open).
+- **ramp:** mixed traffic (90 % reads, 10 % ready toggles, no think time) at rising worker counts until p99 > 500 ms or > 1 % errors.
+
+The load generator and the backend share the machine's CPUs, so results are conservative.
+
+## Migrations
+
+Migrations are plain SQL files in `internal/platform/postgres/migrations/`, named `NNNN_description.sql`. They're embedded in the binary and applied in order at startup, each in its own transaction. Applied versions are recorded in `schema_migrations` with each file's SHA-256.
+
+- Add a new file for every change. **Never edit a file that has already been applied** anywhere shared: the backend refuses to start (`migration was edited after it was applied`) before applying anything.
+- An advisory lock stops two instances from migrating at the same time.
+
+## Auth flow (SvelteKit integration)
+
+```
+Browser ── GET /auth/google/login?next=/team ──▶ backend ──302──▶ Google
+Google  ── GET /auth/google/callback?code&state ──▶ backend
+backend ──302──▶ FRONTEND_URL/auth/callback?code=<one-time>&next=/team
+SvelteKit server ── POST /auth/token {"code"} ──▶ backend ──▶ {access_token, expires_at, user}
+SvelteKit server ── Authorization: Bearer <access_token> ──▶ /api/*
+```
+
+- The JWT never shows up in a browser URL. The one-time `code` is single-use, expires after **2 m** (`auth.login_code_ttl`), and is stored only as a SHA-256 hash.
+- Google login uses PKCE plus a signed, httpOnly `state` cookie. `next` is restricted to same-site paths (no open redirects).
+- Failures redirect to `FRONTEND_URL/auth/error?reason=<reason>` (e.g. `google_access_denied`, `email_domain_not_allowed`, `state_mismatch`, `email_in_use` when another account already has that email).
+- JWTs are signed with Ed25519 (`EdDSA`) using `JWT_PRIVATE_KEY`, with lifetime **12 h** (`auth.token_ttl` in config.toml). Claims: `sub` (user id), `email`, `name`, `avatar_url`, `role`.
+- The SvelteKit server verifies tokens locally with the public key (`JWT_PUBLIC_KEY`, printed by `go run . pubkey`). It can verify tokens but can't mint them, and page loads make no backend call.
+- Tokens are stateless, so logout means the frontend deletes its cookie. Revoking every token means generating a new keypair.
+- `role` in the token is a snapshot from sign-in. A promotion or demotion applies when the user signs in again, or within `auth.token_ttl` at the latest. If an endpoint must honour a role change immediately, read the user from the DB, as `/api/me` does.
+
+### What the SvelteKit app needs
+
+1. **Login button:** a plain link (not `fetch`) to `${BACKEND_URL}/auth/google/login?next=/somewhere`.
+2. **`src/routes/auth/callback/+server.ts`:**
+   ```ts
+   export const GET = async ({ url, cookies, fetch }) => {
+       const res = await fetch(`${BACKEND_URL}/auth/token`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ code: url.searchParams.get('code') }),
+       });
+       if (!res.ok) redirect(303, '/auth/error?reason=token_exchange_failed');
+       const { payload } = await res.json();
+       cookies.set('labyrinth_token', payload.access_token, {
+           path: '/', httpOnly: true, sameSite: 'lax', secure: !dev,
+           expires: new Date(payload.expires_at),
+       });
+       redirect(303, url.searchParams.get('next') ?? '/');
+   };
+   ```
+3. **`hooks.server.ts`:** read `labyrinth_token`, verify it with `jose` (`jwtVerify` with the `EdDSA` public key, issuer `labyrinth-backend`, audience `labyrinth-api`) to fill `locals.user`, and clear the cookie if it fails.
+4. **`src/routes/auth/error/+page.svelte`:** show `reason`.
+5. **Logout:** delete the `labyrinth_token` cookie.
+
+`/api/*` calls go from the SvelteKit server (load functions and endpoints), so the backend needs no CORS setup.
+
+## Endpoints
+
+Full request and response shapes and every error code: **http://localhost:3000/docs** (Swagger UI), or `internal/server/openapi.yaml`. Tests fail if the spec and the routes or error codes drift apart.
+
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/healthz` | – | `200` if the database is reachable; payload `{"streams": n}` open event streams |
+| GET | `/docs` | – | Swagger UI for the whole API (from `/openapi.yaml`) |
+| GET | `/openapi.yaml` | – | The OpenAPI 3.1 spec (`internal/server/openapi.yaml`) |
+| GET | `/auth/google/login?next=` | – | Starts Google sign-in |
+| GET | `/auth/google/callback` | – | Google redirect target |
+| POST | `/auth/token` | – | `{"code"}` → `{access_token, token_type, expires_at, user}`; `400 invalid_code`, or `404 user_not_found` if the code's user was deleted |
+| GET | `/api/me` | Bearer | Current user (role read fresh from the DB); `401 user_not_found` if the token's user no longer exists |
+| GET | `/api/teams/me` | Bearer | Your team, or `404 not_in_team` |
+| POST | `/api/teams` | Bearer | `{"name"}` (1 to **32** characters, `teams.name_max_length`) → `201` new team, you as leader |
+| POST | `/api/teams/join` | Bearer | `{"team_id"}` (6 digits) → the team |
+| POST | `/api/teams/leave` | Bearer | Leave your team (lobby only) |
+| PUT | `/api/teams/me/ready` | Bearer | `{"ready": bool}` → the team (non-leaders, lobby only) |
+| POST | `/api/teams/me/start` | Bearer | Leader only: `LOBBY` → `IN_GAME` → the team |
+| GET | `/api/game/shapes` | Bearer | The selectable shapes (`id`, `name`, `patterns` count, distinct `points` sizes) and the timing rules `scan_window_ms`, `scan_grace_ms`, `max_pattern_points`; the same for every user, static while running |
+| GET | `/api/teams/me/state` | Bearer | Your team's visited waypoints, completed patterns and shapes, selection and live scan stack |
+| PUT | `/api/teams/me/state/selection` | Bearer | `{"shape"}`: select the shape to attempt; always empties the scan stack |
+| DELETE | `/api/teams/me/state/selection` | Bearer | Give up the selection (and its stack) |
+| POST | `/api/teams/me/state/scans` | Bearer | `{"waypoint_id"}` (4 digits) → `scan_added` or `pattern_completed`; `409` if the waypoint or member is already in the stack, or the waypoint isn't part of the pattern. ⚠ raw ID until QR verification exists |
+| GET | `/api/teams/me/events` | Bearer | Server-sent events: `team` or `no_team`, then `team_state` if you're in a team; then one event per change; `: ping` after 25 s (`live.heartbeat`) with no event |
+
+Responses use the envelope `{"success": bool, "code"?: string, "message"?: string, "payload"?: any}`. `code` is a stable identifier for errors the frontend should handle, e.g. `team_full`; auth's are `invalid_body`, `invalid_code`, `user_not_found` (`/auth/token`) and `missing_token`, `invalid_token` (any Bearer route). `user_not_found` has two statuses: **`404` on `POST /auth/token`** (the login code's user was deleted; no token is involved) and **`401` on `GET /api/me`** (a valid token names a user that no longer exists, so the caller must sign in again). An unknown path is `404 not_found` and a wrong method `405 method_not_allowed`, also as envelopes. A response that fails to encode is a complete `500 internal error`, never a truncated body.
+
+Each use case's README has the full details: rules, error codes and event shapes.
+
+## Configuration
+
+Two files:
+- **`config.toml`**: every tunable rule and timing (team size, scan window and grace, pattern size, token lifetimes, heartbeat, server timeouts including `server.read_timeout` (30 s for a whole request), body limit, write timeout, and `storage.instance_lock_check` (5 s between instance-lock checks)). Each key is commented in the file. Read once at startup from `$CONFIG_FILE` (default `./config.toml`; the Docker image sets `/config.toml`); unknown, missing (`missing key <table>.<key>`, even where zero would be valid) or out-of-range values stop the backend from starting. The full key table is in `internal/platform/README.md`. Restart to apply a change. Code never hard-codes these: see AGENTS.md §10.
+- **`.env`**: secrets and deployment URLs only. See `.env.example`. Required: `DATABASE_URL`, `JWT_PRIVATE_KEY` (from `go run . keygen`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `PUBLIC_URL`, `FRONTEND_URL`. Optional: `PORT` (3000), `ALLOWED_EMAIL_DOMAINS` (comma-separated, e.g. `snu.edu.in`).

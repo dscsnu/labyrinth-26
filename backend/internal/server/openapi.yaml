@@ -1,0 +1,555 @@
+openapi: 3.1.0
+info:
+  title: Labyrinth 26 API
+  version: "0.1.0"
+  description: |
+    The Labyrinth 26 backend: a campus game where teams scan waypoints to trace shapes.
+
+    **Envelope.** Every JSON response is `{"success", "code"?, "message"?, "payload"?}`.
+    Errors carry a stable snake_case `code` the client switches on; only `500` has none.
+
+    **Auth.** Routes under `/api` need `Authorization: Bearer <JWT>`. The JWT is an Ed25519
+    (`EdDSA`) token from `POST /auth/token`, valid for `auth.token_ttl` (config.toml, 12 h).
+
+    **Limits.** Request bodies over `server.max_body_bytes` (1 MiB) get `400 invalid_body`.
+    Unknown paths get 404 `not_found`, wrong methods 405 `method_not_allowed`, both as envelopes.
+
+    **Live updates** come over server-sent events at `GET /api/teams/me/events`.
+
+    ⚠ `POST /api/teams/me/state/scans` takes the raw 4-digit waypoint ID until QR verification exists.
+
+    This file is checked against the code by `TestOpenAPIMatchesRoutes` (internal/server):
+    every registered route and every error code must appear here, with codes listed
+    in each response's description.
+servers:
+  - url: http://localhost:3000
+    description: local dev backend
+tags:
+  - name: health
+  - name: auth
+    description: Google sign-in and tokens (see internal/auth/README.md)
+  - name: user
+  - name: teams
+    description: Forming a team and starting the game (see internal/teams/README.md)
+  - name: game
+    description: Selecting a type and scanning (see internal/teamstate/README.md)
+  - name: live
+    description: Server-sent events
+
+security:
+  - bearer: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Health check
+      description: 200 if Postgres is reachable, with the number of open event streams.
+      security: []
+      responses:
+        "200":
+          description: Healthy.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: object
+                        required: [streams]
+                        properties:
+                          streams: { type: integer, example: 42 }
+        "503":
+          description: Database unreachable (no code).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/google/login:
+    get:
+      tags: [auth]
+      summary: Start Google sign-in
+      description: |
+        Sets a signed, HttpOnly state cookie (valid `auth.oauth_state_ttl`, 10 m) and redirects to
+        Google with PKCE. The browser opens this directly.
+      security: []
+      parameters:
+        - name: next
+          in: query
+          description: Same-site path to return to after sign-in; anything else becomes `/`.
+          schema: { type: string, example: /team }
+      responses:
+        "302":
+          description: Redirect to Google's consent screen.
+          headers:
+            Location: { schema: { type: string } }
+            Set-Cookie: { schema: { type: string }, description: "labyrinth_oauth_state=…; Path=/auth/google; HttpOnly; SameSite=Lax" }
+
+  /auth/google/callback:
+    get:
+      tags: [auth]
+      summary: Google redirect target
+      description: |
+        Verifies the state and Google's ID token, signs the user in, and redirects to the frontend:
+        `FRONTEND_URL/auth/callback?code=<login code>&next=<path>` on success (the code is single-use,
+        valid `auth.login_code_ttl`, 2 m), or `FRONTEND_URL/auth/error?reason=<reason>` on failure.
+      security: []
+      parameters:
+        - { name: state, in: query, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - { name: error, in: query, description: Set by Google, e.g. access_denied, schema: { type: string } }
+      responses:
+        "302":
+          description: |
+            Redirect to the frontend. Failure `reason`s: `state_missing`, `state_invalid`, `state_mismatch`,
+            `google_<error>` (e.g. `google_access_denied`), `code_missing`, `google_exchange_failed`,
+            `email_unverified`, `email_domain_not_allowed`, `email_in_use`, `internal_error`.
+          headers:
+            Location: { schema: { type: string } }
+
+  /auth/token:
+    post:
+      tags: [auth]
+      summary: Redeem a login code for an access token
+      description: |
+        Called server to server by the SvelteKit app. The code is used up only if the token is issued,
+        so a failure here can be retried with the same code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              additionalProperties: false
+              properties:
+                code: { type: string, example: "Zk3…base64url" }
+      responses:
+        "200":
+          description: Token issued.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/TokenResponse" }
+        "400":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `invalid_body`, `invalid_code`"
+        "404":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `user_not_found`"
+
+  /api/me:
+    get:
+      tags: [user]
+      summary: The signed-in user
+      description: Read from the database, so the role is current even if it changed since sign-in.
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/User" }
+        "401":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `missing_token`, `invalid_token`, `user_not_found`"
+
+  /api/teams/me:
+    get:
+      tags: [teams]
+      summary: Your team
+      responses:
+        "200": { $ref: "#/components/responses/Team" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+
+  /api/teams:
+    post:
+      tags: [teams]
+      summary: Create a team
+      description: You become its leader. The name is trimmed and must be 1 to `teams.name_max_length` (32) characters, no control characters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              additionalProperties: false
+              properties:
+                name: { type: string, example: Scott Pilgrim's Fan Club }
+      responses:
+        "201": { $ref: "#/components/responses/Team" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_team_name`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `already_in_team`" }
+
+  /api/teams/join:
+    post:
+      tags: [teams]
+      summary: Join a team by its code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [team_id]
+              additionalProperties: false
+              properties:
+                team_id: { type: string, pattern: "^[0-9]{6}$", example: "482913" }
+      responses:
+        "200": { $ref: "#/components/responses/Team" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_team_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `already_in_team`, `team_full`, `team_locked`" }
+
+  /api/teams/leave:
+    post:
+      tags: [teams]
+      summary: Leave your team (lobby only)
+      description: If the leader leaves, the earliest remaining member becomes leader. The last member leaving deletes the team.
+      responses:
+        "200":
+          description: Left. No payload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Success" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`" }
+
+  /api/teams/me/ready:
+    put:
+      tags: [teams]
+      summary: Set your ready flag (non-leaders, lobby only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ready]
+              additionalProperties: false
+              properties:
+                ready: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/Team" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`, `leader_cannot_ready`" }
+
+  /api/teams/me/start:
+    post:
+      tags: [teams]
+      summary: Start the game (leader only)
+      description: Needs exactly `teams.size` (6) members, every non-leader ready. `LOBBY` → `IN_GAME`; the roster is then frozen.
+      responses:
+        "200": { $ref: "#/components/responses/Team" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`, `team_not_full`, `not_all_ready`" }
+
+  /api/game/shapes:
+    get:
+      tags: [game]
+      summary: Pattern types to pick, and the timing rules
+      description: |
+        The shapes ("types" on the client) a team can select, and the countdown rules. The client counts down
+        `scan_window_ms` from its first accepted scan and sends nothing after; the server allows
+        `scan_window_ms + scan_grace_ms`, so the grace absorbs network latency.
+      responses:
+        "200":
+          description: Shapes and rules.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/Game" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+
+  /api/teams/me/state:
+    get:
+      tags: [game]
+      summary: Your team's game state
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+
+  /api/teams/me/state/selection:
+    put:
+      tags: [game]
+      summary: Select a pattern type
+      description: Any member may select. **Always purges the team's scan stack**, reselecting the same type included.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [shape]
+              additionalProperties: false
+              properties:
+                shape: { type: string, example: square }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_shape`, `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+    delete:
+      tags: [game]
+      summary: Give up the selection
+      description: Clears the selection and purges the stack. A no-op 200 if nothing is selected.
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+
+  /api/teams/me/state/scans:
+    post:
+      tags: [game]
+      summary: Scan a waypoint
+      description: |
+        Checked against the stack's live scans (at most `game.scan_window` + `game.scan_grace`, 65 s, old).
+        Rejected **without being pushed** if the waypoint is already in the stack (`waypoint_already_scanned`,
+        a retry included), the member already has a scan in it (`member_already_scanned`), or no pattern of the
+        selected type contains the stack plus this waypoint (`not_in_pattern`). Once the stack is exactly a
+        pattern of the selected type, it completes and the stack and selection are purged.
+
+        ⚠ Takes the raw waypoint ID; to be replaced by QR verification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [waypoint_id]
+              additionalProperties: false
+              properties:
+                waypoint_id: { type: string, pattern: "^[0-9]{4}$", example: "1007" }
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/ScanResult" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
+        "409":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `not_in_game`, `no_shape_selected`, `waypoint_already_scanned`, `member_already_scanned`, `not_in_pattern`"
+
+  /api/teams/me/events:
+    get:
+      tags: [live]
+      summary: Live event stream (server-sent events)
+      description: |
+        `text/event-stream`. On connect: `team` (or `no_team`), then `team_state` if you're in a team. Then one
+        event per change, each a full snapshot (never a diff), and a `: ping` comment after `live.heartbeat`
+        (25 s) with no event. A client that falls `live.subscriber_buffer` (16) events behind is dropped and
+        should reconnect (EventSource does this itself).
+
+        | event | data |
+        |---|---|
+        | `team` | `Team` |
+        | `no_team` | `{}` |
+        | `team_state` | `TeamState` |
+
+        ```
+        event: team
+        data: {"id":"482913","name":"Scanners",…}
+
+        event: team_state
+        data: {"team_id":"482913","stack":[],…}
+
+        : ping
+        ```
+      responses:
+        "200":
+          description: The stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT (EdDSA)
+
+  responses:
+    Error:
+      description: |
+        A rule or input error. Each use lists the `code`s it can carry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing (`missing_token`) or invalid/expired (`invalid_token`) bearer token. Sets `WWW-Authenticate`.
+      headers:
+        WWW-Authenticate: { schema: { type: string, example: 'Bearer error="invalid_token"' } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Team:
+      description: The team after the change.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Success"
+              - properties:
+                  payload: { $ref: "#/components/schemas/Team" }
+    TeamState:
+      description: The team's game state after the change.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Success"
+              - properties:
+                  payload: { $ref: "#/components/schemas/TeamState" }
+
+  schemas:
+    Success:
+      type: object
+      required: [success]
+      properties:
+        success: { type: boolean, const: true }
+        payload: {}
+    Error:
+      type: object
+      required: [success, message]
+      properties:
+        success: { type: boolean, const: false }
+        code: { type: string, description: Stable snake_case error code; absent only on 500., example: team_full }
+        message: { type: string, example: team is full }
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_at, user]
+      properties:
+        access_token: { type: string, description: Ed25519-signed JWT. }
+        token_type: { type: string, const: Bearer }
+        expires_at: { type: string, format: date-time, description: Whole seconds; equals the token's exp. }
+        user: { $ref: "#/components/schemas/User" }
+
+    User:
+      type: object
+      required: [id, email, name, avatar_url, role, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email, example: player@snu.edu.in }
+        name: { type: string, example: Player One }
+        avatar_url: { type: [string, "null"], format: uri }
+        role: { type: string, enum: [PLAYER, HELPER, ADMIN] }
+        created_at: { type: string, format: date-time }
+
+    Team:
+      type: object
+      required: [id, name, leader_id, status, created_at, started_at, members]
+      properties:
+        id: { type: string, pattern: "^[0-9]{6}$", description: The 6-digit join code., example: "482913" }
+        name: { type: string, example: Scanners }
+        leader_id: { type: string, format: uuid }
+        status: { type: string, enum: [LOBBY, IN_GAME, FINISHED] }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        members:
+          type: array
+          description: In join order (decides who leads if the leader leaves).
+          items: { $ref: "#/components/schemas/Member" }
+    Member:
+      type: object
+      required: [id, name, avatar_url, is_ready, joined_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        avatar_url: { type: [string, "null"], format: uri }
+        is_ready: { type: boolean }
+        joined_at: { type: string, format: date-time }
+
+    Game:
+      type: object
+      required: [shapes, scan_window_ms, scan_grace_ms, max_pattern_points]
+      properties:
+        shapes:
+          type: array
+          items: { $ref: "#/components/schemas/GameShape" }
+        scan_window_ms: { type: integer, description: "game.scan_window: the client's countdown.", example: 60000 }
+        scan_grace_ms: { type: integer, description: "game.scan_grace: server-side latency tolerance.", example: 5000 }
+        max_pattern_points: { type: integer, example: 6 }
+    GameShape:
+      type: object
+      required: [id, name, patterns, points]
+      properties:
+        id: { type: string, description: What PUT …/selection takes., example: square }
+        name: { type: string, example: Square }
+        patterns: { type: integer, description: How many valid patterns the type has., example: 18 }
+        points: { type: array, items: { type: integer }, description: Distinct pattern sizes, ascending., example: [4] }
+
+    TeamState:
+      type: object
+      required: [team_id, waypoints, patterns, shapes, selection, stack]
+      properties:
+        team_id: { type: string, example: "482913" }
+        waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
+        patterns:
+          type: array
+          description: Completed patterns, each as its sorted waypoint IDs.
+          items: { type: array, items: { type: string } }
+          example: [["1001", "1002", "1007", "1008"]]
+        shapes: { type: array, items: { type: string }, description: Completed types., example: [square] }
+        selection:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [shape, selected_by, selected_at]
+              properties:
+                shape: { type: string, example: triangle }
+                selected_by: { type: string, format: uuid }
+                selected_at: { type: string, format: date-time }
+        stack:
+          type: array
+          description: Live scans toward the selected type, bottom (oldest) first; stale ones left out.
+          items: { $ref: "#/components/schemas/StackScan" }
+    StackScan:
+      type: object
+      required: [waypoint_id, user_id, scanned_at, expires_at]
+      properties:
+        waypoint_id: { type: string, example: "1001" }
+        user_id: { type: string, format: uuid }
+        scanned_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: "scanned_at + game.scan_window + game.scan_grace: when it goes stale." }
+
+    ScanResult:
+      type: object
+      required: [outcome, state]
+      properties:
+        outcome: { type: string, enum: [scan_added, pattern_completed] }
+        pattern: { type: array, items: { type: string }, description: Set on pattern_completed., example: ["1001", "1002", "1007", "1008"] }
+        already_completed: { type: boolean, description: The pattern had been completed before, so progress didn't grow. }
+        state: { $ref: "#/components/schemas/TeamState" }

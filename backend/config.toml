@@ -1,0 +1,81 @@
+# Tunable rules and timings for the Labyrinth backend. This file is the single
+# source for these values; secrets and deployment URLs stay in .env.
+#
+# Read once at startup (path: $CONFIG_FILE, default ./config.toml) and
+# validated; the backend refuses to start on a bad value. Restart to apply a
+# change. Durations use Go syntax: "30s", "2m", "12h".
+#
+# Not here, because they're fixed type sizes in the code: at most 64
+# waypoints, 64 shapes and 512 patterns (see internal/teamstate/README.md).
+
+[teams]
+# Players per team: the leader starts only with exactly this many, and no
+# more can join. Allowed: 1 to 16.
+size = 6
+# Longest team name, in characters. Allowed: 1 to 32 (the database's limit).
+name_max_length = 32
+# How many random 6-digit team codes to try before giving up on creating a
+# team (a code can collide with an existing team's). Allowed: at least 1.
+code_attempts = 10
+
+[game]
+# A pattern's waypoints must all be scanned within scan_window, from the
+# oldest scan in the team's stack (bottom) to the newest (top). Clients count
+# down this long from the first scan they see. Allowed: more than 0.
+scan_window = "1m"
+# Extra tolerance on scan_window for slow phones and networks: scans spanning
+# up to scan_window + scan_grace still count, and a scan goes stale (dropped
+# from the stack) once it is more than scan_window + scan_grace old. Clients
+# don't count it down: it covers the round trip of a scan sent just before
+# their countdown ends. Allowed: 0 or more (the key must still be present).
+scan_grace = "5s"
+# Most waypoints in any pattern, and so the capacity of each team's scan
+# stack. Each waypoint needs a different member. Allowed: 1 to teams.size.
+max_pattern_points = 6
+
+[auth]
+# How long an access token (JWT) is valid. A role change applies at the next
+# sign-in, so at most this long after it's made. Allowed: more than 0.
+token_ttl = "12h"
+# How long the SvelteKit server has to redeem a sign-in's one-time code.
+# Allowed: more than 0.
+login_code_ttl = "2m"
+# How long a user may take on Google's sign-in screen. Allowed: at least 1s
+# (the cookie's Max-Age is whole seconds).
+oauth_state_ttl = "10m"
+# How often unredeemed, expired login codes are deleted. Allowed: more than 0.
+login_code_sweep = "10m"
+
+[live]
+# Idle event streams get a comment this often, so networks don't drop them.
+# Allowed: more than 0.
+heartbeat = "25s"
+# How many events a slow client may fall behind before it's dropped (it
+# reconnects and gets fresh state). Allowed: at least 1.
+subscriber_buffer = 16
+
+[server]
+# How long a client may take to send request headers. Allowed: more than 0.
+read_header_timeout = "10s"
+# How long a client may take to send a whole request, body included. Event
+# streams clear it once they start. Allowed: at least read_header_timeout.
+read_timeout = "30s"
+# How long an idle keep-alive connection stays open. Allowed: more than 0.
+idle_timeout = "2m"
+# How long shutdown waits for in-flight requests to finish. Allowed: more
+# than 0; keep it above storage.write_timeout.
+shutdown_timeout = "10s"
+# Largest request body accepted, in bytes. Larger requests get 400.
+# Allowed: at least 1.
+max_body_bytes = 1048576
+
+[storage]
+# The most a write-through to Postgres may take before it's treated as failed
+# and the affected state is reloaded. Allowed: more than 0.
+write_timeout = "5s"
+# How often the backend checks it still holds the single-instance lock, and
+# also each check's timeout, so a lost lock is noticed within about twice this
+# interval. If the lock's connection dies (e.g. Postgres restarts), the backend
+# shuts down rather than risk a second instance running alongside it.
+# Allowed: more than 0.
+instance_lock_check = "5s"

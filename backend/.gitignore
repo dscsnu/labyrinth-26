@@ -1,11 +1,25 @@
-node_modules
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Env
+# Env (secrets): only the example is committed
 .env
 .env.*
 !.env.example
 !.env.test
+
+# Build output: `go build` in backend/ names binaries after the package
+/labyrinth
+/loadtest
+/docaudit
+
+# Go test and profiling output
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editors and local tool settings
+.idea/
+*.swp
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
