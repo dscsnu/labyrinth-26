@@ -53,11 +53,18 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		return nil, err
 	}
 
+	// stateStore is loaded after teams (it reads teams), but teams' OnStart
+	// needs it. Build assigns it before returning, and no team can start
+	// before the routes are served, so OnStart never sees it nil.
+	var stateStore *teamstate.Store
 	teamStore, err := teams.Load(ctx, db, hub, log, teams.Rules{
 		Size:          set.Teams.Size,
 		NameMaxLength: set.Teams.NameMaxLength,
 		WriteTimeout:  set.Storage.WriteTimeout.Duration,
 		CodeAttempts:  set.Teams.CodeAttempts,
+		// A started team's members get its (empty) state right after the
+		// team, without reconnecting their stream.
+		OnStart: func(t teams.Team) { stateStore.PublishTeam(t.ID) },
 	})
 	if err != nil {
 		return nil, err
@@ -66,7 +73,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	authAPI := auth.NewAPI(cfg, g, tokens, codes, users, func(u user.User) {
 		teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL)
 	}, log)
-	stateStore, err := teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{
+	stateStore, err = teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{
 		ScanWindow:       set.Game.ScanWindow.Duration,
 		ScanGrace:        set.Game.ScanGrace.Duration,
 		MaxPatternPoints: set.Game.MaxPatternPoints,

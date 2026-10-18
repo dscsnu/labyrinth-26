@@ -26,6 +26,26 @@ type State struct {
 	// Stack is the team's accepted scans since it selected its shape: what
 	// completion is checked against.
 	Stack Stack
+	// LastCast is the team's most recent cast, if any. It stays until the
+	// next cast (a new selection doesn't clear it).
+	LastCast Cast
+}
+
+// Cast is one completed pattern: the moment a team's stack became exactly a
+// pattern of its selected shape.
+type Cast struct {
+	// Active reports whether there is one; the other fields are zero when
+	// there isn't.
+	Active bool
+	// Pattern is the pattern's index in the atlas.
+	Pattern int
+	// By is the member whose scan completed it.
+	By uuid.UUID
+	// At is when.
+	At time.Time
+	// AlreadyCompleted reports that the team had cast this pattern before,
+	// so its progress didn't grow.
+	AlreadyCompleted bool
 }
 
 // Selection is the shape a team has chosen to attempt.
@@ -103,6 +123,23 @@ func (s Stack) Push(sc StackScan) Stack {
 	return s
 }
 
+// NextExpiry returns the first instant the stack's oldest correct scan is
+// stale: its time plus limit plus one microsecond, since a scan exactly limit
+// old is still live (Live) and times have microsecond precision. ok is false
+// if the stack holds no correct scans; wrong scans never go stale.
+func (s Stack) NextExpiry(limit time.Duration) (at time.Time, ok bool) {
+	for i := range s.n {
+		sc := s.At(i)
+		if sc.Wrong {
+			continue
+		}
+		if exp := sc.At.Add(limit + time.Microsecond); !ok || exp.Before(at) {
+			at, ok = exp, true
+		}
+	}
+	return at, ok
+}
+
 // Live returns the scans no older than limit at now, bottom to top, plus any
 // wrong scan (wrong scans never age out: they stay until the selection is
 // purged). Correct scans are pushed in time order, so their live scans are
@@ -131,10 +168,26 @@ type View struct {
 	Shapes []string `json:"shapes"`
 	// Selection is the selected shape, or null.
 	Selection *SelectionView `json:"selection"`
+	// LastCast is the team's most recent cast, or null if it has none.
+	LastCast *CastView `json:"last_cast"`
 	// Stack is the stack's live scans (within window + grace), bottom
 	// (oldest) to top (newest): the ones that can still count toward a
 	// pattern.
 	Stack []StackScanView `json:"stack"`
+}
+
+// CastView is a Cast as JSON.
+type CastView struct {
+	// Pattern is the cast pattern's waypoint IDs, sorted.
+	Pattern []string `json:"pattern"`
+	// Shape is the pattern's shape ID.
+	Shape string `json:"shape"`
+	// CastBy is the member whose scan completed it.
+	CastBy uuid.UUID `json:"cast_by"`
+	// CastAt is when.
+	CastAt time.Time `json:"cast_at"`
+	// AlreadyCompleted reports that the team had cast this pattern before.
+	AlreadyCompleted bool `json:"already_completed"`
 }
 
 // SelectionView is a Selection as JSON.
@@ -272,6 +325,11 @@ func (s *Store) view(teamID string, st State) View {
 	}
 	if sel := st.Selection; sel.Active {
 		v.Selection = &SelectionView{Shape: c.Shape(sel.Shape).ID, SelectedBy: sel.By, SelectedAt: sel.At.UTC()}
+	}
+	if lc := st.LastCast; lc.Active {
+		p := c.Pattern(lc.Pattern)
+		v.LastCast = &CastView{Pattern: c.WaypointIDs(p.Waypoints), Shape: c.Shape(p.Shape).ID,
+			CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted}
 	}
 	for _, sc := range st.Stack.Live(s.now(), s.rules.Limit()) {
 		v.Stack = append(v.Stack, StackScanView{

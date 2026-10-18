@@ -36,7 +36,7 @@ internal/
   auth/        Google sign-in, access tokens, the auth middleware
   user/        players, helpers and admins
   teams/       teams of teams.size (6) players with a leader, lobby → game
-  teamstate/   each team's selection, scan stack, visited waypoints and completed patterns
+  teamstate/   each team's selection, scan stack, visited waypoints, completed patterns and last cast; publishes team_state, including when a scan goes stale
   server/      wires the use cases together; /healthz and the live event stream
   platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
 cmd/
@@ -147,17 +147,17 @@ Full request and response shapes and every error code: **http://localhost:3000/d
 | POST | `/api/teams/join` | Bearer | `{"team_id"}` (6 digits) → the team |
 | POST | `/api/teams/leave` | Bearer | Leave your team (lobby only) |
 | PUT | `/api/teams/me/ready` | Bearer | `{"ready": bool}` → the team (non-leaders, lobby only) |
-| POST | `/api/teams/me/start` | Bearer | Leader only: `LOBBY` → `IN_GAME` → the team |
+| POST | `/api/teams/me/start` | Bearer | Leader only: `LOBBY` → `IN_GAME` → the team. Every member's stream gets the `IN_GAME` `team`, then the team's empty `team_state` |
 | GET | `/api/game/shapes` | Bearer | The selectable shapes (`id`, `name`, `patterns` count, distinct `points` sizes) and the timing rules `scan_window_ms`, `scan_grace_ms`, `max_pattern_points`; the same for every user, static while running |
-| GET | `/api/teams/me/state` | Bearer | Your team's visited waypoints, completed patterns and shapes, selection and live scan stack |
+| GET | `/api/teams/me/state` | Bearer | Your team's state (`TeamState`, the same JSON as the `team_state` event): visited waypoints, completed patterns and shapes, selection, `last_cast` (the newest cast, or `null`) and live scan stack |
 | PUT | `/api/teams/me/state/selection` | Bearer | `{"shape"}`: select the shape to attempt; always empties the scan stack |
 | DELETE | `/api/teams/me/state/selection` | Bearer | Give up the selection (and its stack) |
 | POST | `/api/teams/me/state/scans` | Bearer | `{"waypoint_id"}` (4 digits) → `scan_added` or `pattern_completed`; `409` if the waypoint or member is already in the stack. A waypoint that isn't part of the shape's patterns is still pushed (poisoning the selection until a reselect). ⚠ raw ID until QR verification exists |
-| GET | `/api/teams/me/events` | Bearer | Server-sent events: `team` or `no_team`, then `team_state` if you're in a team; then one event per change; `: ping` after 25 s (`live.heartbeat`) with no event |
+| GET | `/api/teams/me/events` | Bearer | Server-sent events: `team` or `no_team`, then `team_state` if you're in a team; then one full snapshot per change, including a `team_state` the server sends by itself when a correct scan goes stale (65 s, `game.scan_window` + `game.scan_grace`, after it); `: ping` after **25 s** (`live.heartbeat`) with no event; a stream **16** (`live.subscriber_buffer`) events behind is dropped. Full reference: [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream) |
 
 Responses use the envelope `{"success": bool, "code"?: string, "message"?: string, "payload"?: any}`. `code` is a stable identifier for errors the frontend should handle, e.g. `team_full`; auth's are `invalid_body`, `invalid_code`, `user_not_found` (`/auth/token`) and `missing_token`, `invalid_token` (any Bearer route). `user_not_found` has two statuses: **`404` on `POST /auth/token`** (the login code's user was deleted; no token is involved) and **`401` on `GET /api/me`** (a valid token names a user that no longer exists, so the caller must sign in again). An unknown path is `404 not_found` and a wrong method `405 method_not_allowed`, also as envelopes. A response that fails to encode is a complete `500 internal error`, never a truncated body.
 
-Each use case's README has the full details: rules, error codes and event shapes.
+Each use case's README has the full details: rules, error codes and event shapes. The live stream (every event, what triggers it, ordering, heartbeat, reconnection) is documented in [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Everything a team sees about the game arrives as one `team_state` object; see AGENTS.md §17.
 
 ## Configuration
 

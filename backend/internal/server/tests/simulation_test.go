@@ -376,3 +376,28 @@ func TestSimRaceSameWaypoint(t *testing.T) {
 		})
 	}
 }
+
+// TestSimStaleScanReachesEveryone checks the expiry timer in real time: after
+// one scan, with nobody acting, every player's screen sees the stack empty
+// once the scan is older than window + grace, and every countdown resets.
+func TestSimStaleScanReachesEveryone(t *testing.T) {
+	_, cs := simTeam(t, "square", func(int) (time.Duration, time.Duration) { return 10 * time.Millisecond, 10 * time.Millisecond })
+	if status, code, _, err := cs[0].scan(simSquare[0]); err != nil || status != http.StatusOK {
+		t.Fatalf("scan: %d %s %v", status, code, err)
+	}
+	for _, c := range cs {
+		eventually(t, "player sees the scan", func() bool {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return len(c.stack) == 1
+		})
+	}
+	time.Sleep(simWindow + simGrace)
+	for _, c := range cs {
+		eventually(t, "player sees the stale scan dropped", func() bool {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return len(c.stack) == 0 && c.gate.started.IsZero()
+		})
+	}
+}

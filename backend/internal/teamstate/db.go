@@ -11,7 +11,7 @@ import (
 )
 
 // db is the team state use case's SQL: the per-team tables (team_scan,
-// team_pattern, team_selection), read at startup and by reconcile, and
+// team_pattern, team_selection, team_cast), read at startup and by reconcile, and
 // written through by write.go, one transaction per operation. The content
 // tables belong to the atlas use case.
 type db struct {
@@ -24,6 +24,15 @@ type teamRows struct {
 	patterns  []int         // team_pattern keys
 	selection *selectionRow // team_selection, if any
 	stack     []scanRow     // the stack: newest scans after the selection, oldest first
+	lastCast  *castRow      // the newest team_cast row, if any
+}
+
+// castRow is a team_cast row.
+type castRow struct {
+	patternID        int
+	castBy           uuid.UUID
+	castAt           time.Time
+	alreadyCompleted bool
 }
 
 // selectionRow is a team_selection row.
@@ -80,6 +89,23 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 		return nil, err
 	}
 
+	// The newest cast per team.
+	rows, err = d.pool.Query(ctx, `
+		SELECT DISTINCT ON (team_id) team_id, pattern_id, cast_by, cast_at, already_completed
+		FROM team_cast`+filter+`
+		ORDER BY team_id, id DESC`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	var cast castRow
+	if _, err := pgx.ForEachRow(rows, []any{&id, &cast.patternID, &cast.castBy, &cast.castAt, &cast.alreadyCompleted}, func() error {
+		row := cast
+		get(id).lastCast = &row
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
 	rows, err = d.pool.Query(ctx, "SELECT team_id, shape_id, selected_by, selected_at FROM team_selection"+filter, teamID)
 	if err != nil {
 		return nil, err
@@ -130,12 +156,16 @@ func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uu
 	return err
 }
 
-// insertCompletingScan logs a scan that completed a pattern, in one
-// transaction: the team_scan row, the team_pattern row (no-op if the pattern
-// was completed before), and deleting the selection, which also empties the
-// stack. wrong is always false here (a wrong scan can't complete), but it's
-// passed through for one uniform call.
-func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, wrong bool) error {
+// insertCompletingScan logs a scan that completed a pattern (a cast), in one
+// transaction, in order:
+//  1. INSERT team_scan: the scan itself
+//  2. INSERT team_pattern … ON CONFLICT DO NOTHING: the first completion only
+//  3. INSERT team_cast: every cast, repeats included (alreadyCompleted)
+//  4. DELETE team_selection: which also empties the stack
+//
+// wrong is always false here (a wrong scan can't complete), but it's passed
+// through for one uniform call.
+func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, wrong, alreadyCompleted bool) error {
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, $5)",
@@ -145,6 +175,11 @@ func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string,
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO team_pattern (team_id, pattern_id, completed_at) VALUES ($1, $2, $3)
 			ON CONFLICT DO NOTHING`, teamID, patternID, at); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed)
+			VALUES ($1, $2, $3, $4, $5)`, teamID, patternID, userID, at, alreadyCompleted); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, "DELETE FROM team_selection WHERE team_id = $1", teamID)

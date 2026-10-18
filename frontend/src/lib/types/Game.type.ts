@@ -30,6 +30,14 @@ export const TeamStateSchema = z.object({
     patterns: z.array(z.array(z.string())),
     shapes: z.array(z.string()),
     selection: z.object({ shape: z.string(), selected_by: z.string(), selected_at: z.string() }).nullable(),
+    // The team's most recent cast, kept until the next one.
+    last_cast: z.object({
+        pattern: z.array(z.string()),
+        shape: z.string(),
+        cast_by: z.string(),
+        cast_at: z.string(),
+        already_completed: z.boolean(),
+    }).nullable(),
     stack: z.array(StackScanSchema),
 });
 

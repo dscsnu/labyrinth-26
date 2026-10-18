@@ -35,12 +35,13 @@ Every number below that comes from `config.toml` is shown with its current value
 2. **Share the code.** The leader tells teammates the code (out of band: in person, chat).
 3. **Join.** Each teammate sends `POST /api/teams/join {"team_id"}` until the team has **6** (`teams.size`). Members are kept in join order.
 4. **Ready.** Each non-leader sends `PUT /api/teams/me/ready {"ready": true}`. They can un-ready, leave and rejoin while in the lobby.
-5. **Start.** The leader sends `POST /api/teams/me/start`. With exactly **6** (`teams.size`) members, all non-leaders ready, the team becomes `IN_GAME` and its roster is frozen. From here `teamstate` takes over.
+5. **Start.** The leader sends `POST /api/teams/me/start`. With exactly **6** (`teams.size`) members, all non-leaders ready, the team becomes `IN_GAME` and its roster is frozen. From here `teamstate` takes over: right after the `IN_GAME` `team` event, every member gets the team's (empty) `team_state` through `Rules.OnStart`.
 6. **Live updates.** Every member's event stream (`GET /api/teams/me/events`) gets the whole team after every change, and `no_team` when they leave.
 
 - **Why the leader doesn't ready up.** Starting is the leader's "ready". A separate flag would only add a state that can disagree with pressing start.
 - **Why join order decides the next leader.** It's stable, visible to everyone, and survives a restart (`joined_at`, ties broken by `user_id`).
 - **Why the roster freezes at start.** `teamstate` reads the team without its lock and relies on the members never changing once `IN_GAME`.
+- **Why `OnStart` is a callback.** A start must also send the team's `team_state` (AGENTS.md §17: everything about the game loop reaches clients through it), but teams may not import teamstate (AGENTS.md §4: teamstate imports teams). So `server.Build` passes `OnStart`, the same way it passes auth's `onSignIn` → `RefreshProfile`.
 
 ## How each file works
 
@@ -61,6 +62,7 @@ Every number below that comes from `config.toml` is shown with its current value
 
 ### `write.go`: writes, each written through
 - **`Create`**, **`Join`**, **`Leave`**, **`SetReady`** and **`Start`** each follow the [write-through](#the-write-through) steps, numbered in the code.
+- **`Start`**, after step 6 publishes the `IN_GAME` `team`, calls **`Rules.OnStart(team)`** if it's set, still holding the team's entry lock, so each member's stream gets `team` before whatever the hook publishes. `server.Build` sets it to `teamstate.Store.PublishTeam`, which publishes the team's `team_state`. A rejected start, or one whose persist fails, never calls it.
 - **`RefreshProfile(userID, name, avatarURL)`** updates a member's `Name` and `AvatarURL` in memory and publishes `team`. Called by auth's sign-in hook (wired in `server.Build`) after every successful sign-in, with the user as `userprofile` now stores it. Steps: 1 lock (`lockUsersTeam`), 2 validate (anything changed?), 3 build (clone `Members`, set the two fields), 5 apply, 6 publish. **No persist:** the user use case has already saved `userprofile`, and teams reads names and avatars from it at load. A no-op when the user is in no team or nothing changed. Returns nothing.
 - **`equalPtr(a, b)`**: both `nil`, or both pointing to equal strings. Compares avatars.
 - The rule errors are declared here.
@@ -76,6 +78,7 @@ Every number below that comes from `config.toml` is shown with its current value
   - `mapMemberInsertErr` maps the `teammember_user_id_key` violation to `errUserInTeam`.
 
 ### `store.go`: the in-memory layout
+- **`Rules`**: the settings `server.Build` passes in. `Size` (`teams.size`), `NameMaxLength` (`teams.name_max_length`), `WriteTimeout` (`storage.write_timeout`), `CodeAttempts` (`teams.code_attempts`), and `OnStart func(Team)`, not from config.toml: the start hook (see `write.go`). `nil` means no hook (the teams tests, `cmd/loadtest`).
 - **`Load`** builds memory at startup.
 - **`persist`** runs a write detached from the request, capped at **5 s** (`storage.write_timeout`).
 - **`lockUsersTeam`** finds and locks a user's team, retrying if the user moved team between lookup and lock.
@@ -157,7 +160,7 @@ Every function in `write.go`, marked in the code:
 | `Join` | 1, 2, 4, 3, 5, 6 | `insertMember` | (b) Postgres sets `joined_at` and returns the member with their profile |
 | `Leave` | 1–6 | `removeMember` | |
 | `SetReady` | 1–6 | `updateReady` | |
-| `Start` | 1, 2, 4, 3, 5, 6 | `updateStarted` | (b) Postgres sets `started_at` |
+| `Start` | 1, 2, 4, 3, 5, 6 (6 also calls `Rules.OnStart`) | `updateStarted` | (b) Postgres sets `started_at` |
 | `RefreshProfile` | 1, 2, 3, 5, 6 (no 4) | none | memory-only: `user` already saved `userprofile` |
 
 **On a failed persist:** `reconcile` reloads the team from Postgres, re-indexes its members, publishes, and the caller gets `500`. **SetReady** to the current value returns before step 4. **RefreshProfile** skips step 4 entirely (the data is already in `userprofile`), so it can't fail and never reconciles.
@@ -186,7 +189,7 @@ All routes need `Authorization: Bearer <token>` (`401` without).
 ```
 Emails are never included. **Error body:** `{"success": false, "code": "team_full", "message": "team is full"}`.
 
-**Live events** on `GET /api/teams/me/events`: `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar.
+**Live events** on `GET /api/teams/me/events`: `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar. On a start, `team` is followed by the team's `team_state` (sent by teamstate through `Rules.OnStart`).
 
 ## Rules and cases
 
@@ -245,7 +248,7 @@ Checked in this order:
 | Team not `LOBBY` (already started) | `409 team_locked` |
 | Not exactly **6** (`teams.size`) members | `409 team_not_full` |
 | Any non-leader not ready | `409 not_all_ready` |
-| Success | `IN_GAME`, `started_at` = Postgres `now()`; roster frozen; `team` to all members |
+| Success | `IN_GAME`, `started_at` = Postgres `now()`; roster frozen; `team` to all members, then `Rules.OnStart(team)` (in the server: `team_state` to all members) |
 
 ### Refresh a profile: `RefreshProfile` (no route; after each sign-in)
 Checked in this order:
@@ -270,6 +273,7 @@ Checked in this order:
 - **The leader starts while a member leaves:** exactly one wins, and the team stays consistent (`TestConcurrentStartAndLeave`).
 - **A user creates and joins at once:** the unique constraint on `teammember.user_id` lets only one through.
 - **`lockUsersTeam`** re-checks membership after taking the lock, and retries up to 3 times if the user moved team.
+- **The start hook runs under the team's lock.** `OnStart` is called holding `entry.mu`, after apply, so the team is already `IN_GAME` in memory (`ByID` and `ForUser` see it) and its `team` event is queued first. The hook must not call back into a write on the same team (it would deadlock); teamstate's `PublishTeam` only reads teams (`ByID`, which takes `Store.mu` briefly) and takes teamstate's own entry lock. Lock order across the two: teams `entry.mu` → teamstate entry.
 - **A sign-in during a team write:** `RefreshProfile` takes the same entry lock, so it applies before or after the write, never in between.
 - **A sign-in racing the same user's create or join** can leave the old name in memory. If `insertMember` (or `insertTeam`) read `userprofile` before the sign-in's upsert committed, and the hook runs before that write's apply step adds the user to `userTeam`, `RefreshProfile` finds no team and does nothing. The new name shows after the user's next sign-in or a restart. Postgres is never wrong: it's only memory.
 
@@ -302,7 +306,8 @@ Checked in this order:
   - reads work with the database closed (`TestReadsDoNotTouchDatabase`)
   - a failed write leaves memory unchanged, and a hand-edited database is reconciled (`TestFailedWriteReconciles`)
   - `TestRefreshProfile`: a new name and avatar show in `ByID` and publish `team`; the same values again, and a user in no team, publish nothing
+  - `TestStartCallsOnStart`: `Rules.OnStart` is called exactly once, with the started team, when it is already `IN_GAME` in `ByID` and its `IN_GAME` `team` event is already on a member's stream; a start before everyone is ready and a second start (`team_locked`) don't call it. Needs `teams.size` ≥ 2 (`minStartTeam`), else it skips
   - `BenchmarkForUser`: parallel `ForUser` reads of one full team; results summed into the `sinkMembers` sink
 - `internal/server/tests/teams_test.go`: every rule and error code in order; leadership handover and deletion; name validation; both races. Team size and name length come from `config.toml`, not repeated numbers.
 - `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile`: signing in again with a new name and no picture shows the new name and the old avatar in `GET /api/teams/me`.
-- `internal/server/tests/events_test.go`: `team`/`no_team` events, stream auth and cleanup.
+- `internal/server/tests/events_test.go`: `team`/`no_team` events, stream auth and cleanup; `TestStartPublishesTeamState`: on a start every open stream gets `team` then `team_state`.

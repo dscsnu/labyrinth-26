@@ -1,6 +1,6 @@
 # teamstate
 
-What each team does in the game: the shape it has selected, its stack of scans toward a pattern of that shape, the waypoints it has visited, and the patterns and shapes it has completed.
+What each team does in the game: the shape it has selected, its stack of scans toward a pattern of that shape, the waypoints it has visited, the patterns and shapes it has completed, and its last cast. It also times and publishes the one change that happens without a request: a correct scan going stale.
 
 Every number below that comes from `config.toml` is shown with its current value and its key, e.g. **1 m** (`game.scan_window`). Change the file, not the code.
 
@@ -34,7 +34,11 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Selection** | The shape a team is currently attempting. At most one per team. |
 | **Stack** | The team's accepted scans since its selection, oldest at the **bottom**, newest on **top**. It only ever holds **one scan per waypoint and one per member**, so at most **6** (`game.max_pattern_points`). |
 | **Limit** | **65 s**: the scan window **1 m** (`game.scan_window`) plus the grace **5 s** (`game.scan_grace`). The most a pattern's scans may span, bottom to top, and the age at which a *correct* scan goes stale. |
-| **Live / stale scan** | A *correct* scan in the stack is **live** while it is at most the limit old (`now − scanned_at ≤ 65 s`), and **stale** after. Stale correct scans don't count and are dropped from the bottom at the next accepted scan. |
+| **Live / stale scan** | A *correct* scan in the stack is **live** while it is at most the limit old (`now − scanned_at ≤ 65 s`), and **stale** after. Stale correct scans don't count. The **expiry timer** (below) drops them from memory and publishes the shorter stack at the first stale microsecond; the next accepted scan also drops them, whichever comes first. |
+| **Expiry timer** | At most one per team: a `Clock` timer set for the moment the stack's oldest correct scan goes stale (`scanned_at` + 65 s + 1 µs, `Stack.NextExpiry`). When it fires, `expire` drops the stale scans and publishes `team_state`. None is pending when the stack holds no correct scans (empty, cast, purged, or only wrong scans). |
+| **Clock** | Where the store gets time: `Now()` and `AfterFunc(d, f)`. `systemClock` is the real one (`time.Now`, `time.AfterFunc`); tests pass a fake through `Rules.Clock`. |
+| **Cast** | A completion: the moment the stack becomes exactly a pattern of the selected shape. Every cast is logged in `team_cast`, repeats included; `team_pattern` keeps only the first completion of each pattern. The client calls it casting a spell. |
+| **Last cast** | `State.LastCast`, `last_cast` in JSON: the team's newest cast (pattern, shape, who, when, and whether the pattern was already completed). Kept until the next cast; a new selection or a clear doesn't remove it. |
 | **Wrong scan** | A scan whose waypoint, with the correct scans already in the stack, isn't part of any pattern of the selected shape. It's still pushed (never rejected), occupies its member's one scan and its waypoint slot, poisons the selection (it can no longer complete), and **never goes stale**: it stays until the selection is purged. The client is never told which scans are wrong. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection. |
 | **Countdown** | The client's timer: **1 m** (`game.scan_window`) from the moment that phone first sees a non-empty stack. After it the phone sends no scans. The grace is never shown; it absorbs network delay (see [The client countdown and latency](#the-client-countdown-and-latency)). |
@@ -43,19 +47,22 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 **Client words.** The client's **"type"** is our **Shape**, its **"shape"** is our **Pattern**, its **"point"** is our **Waypoint**, and its **"buffer"** is our **Stack**. This README and the code always use the code's words. The full vocabulary, spells included, is in [`internal/atlas/README.md`](../atlas/README.md).
 
 ## The game flow
+0. **Start.** When the leader starts the team (teams' `Start`), every member's stream gets the `IN_GAME` `team` and then the team's `team_state`, empty: no selection, no stack, no progress. teams calls `PublishTeam` through its `Rules.OnStart` hook, wired in `server.Build`, because teams may not import teamstate (AGENTS.md §4). The play screen has its state at once, without reconnecting.
 1. **Select.** Any member selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}`. **Every selection purges the stack**, reselecting the same shape included.
 2. **Scan.** Members scan waypoints: `POST /api/teams/me/state/scans {"waypoint_id":"1001"}`. Checked against the stack's live scans, a scan is **rejected with an error and not pushed** if:
    - its **waypoint is already in the stack**, whoever scanned it, the same member included: `409 waypoint_already_scanned`
    - its **member already has a scan in the stack**: `409 member_already_scanned`
 
    Otherwise stale correct scans are dropped from the bottom and the scan is pushed on top. A scan whose waypoint doesn't fit the selected shape is pushed anyway, marked **wrong** (see [Wrong scan](#concepts)).
-3. **Complete.** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, and **the stack and the selection are purged**. The team selects again for its next attempt. A wrong scan poisons the set, so a selection with one can never complete.
-4. **Stale correct scans drop on their own.** A correct scan more than 65 s old stops counting, which frees its waypoint and its member: only that point is rescanned, the rest of the pattern isn't lost. Wrong scans never drop. Because every live correct scan is at most 65 s old and the newest is now, the correct stack always spans at most the limit, bottom to top.
+3. **Complete (cast).** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, the cast becomes `last_cast` and is logged in `team_cast`, and **the stack and the selection are purged**. The team selects again for its next attempt. A wrong scan poisons the set, so a selection with one can never complete.
+4. **Stale correct scans drop on their own.** A correct scan more than 65 s old stops counting, which frees its waypoint and its member: only that point is rescanned, the rest of the pattern isn't lost. Wrong scans never drop. Because every live correct scan is at most 65 s old and the newest is now, the correct stack always spans at most the limit, bottom to top. **The server drops it and publishes**: the team's expiry timer fires at the first stale microsecond, and every member's screen gets a `team_state` without the scan, with nobody acting.
 5. **Give up.** `DELETE /api/teams/me/state/selection` clears the selection and the stack.
 
 **"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is correct if it's in *any* pattern of the shape. Each later scan must keep the correct stack inside at least one pattern of the shape that contains everything already scanned. A scan that doesn't is wrong and is final: reselect to purge it (it never goes stale on its own).
 
 **Why the shape is selected first.** With the 2025 data any three waypoints form a triangle or a collinear pattern, so a team scanning a square passes through a "triangle" after its third scan. Only the selected shape can complete, which is what makes 4-waypoint shapes possible.
+
+**Why the server publishes expiry.** Every client must see the same stack. If each phone hid stale scans by its own clock, phones with skewed clocks would disagree, and a phone would show a scan the server no longer counts. The server owns the rule, so it announces the change (AGENTS.md §17); clients use `expires_at` only for display.
 
 **Retries.** A phone resending a scan gets `409 waypoint_already_scanned`; the app should treat that as "already in" and refresh from the returned state or the live event.
 
@@ -74,8 +81,9 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 
 ### `read.go`: types and reads
 - **Types:**
-  - `State`: the in-memory per-team snapshot, made of `Selection`, `Stack` and `StackScan` (see [Data model: memory](#data-model-memory)).
-  - `View`, `SelectionView`, `StackScanView`: the JSON shapes.
+  - `State`: the in-memory per-team snapshot, made of `Selection`, `Stack`, `StackScan` and `Cast` (see [Data model: memory](#data-model-memory)).
+  - `Cast`: one completed pattern (`Active`, `Pattern`, `By`, `At`, `AlreadyCompleted`), held as `State.LastCast`.
+  - `View`, `SelectionView`, `CastView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast`: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`.
   - `Game`, `GameShape`: the JSON of `GET /api/game/shapes`.
 - **`Stack` methods** (all on values; none modifies the receiver):
   - `NewStack(cap)` is an empty stack (exported so tests can build one).
@@ -83,26 +91,32 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `At(i)` is the i-th from the bottom.
   - `Push(sc)` returns the stack with `sc` on top. Scan never pushes onto a full stack (its scans always fit one pattern); if it did, the bottom would be dropped.
   - `Live(now, limit)` returns the correct scans at most `limit` old plus every wrong scan, bottom to top.
+  - `NextExpiry(limit)` returns the first instant the oldest correct scan is stale: its `At` + `limit` + **1 µs**, because a scan exactly `limit` old is still live (`Live` uses `≤`) and times have microsecond precision. `ok` is false when the stack holds no correct scans (wrong scans never expire). Used by `scheduleExpiry`.
 - **`newGame(atlas, rules)`** builds the `Game` once, in `Load`: for each shape in index order (`ShapeCount`, `Shape(i)`), its ID and name, how many patterns it has (`len(ShapePatterns(i))`), and the distinct sizes of those patterns (`Pattern(p).Waypoints.Len()`), ascending; plus `ScanWindowMS`, `ScanGraceMS` (`Duration.Milliseconds()`, so sub-millisecond parts are dropped) and `MaxPatternPoints` from `Rules`.
 - **Reads**, all from memory:
   - `Game()`: the prebuilt `Game`; no lock, it never changes
   - `ForTeam(teamID)` → `State`
   - `ForUser(userID)` → `View`
   - `Snapshot(userID)`: the live event for a new stream
-- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, and leaves stale correct scans out of `stack` (wrong scans are included, with no flag distinguishing them).
+- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast` (`null` when not `Active`; the shape is the pattern's `Shape`), and leaves stale correct scans out of `stack` (wrong scans are included, with no flag distinguishing them).
 
 ### `write.go`: writes, each written through
-- **`Select`**, **`ClearSelection`** and **`Scan`** each follow the [write-through](#the-write-through) steps, numbered in the code.
+- **`Select`**, **`ClearSelection`** and **`Scan`** each follow the [write-through](#the-write-through) steps, numbered in the code. After `6. publish`, still holding the lock, each calls `scheduleExpiry` for the new state.
 - **Lock-free checks first** (§6 variation (a)): `Select` resolves the shape with `Atlas.ShapeIndex`, `Scan` the waypoint with `Atlas.WaypointIndex`, both before the team and the lock.
-- **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Atlas.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (still pushed, marked `Wrong`). Completion is `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape; a wrong scan can't complete because it's in the set. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern` and `Atlas.Pattern(p).ID` is the key written to `team_pattern`.
+- **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Atlas.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (still pushed, marked `Wrong`). Completion is `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape; a wrong scan can't complete because it's in the set. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, and `next.LastCast` is set to `Cast{Active: true, Pattern: p, By: caller, At: now, AlreadyCompleted}`; `alreadyCompleted` is passed to `insertCompletingScan`.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME`.
+- **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none), `6. publish` (`publish`, which reads the roster through `Teams.ByID`). Not a write: no build, persist or apply, and it doesn't touch the expiry timer. It takes the entry lock so its event is ordered with the team's writes.
 - **Declared here:** the errors, the `Outcome…` constants, and `ScanResult`.
 
 ### `db.go`: SQL
 Only the per-team tables. The content tables are read by the atlas (`internal/atlas/db.go`).
-- **`selectTeams(ctx, teamID, stackSize)`** reads every team's stored state, or one team's (`teamID != ""`), into `teamRows`: distinct visited waypoints, completed patterns, selection, and the stack. Used by `Load` and `reconcile`. The stack query is a `JOIN LATERAL`: for each selection, the team's newest `stackSize` `team_scan` rows with `id > after_scan_id`, returned oldest first, with the `wrong` flag so wrong scans rebuild as never-stale.
+- **`selectTeams(ctx, teamID, stackSize)`** reads every team's stored state, or one team's (`teamID != ""`), into `teamRows`: distinct visited waypoints, completed patterns, the newest cast (`lastCast`, a `castRow`), selection, and the stack. The newest cast is `SELECT DISTINCT ON (team_id) … FROM team_cast ORDER BY team_id, id DESC`, served by `team_cast_team_id_idx`. Used by `Load` and `reconcile`. The stack query is a `JOIN LATERAL`: for each selection, the team's newest `stackSize` `team_scan` rows with `id > after_scan_id`, returned oldest first, with the `wrong` flag so wrong scans rebuild as never-stale.
 - **`insertScan`**: one `team_scan` row, with the `wrong` flag (a scan that doesn't complete anything).
-- **`insertCompletingScan`**: one transaction: `team_scan` row, `team_pattern` row (`ON CONFLICT DO NOTHING`), delete `team_selection`.
+- **`insertCompletingScan`**: one `pgx.BeginFunc` transaction, four statements in order:
+  1. `INSERT team_scan`: the scan itself (`wrong` is always false here)
+  2. `INSERT team_pattern … ON CONFLICT DO NOTHING`: the first completion only
+  3. `INSERT team_cast (team_id, pattern_id, cast_by, cast_at, already_completed)`: every cast, repeats included
+  4. `DELETE team_selection`: which also empties the stack
 - **`upsertSelection`**: upserts `team_selection` with `after_scan_id` = the team's latest `team_scan.id` (0 if none). That's the purge: earlier scans are no longer after it.
 - **`deleteSelection`**: deletes `team_selection`, and fails unless exactly one row went (memory had a selection, so Postgres must too).
 
@@ -114,24 +128,33 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
   |---|---|
   | `WaypointIndex(id)` | `Scan`: unknown waypoint → `404 unknown_waypoint`; `stateOf`: a stored stack scan's waypoint |
   | `ShapeIndex(id)` | `Select`: unknown shape → `404 unknown_shape`; `stateOf`: a stored selection's shape |
-  | `PatternByID(id)` | `stateOf`: a stored `team_pattern` key → pattern index |
+  | `PatternByID(id)` | `stateOf`: a stored `team_pattern` key, or the newest `team_cast.pattern_id`, → pattern index |
   | `SetOf(ids)` | `stateOf`: stored visited waypoints → `State.Waypoints` |
   | `PatternFor(set)` | `Scan`: is the stack plus this scan exactly a pattern? |
   | `FitsShape(shape, set)` | `Scan`: is the scan **wrong**? |
-  | `WaypointIDs(set)` | `view` (visited waypoints, completed patterns), `ScanResult.Pattern` |
+  | `WaypointIDs(set)` | `view` (visited waypoints, completed patterns, `last_cast.pattern`), `ScanResult.Pattern` |
   | `ShapePatterns(shape)` | `newGame`: each shape's pattern count and sizes |
   | `ShapeCount()` | `newGame`: how many shapes |
   | `Waypoint(i)` | `view`: a stack scan's waypoint ID |
-  | `Shape(i)` | `view` (completed shapes, selection), `newGame` |
-  | `Pattern(i)` | `Scan` (the completed pattern's shape and Postgres `ID`), `stateOf` (a completed pattern's shape), `view`, `newGame` |
-- **`Rules`** are the settings from `config.toml`: `ScanWindow`, `ScanGrace`, `MaxPatternPoints`, `WriteTimeout`, and `Clock` (the clock; nil means the real one, tests pass a fake). `Limit()` is window + grace.
-- **`Load(ctx, pg, atlas, teams, hub, log, rules)`** reads every team's stored state, checking it against the atlas, and builds the `Game` (`newGame`). It runs after `atlas.Load` (it's handed the `*atlas.Atlas`) and after `teams.Load` (it reads teams through the `Teams` interface).
-- **`stateOf(teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes.
+  | `Shape(i)` | `view` (completed shapes, selection, `last_cast.shape`), `newGame` |
+  | `Pattern(i)` | `Scan` (the completed pattern's shape and Postgres `ID`), `stateOf` (a completed pattern's shape), `view` (patterns, `last_cast`), `newGame` |
+- **`Clock`** is the store's time source, an interface: `Now()` (UTC, truncated to microseconds) and `AfterFunc(d, f) (stop func() bool)` (call `f` in its own goroutine after `d`, at once if `d ≤ 0`; `stop` cancels it if it hasn't run). **`systemClock`** is the real one: `time.Now().UTC().Truncate(time.Microsecond)` and `time.AfterFunc(d, f).Stop`.
+- **`Rules`** are the settings from `config.toml`: `ScanWindow`, `ScanGrace`, `MaxPatternPoints`, `WriteTimeout`, and `Clock` (a `Clock`; nil means `systemClock`, tests pass a fake). `Limit()` is window + grace.
+- **`Load(ctx, pg, atlas, teams, hub, log, rules)`** reads every team's stored state, checking it against the atlas, and builds the `Game` (`newGame`). It runs after `atlas.Load` (it's handed the `*atlas.Atlas`) and after `teams.Load` (it reads teams through the `Teams` interface). Once **the whole map is built**, it locks each entry in turn and calls `scheduleExpiry`, so stacks from before the restart keep ageing. A timer already due fires at once, and its callback reads the map, which is why arming waits for it to be complete.
+- **`stateOf(teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes. The newest `team_cast` row becomes `LastCast` (`last cast: unknown pattern N` if the atlas lacks it).
 - **`lockTeam`** gets or creates a team's entry and locks it.
 - **`persist`** runs a `db.go` write detached from the request, capped at **5 s** (`storage.write_timeout`).
-- **`reconcile`** reloads one team's state from Postgres after a failed write and publishes it.
+- **`reconcile`** reloads one team's state from Postgres after a failed write, publishes it and re-arms its timer (`scheduleExpiry`). If the reload fails too, memory and the timer stay as they were.
+- **`scheduleExpiry(e, teamID, st)`**, called with `e.mu` held after every apply (`Select`, `ClearSelection`, `Scan`, `reconcile`, `expire`) and by `Load`: cancels the pending timer (`e.stopExpiry`), then, if `st.Stack.NextExpiry(limit)` is ok, arms `clock.AfterFunc(at − now, func() { expire(teamID) })` and keeps its `stop` in `e.stopExpiry`. So each team has **at most one** timer, for its oldest correct scan.
+- **`expire(teamID)`**, the timer's callback, in its own goroutine. Steps, marked in the code like a write:
+  1. lock the entry (`lockTeam`)
+  2. validate: `Live(now, limit)`. If nothing is stale (a write purged or rebuilt the stack since the timer was set), re-arm and return: **nothing published**
+  3. build: a new stack of the live scans (wrong ones included)
+  5. apply, 6. publish `team_state`, then `scheduleExpiry` for the next oldest correct scan
+
+  There's no step 4: it's a **memory-only change** (AGENTS.md §6). Postgres never stores the stack, only `team_scan`; `Load` rebuilds it, and the same scans are stale there by their stored times.
 - **`publish`** and **`event`** send `team_state` to every member.
-- **`now`** is the clock: `Rules.Clock` if set, else the real clock (UTC, truncated to microseconds, Postgres's precision, so a restart reproduces times exactly).
+- **`now`** returns `clock.Now()`: UTC, truncated to microseconds (Postgres's precision), so a restart reproduces times exactly.
 
 ## Data model: memory
 ```
@@ -144,12 +167,14 @@ Store
   hub      *live.Hub                 where team_state events go
   log      *slog.Logger
   mu       sync.RWMutex              guards the map below; never held during I/O
-  states   map[teamID]*entry         created on a team's first write
-  now      func() time.Time          the clock
+  states   map[teamID]*entry         created on a team's first write (or expiry)
+  clock    Clock                     Rules.Clock, or systemClock
 
 entry
-  mu   sync.Mutex                    writers to this team queue here
-  cur  atomic.Pointer[State]         the current snapshot; readers load it lock-free
+  mu          sync.Mutex             writers (and expire) to this team queue here
+  cur         atomic.Pointer[State]  the current snapshot; readers load it lock-free
+  stopExpiry  func() bool            cancels the pending expiry timer; nil if none.
+                                     Guarded by mu
 
 State                                (never modified once stored)
   Waypoints  atlas.WaypointSet  uint64      visited waypoints, bit i = waypoint index i
@@ -161,6 +186,12 @@ State                                (never modified once stored)
     By       uuid.UUID               the member who selected
     At       time.Time               when
   Stack      Stack                   scans since the selection
+  LastCast   Cast                    the newest cast; kept until the next one
+    Active           bool            false → never cast; other fields zero
+    Pattern          int             the pattern's index in the atlas
+    By               uuid.UUID       the member whose scan completed it
+    At               time.Time       when
+    AlreadyCompleted bool            the team had cast this pattern before
 
 Stack                                a value; Push returns a new one
   scans    [16]StackScan             circular buffer; 16 = config.MaxTeamSize,
@@ -176,10 +207,11 @@ StackScan
   Wrong    bool                      the scan didn't fit the selected shape;
                                      never ages out; not exposed in View
 ```
-- **Size:** a `State` is a fixed 1248 bytes (`Stack` 920, `Selection` 56), so a new snapshot is a plain struct copy with no heap allocation for its contents. 10,000 teams' states are about 12 MB.
+- **Size:** a `State` is a fixed 1312 bytes (`Stack` 920, `Selection` 56, `Cast` 64; measured with `unsafe.Sizeof` on a copy of the layout, linux/amd64), so a new snapshot is a plain struct copy with no heap allocation for its contents. 10,000 teams' states are about 13 MB.
 - **The sets are the atlas's types** (`atlas.WaypointSet`, `atlas.PatternSet`, `atlas.ShapeSet`), over the atlas's indexes. How they're laid out and why: [`internal/atlas/README.md`](../atlas/README.md), "How waypoints and patterns are stored".
 - **Why a circular buffer:** dropping stale scans from the bottom never moves the rest. `At(i)` is `scans[(bottom+i) % Cap]`.
-- **Stale correct scans** stay in `Stack` until the next accepted scan rebuilds it from the live ones (or a selection or completion purges it). Every reader uses `Live`, so they're never seen. Wrong scans never leave until a purge.
+- **Stale correct scans** stay in `Stack` until the expiry timer fires (the first stale microsecond) or the next accepted scan rebuilds the stack from the live ones (or a selection or completion purges it). Every reader uses `Live`, so they're never seen, even in the moment before `expire` runs. Wrong scans never leave until a purge.
+- **The timer lives on the `entry`, not in `State`:** it's not data a client sees, and snapshots stay plain values.
 - **The array is 16 long** although only **6** (`game.max_pattern_points`) are used, because Go array sizes must be constants and `game.max_pattern_points` is read at startup. 16 is the most `teams.size` allows, and a pattern can't have more points than members.
 
 ## Data model: Postgres
@@ -192,8 +224,9 @@ Per team, written through:
 | `team_scan` | `0003`, `0006` | `id` BIGINT identity, `team_id`, `waypoint_id`, `user_id`, `scanned_at`, `wrong` | One row per **accepted** scan (rejected scans are never written): the audit trail, and the source of the stack. `wrong` (`0006`) marks a scan that didn't fit the selected shape, so a restart reproduces it as never-stale. `0005` records the table's `COMMENT`, correcting 0003's SQL comment ("every scan, including repeats"). One index, `team_scan_team_id_idx` on `(team_id, id DESC)` (`0004`), serves the stack query and every other query by team; `0005` dropped 0003's redundant `team_scan_team_idx` on `(team_id)`. |
 | `team_pattern` | `0003` | `team_id`, `pattern_id`, `completed_at` | PK `(team_id, pattern_id)`: a pattern counts once |
 | `team_selection` | `0004` | `team_id`, `shape_id`, `selected_by`, `selected_at`, `after_scan_id` BIGINT | PK `team_id`: one selection per team. `after_scan_id` is the team's latest `team_scan.id` when the shape was selected: the stack is the scans after it |
+| `team_cast` | `0007` | `id` BIGINT identity PK, `team_id` VARCHAR(6), `pattern_id` INTEGER, `cast_by` UUID, `cast_at` TIMESTAMPTZ, `already_completed` BOOLEAN, all `NOT NULL` | One row per **cast**, repeats included (unlike `team_pattern`): the cast log, and the source of `LastCast`. `pattern_id` → `pattern` (a cast is of a real pattern); `cast_by` → `userprofile` (a real user); `already_completed` records whether `team_pattern` already had the pattern. `id` orders casts: the highest is the newest. Index `team_cast_team_id_idx` on `(team_id, id DESC)` serves the newest-cast query. No unique constraint: any number of casts per team and pattern |
 
-Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`.
+Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_cast` is written only inside `insertCompletingScan`'s transaction, so a cast is logged exactly when its scan and its `team_pattern` row are.
 
 **The stack isn't a table.** It's derived: the newest **6** (`game.max_pattern_points`) `team_scan` rows with `id > after_scan_id`. Selecting moves `after_scan_id` to the latest scan (purge); completing or clearing deletes the selection (no selection, no stack). Stale correct rows come back from the query but are filtered by time, exactly as in memory; wrong rows are kept, exactly as in memory. So a restart reproduces the live stack exactly.
 
@@ -204,8 +237,14 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`.
 | `DISTINCT waypoint_id FROM team_scan` | `State.Waypoints` |
 | `team_pattern` | `State.Patterns`, and `State.Shapes` from each pattern's shape |
 | `team_selection` | `State.Selection` |
+| newest `team_cast` row per team (`DISTINCT ON (team_id) … ORDER BY team_id, id DESC`) | `State.LastCast` (`Active: true`; none → zero `Cast`, `last_cast: null`) |
 | newest **6** (`game.max_pattern_points`) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag) |
 | (none: built from the atlas and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
+| (none: memory-only) | `entry.stopExpiry`, the expiry timer: re-armed by `Load` for every team from its reloaded stack, so it fires at the same moment it would have |
+
+**Casts before migration `0007` aren't logged**, so a team whose only casts predate it reloads with `last_cast: null` although its `patterns` are non-empty. Every cast since is logged, and the newest row is exactly the `LastCast` memory held, so a restart reproduces it.
+
+**`expire` writes nothing.** It only drops stale correct scans from memory. After a restart, `Load` reads those rows again (they're still after `after_scan_id`), but they're stale by their stored `scanned_at`: `view` leaves them out, and the timer `Load` arms is already due, so `expire` drops them at once. Before and after, every reader sees the same stack.
 
 Why the stacks agree: memory pushes every accepted scan and only drops stale *correct* scans, which are always the oldest. The live correct scans fit one pattern, so there are at most **6** (`game.max_pattern_points`) of them, and they're the newest rows since the selection — exactly what the query returns, after the same time filter. Wrong scans are never dropped, in memory or after a restart.
 
@@ -214,7 +253,7 @@ The server allows a pattern's scans to span **65 s** (window + grace), measured 
 
 **The rule** (`frontend/src/lib/game/scanGate.ts`, class `ScanGate`):
 1. **Start** the countdown when this client first sees a **non-empty** stack: its own `200` for the first scan, or a teammate's scan arriving as a `team_state` event. Later scans don't restart it.
-2. **Reset** it whenever the client sees an **empty** stack: a new selection, a completion, a clear.
+2. **Reset** it whenever the client sees an **empty** stack: a new selection, a completion, a clear, or the server's expiry event dropping the last correct scan.
 3. **Stop sending** once **1 m** (`game.scan_window`, from `scan_window_ms`) has passed: the phone sends no scan at all. The team selects again to start over.
 
 The window comes from `GET /api/game/shapes`; the grace is never shown or counted down.
@@ -270,7 +309,7 @@ Team `482913`, members A–F, 2025 seed (square = `1001 1002 1007 1008` = indexe
 | 00:06 | A: scan `1007` | **A already has a scan in the stack** | unchanged | unchanged | `409 member_already_scanned` |
 | 00:07 | C: scan `1001` | **1001 is already in the stack** | unchanged | unchanged | `409 waypoint_already_scanned` |
 | 00:10 | C: scan `1007` | set 67 fits the square; 67 is also a **triangle** (shape 4 ≠ 2), so no completion | `… 1007/C@10` | `team_scan` +1 | `scan_added` |
-| 00:12 | D: scan `1008` | set 195 = square, shape 2 = selection | **purged**; selection cleared | `team_scan` +1, `team_pattern` +1, `team_selection` deleted | `pattern_completed`, `pattern ["1001","1002","1007","1008"]` |
+| 00:12 | D: scan `1008` | set 195 = square, shape 2 = selection | **purged**; selection cleared; `LastCast` = square 195 by D @12 | `team_scan` +1, `team_pattern` +1, `team_cast` +1, `team_selection` deleted | `pattern_completed`, `pattern ["1001","1002","1007","1008"]`, `last_cast.cast_by` = D |
 | 00:13 | D: scan `1008` (a retry) | no selection | unchanged | unchanged | `409 no_shape_selected` |
 
 ### 2. A wrong scan poisons the selection
@@ -312,8 +351,38 @@ Bottom scan at 00:00, everything else in order, top scan at:
 | 01:05.000000 | exactly 65 s | completes (the limit is inclusive) |
 | 01:05.000001 | 65 s + 1 µs | the bottom scan is stale and dropped first: `scan_added` |
 
+### 6. A scan goes stale with nobody acting
+Limit 65 s, so a correct scan stamped at *t* is live through *t* + 65 s exactly and stale from *t* + 65 s + 1 µs.
+
+| Time | What happens | Timer after | Stack (memory) | Postgres | Event to every member |
+|---|---|---|---|---|---|
+| 00:00 | F: select `square` | none (no correct scans) | empty | `team_selection` upserted | `team_state`, stack `[]` |
+| 00:10 | A: `1001` | armed for **01:15.000001** | `1001/A@10` | `team_scan` +1 | `team_state`, stack `[1001]`, `expires_at 01:15` |
+| 00:30 | B: `1002` | cancelled and re-armed for 01:15.000001 (A's is still the oldest) | `1001/A@10 1002/B@30` | `team_scan` +1 | `team_state`, stack `[1001, 1002]` |
+| 01:15.000000 | (nothing: A's scan is exactly 65 s old, still live) | | | | none |
+| 01:15.000001 | **Timer fires**: `expire` finds `1001/A` stale, drops it | armed for **01:35.000001** (B's) | `1002/B@30` | unchanged (memory-only) | `team_state`, stack `[1002]` |
+| 01:20 | A: `1001` again | re-armed for 01:35.000001 (B's is now the oldest) | `1002/B@30 1001/A@80` | `team_scan` +1 | `team_state`, stack `[1002, 1001]` |
+| 01:35.000001 | Timer fires: drops `1002/B` | armed for **02:25.000001** (A's rescan) | `1001/A@80` | unchanged | `team_state`, stack `[1001]` |
+| 02:25.000001 | Timer fires: drops `1001/A` | **none** (no correct scans left) | empty; selection still `square` | unchanged | `team_state`, stack `[]` |
+
+Every phone's countdown resets on the empty stack, and A or B can scan again under the same selection. Had the backend restarted at 01:50, `Load` would rebuild `1001/A@10 1002/B@30 1001/A@80` from `team_scan` (every row after `after_scan_id`, newest 6; `expire` never deletes rows). The first two are stale (their expiries, 01:15.000001 and 01:35.000001, are past), so `view` already shows `[1001]`, and the timer `Load` arms is due at once: `expire` drops both, leaving the same `1001/A@80` stack as before the restart. Its event goes to nobody (no streams are open before the backend serves); each member gets the state as their stream reconnects.
+
+A wrong scan arms nothing: a stack of only wrong scans has no timer at all, and never shrinks until a purge.
+
+### 7. `last_cast` after a cast and a repeat
+| Time | Request | `last_cast` after | `patterns` | `team_cast` rows | `team_pattern` rows |
+|---|---|---|---|---|---|
+| (start) | | `null` | `[]` | 0 | 0 |
+| 00:12 | D completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":D,"cast_at":"…12:00:12Z","already_completed":false}` | `[[1001,1002,1007,1008]]` | 1 | 1 |
+| 01:00 | F selects `triangle` | **unchanged** (a selection doesn't clear it) | unchanged | 1 | 1 |
+| 02:00 | F selects `square` again | unchanged | unchanged | 1 | 1 |
+| 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true}` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
+| (restart) | | the row with the highest `id`: the 02:04 cast, `already_completed: true` | unchanged | 2 | 1 |
+
+`ScanResult.already_completed` and `last_cast.already_completed` agree for the scan that cast.
+
 ## The write-through
-Every function in `write.go` runs these steps, marked in the code:
+Every write in `write.go` (`Select`, `ClearSelection`, `Scan`) runs these steps, marked in the code (`PublishTeam` is not a write; see the table):
 1. **lock** the team's entry (`lockTeam`)
 2. **validate**:
    - first the atlas lookup (shape or waypoint ID) and the team, **before** the lock (an `IN_GAME` team's status and roster never change). This is AGENTS.md §6 variation (a); the code labels it `2. validate, before 1. lock`
@@ -321,11 +390,20 @@ Every function in `write.go` runs these steps, marked in the code:
 3. **build** the next `State` (a copy)
 4. **persist**: one `db.go` call (`insertScan`, `insertCompletingScan`, `upsertSelection` or `deleteSelection`), detached from the request and capped at **5 s** (`storage.write_timeout`)
 5. **apply**: `entry.cur.Store(&next)`
-6. **publish** `team_state` to every member, still holding the lock so a team's events are in order
+6. **publish** `team_state` to every member, still holding the lock so a team's events are in order; then `scheduleExpiry` re-arms (or cancels) the team's timer for the new state
+
+| Write | `db.go` call (step 4) |
+|---|---|
+| `Select` | `upsertSelection` |
+| `ClearSelection` | `deleteSelection` |
+| `Scan`, no completion (wrong included) | `insertScan` |
+| `Scan` that casts | `insertCompletingScan` (`team_scan`, `team_pattern`, `team_cast`, delete `team_selection`, one transaction) |
+| `expire` (timer) | none: a **memory-only change** (AGENTS.md §6); see [Memory ↔ Postgres](#memory--postgres) |
+| `PublishTeam` (start hook) | none: not a write. Only steps 2, 1 and 6; the state is published as it is |
 
 **On a failed persist:** `reconcile` reloads the team from Postgres (Postgres wins), publishes the result, and returns the error, which becomes a `500`. Nothing from the failed write is applied.
 
-**Rejections and no-ops return before step 4:** every `409`, and clearing when there's nothing to clear. Nothing is written and nothing is published. Reselecting is **not** a no-op: it always purges, writes and publishes.
+**Rejections and no-ops return before step 4:** every `409`, clearing when there's nothing to clear, and an `expire` that finds nothing stale. Nothing is written and nothing is published. Reselecting is **not** a no-op: it always purges, writes and publishes.
 
 ## API
 All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1 MiB** (`server.max_body_bytes`) get `400 invalid_body`.
@@ -346,6 +424,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "patterns": [["1003", "1004", "1005", "1006"]],
   "shapes": ["square"],
   "selection": {"shape": "triangle", "selected_by": "6f1c…", "selected_at": "2026-10-17T12:00:00Z"},
+  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false},
   "stack": [
     {"waypoint_id": "1001", "user_id": "9a2b…", "scanned_at": "2026-10-17T12:00:01Z", "expires_at": "2026-10-17T12:01:06Z"},
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:05Z", "expires_at": "2026-10-17T12:01:10Z"}
@@ -353,8 +432,9 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 }
 ```
 - `selection` is `null` when nothing is selected.
+- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow). It stays until the next cast: selecting or clearing doesn't remove it.
 - `stack` is the live scans, bottom (oldest) first; `[]` when empty. Stale correct scans are left out; wrong scans are included (with no flag telling them apart).
-- `expires_at` is `scanned_at` + 65 s (window + grace): when a correct scan goes stale on the server. The app's countdown doesn't use it (see [The client countdown and latency](#the-client-countdown-and-latency)).
+- `expires_at` is `scanned_at` + 65 s (window + grace): when a correct scan goes stale on the server. One microsecond later the server publishes a `team_state` without it. The app's countdown doesn't use it (see [The client countdown and latency](#the-client-countdown-and-latency)); it's for display.
 
 **`Game`** (`GET /api/game/shapes`), with the 2025 seed and config.toml as shipped:
 ```json
@@ -391,8 +471,12 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 **Errors** use the envelope, e.g. `409 {"success": false, "code": "member_already_scanned", "message": "you already scanned a waypoint; a teammate must scan the next one"}`.
 
 **Live events:** `team_state` with the `View`, sent:
-- to every member after every change (never after a rejection or no-op)
+- to every member after every change: select, clear, accepted scan, cast, and `reconcile` (never after a rejection or no-op)
+- to every member when the expiry timer drops a stale correct scan, with nobody acting
+- to every member right after the `IN_GAME` `team` event when the leader starts (`PublishTeam`, through teams' `Rules.OnStart`): the empty state
 - right after `team` when a member connects to `GET /api/teams/me/events`
+
+Every trigger, the ordering guarantees and the wire format: [`internal/server/README.md`, "The event stream"](../server/README.md#the-event-stream).
 
 ## Rules and cases
 
@@ -408,6 +492,7 @@ The backend refuses to start if any of these hold:
 | A `team_pattern` key the atlas doesn't have | `team 482913 state: unknown pattern 400` |
 | A selection's shape the atlas doesn't have | `team 482913 state: selection: unknown shape "hexagon"` |
 | A stack scan's waypoint the atlas doesn't have | `team 482913 state: stack scan: unknown waypoint "1012"` |
+| The newest `team_cast` row's pattern the atlas doesn't have | `team 482913 state: last cast: unknown pattern 400` |
 
 ### Select: `PUT /api/teams/me/state/selection`
 Checked in this order:
@@ -447,8 +532,8 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 | A wrong scan, however old it is | Never goes stale; it stays until the selection is purged |
 | An earlier *correct* scan of this waypoint, or by this member, is **stale** | Allowed: it no longer counts |
 | Stale correct scans at the bottom | Dropped, then the scan is pushed |
-| Stack plus this scan is exactly a pattern of the **selected** shape | `pattern_completed`: pattern and shape marked; **stack and selection purged** |
-| ... that pattern was already completed | `pattern_completed` with `already_completed: true`; progress unchanged |
+| Stack plus this scan is exactly a pattern of the **selected** shape | `pattern_completed`: pattern and shape marked; **stack and selection purged**; `last_cast` set (`already_completed: false`); `team_cast` +1 |
+| ... that pattern was already completed | `pattern_completed` with `already_completed: true`; progress unchanged; `last_cast` replaced (`already_completed: true`); `team_cast` +1, `team_pattern` unchanged |
 | Stack plus this scan is a pattern of **another** shape | Not completed → `scan_added` |
 | Otherwise | `scan_added` |
 | 1-point pattern | Completes on its only scan |
@@ -456,6 +541,39 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 | Span exactly 65 s | Completes. 65 s + 1 µs: the bottom is stale and dropped |
 | Any accepted scan (wrong included) | Logged in `team_scan` (with `wrong`); waypoint added to visited `waypoints` |
 | Postgres write fails | `500`; state reloaded from Postgres; nothing applied |
+
+### Expiry: the timer, no request
+| Case | Result |
+|---|---|
+| A correct scan exactly 65 s old | Still live; nothing happens |
+| The oldest correct scan reaches 65 s + 1 µs | Timer fires: every stale correct scan is dropped from memory; `team_state` to every member; timer re-armed for the next oldest correct scan |
+| Two correct scans stale at the same microsecond | Both dropped by one `expire`; one event |
+| A write purged or rebuilt the stack before the timer ran (`stop` came too late) | `expire` finds nothing stale: no change, no event; re-armed for the current stack |
+| Stack empty, just cast, purged, or only wrong scans | No timer pending |
+| Wrong scans in the stack | Never dropped, never timed |
+| Selection | Unchanged by expiry: the team keeps its shape with an emptier stack |
+| Postgres | Untouched (memory-only) |
+| Backend down when a scan went stale | `Load` arms a timer that is already due: dropped and published at once |
+
+### Start: `PublishTeam`, no request (teams' `Rules.OnStart`)
+Checked in this order:
+
+| Case | Result |
+|---|---|
+| No team with that ID | Nothing published |
+| Team not `IN_GAME` (lobby) | Nothing published |
+| Team `IN_GAME` (always, when called by teams' `Start`) | `team_state` with the current state to every member: just after a start, the empty state. Memory is unchanged except that an empty entry is created if the team had none (reads already report that same empty state); Postgres untouched |
+| Called again, or after a write | The current state again: a full snapshot, so a repeat is harmless (`TestPublishTeam`) |
+
+### Last cast
+| Case | Result |
+|---|---|
+| Team never cast | `last_cast: null` |
+| A cast | `last_cast` = that pattern, its shape, the completing member, the scan's time, `already_completed` |
+| A repeat cast of the same pattern | `last_cast` replaced, `already_completed: true`; logged in `team_cast` again |
+| Select, reselect, clear, expiry | `last_cast` unchanged |
+| Restart | The newest `team_cast` row (highest `id`) |
+| Casts only before migration `0007` | `last_cast: null` after a restart |
 
 ### Game rules: `GET /api/game/shapes`
 | Case | Result |
@@ -469,7 +587,7 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 |---|---|
 | Caller not in a team | `404 not_in_team` |
 | Team in the lobby or with no activity | `200`, empty lists, `selection` null |
-| All stack scans stale | `stack: []` (wrong scans never go stale, so a wrong scan keeps the stack non-empty) |
+| All stack scans stale | `stack: []` (wrong scans never go stale, so a wrong scan keeps the stack non-empty). Normally the expiry timer has already dropped them; `view` filters by time anyway |
 
 ## Concurrency and locking
 - **Writes to one team are serialised** on its `entry.mu`. Different teams run in parallel.
@@ -478,7 +596,12 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 - **A phone resends one scan many times at once:** exactly one is pushed and logged; the rest get `waypoint_already_scanned`.
 - **A scan and a selection race:** whichever takes the lock first wins. If the selection comes first, the stack is purged and the scan is the first of the new stack.
 - **Lock order:** `entry.mu`, then `Store.mu` (only to create an entry). `Store.mu` is never held during I/O.
+- **The start hook.** `PublishTeam` runs inside teams' `Start`, which holds the team's teams entry lock; it takes this team's `entry.mu`. So the lock order across the two use cases is teams entry → teamstate entry. teamstate never takes a teams entry lock (`ByID` and `ForUser` take only teams' index lock, briefly), so this can't deadlock. Holding teams' lock is what makes the start's `team` arrive before its `team_state`. A write that slips in between teams' apply and the hook (a member who scans before seeing the start) publishes its own `team_state` first; the hook then publishes the same, current state again.
 - **The team itself is read** through `Teams` without the team's lock. That's safe because writes need `IN_GAME`, after which a team's status and roster are frozen.
+- **One timer per team, at most.** `scheduleExpiry` stops the pending timer before arming a new one, and only runs with `entry.mu` held, so two can't be armed at once. `stopExpiry` is guarded by `entry.mu`.
+- **Timers take the entry lock.** `expire` runs in the timer's goroutine and locks the entry like a write, so it's serialised with `Select`, `ClearSelection` and `Scan` and its event is ordered with theirs. A timer that fires while a write holds the lock waits; if the write rebuilt the stack, `stop` may have come too late, so `expire` re-checks `Live` under the lock and does nothing if nothing is stale.
+- **`Load` arms timers only after the whole map is built.** A timer for a stack that went stale during downtime is due at once, and its callback goes through `lockTeam`, which reads `Store.states`; arming during the build would race the map writes.
+- **Why the fake clock never fires inside `AfterFunc`.** The store calls `AfterFunc` with `entry.mu` held, and the callback (`expire`) takes `entry.mu`. A fake that ran due callbacks synchronously from `AfterFunc` would deadlock on that lock. The real `time.AfterFunc` always runs `f` in its own goroutine; the fake runs due timers only from the test's `at`, outside any store lock.
 - **The memory checks are the only enforcement** of the stack rules: they depend on time, which a unique constraint can't express. They all run under `entry.mu`, and Postgres has one writer (the instance lock in `platform/postgres`).
 
 ## Failure and recovery
@@ -487,7 +610,9 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 | Postgres times out or drops during a write | `500`. `reconcile` re-reads the team (the write may or may not have committed) and memory matches Postgres |
 | Memory and Postgres disagree (rows edited by hand) | The next write that notices (e.g. `deleteSelection` finding no row) fails, reconciles, and members get the corrected state |
 | Postgres unreachable | Reads keep working from memory; writes fail |
-| Backend restarts | Progress, selections and live stacks reload exactly; scans keep their original times, so they go stale when they would have |
+| Backend restarts | Progress, selections, live stacks and `last_cast` reload exactly; scans keep their original times, so they go stale when they would have. `Load` re-arms every team's expiry timer; a stack that went stale while the backend was down is dropped at once (memory only), before any stream is open |
+| `expire` runs while Postgres is down | Unaffected: it touches only memory |
+| A failed write's `reconcile` | Re-arms the timer for the reloaded stack |
 | `config.toml` changes between restarts | A longer window can revive scans that were stale; a smaller capacity loads fewer scans. Both apply consistently from then on |
 | Content edited while running | Not seen until restart (the atlas loads once). Don't: if the new content drops a waypoint, pattern or shape a team's stored state refers to, the next start refuses. See [`internal/atlas/README.md`](../atlas/README.md) |
 
@@ -498,6 +623,7 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 | Grace 5 s | `config.toml` `game.scan_grace` (0 allowed, but the key must be present) | Edit and restart |
 | 6 points per pattern / stack capacity | `config.toml` `game.max_pattern_points` (≤ `teams.size`) | Edit and restart. Content with bigger patterns is refused at startup (by `atlas.Load`) |
 | 16 slots in a `Stack` | `config.MaxTeamSize` | Fixed array size; raise with the team-size cap |
+| Expiry timers: at most one per team, only while its stack holds a correct scan | `scheduleExpiry` | Not configurable. A `time.AfterFunc` timer is a runtime timer, not a goroutine, until it fires; 10,000 teams mean at most 10,000 timers |
 | 64 waypoints, 64 shapes, 2048 patterns | the atlas's set types (`atlas.MaxWaypoints`, `atlas.MaxShapes`, `atlas.MaxPatterns`) | See [`internal/atlas/README.md`](../atlas/README.md), "Limits and how to change them". `State` holds one of each set, so a wider set makes every snapshot bigger |
 
 ## Not decided yet
@@ -512,7 +638,7 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
   |---|---|
   | `TestStack` | bottom-to-top order, overflow dropping the bottom, `Push` leaving the original alone, `Live` at exactly the limit, everything stale an hour later, and a wrong scan staying live however old it is |
 
-- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load`, config.toml's rules, fake clock). Times are written relative to the window (`tick`, a 60th of `game.scan_window`) or to the limit (`rules.Limit()`), so each scenario means the same under any config. The tests use up to 6 distinct members (the 6-point pattern needs all of them), so they need `teams.size` ≥ 6 (`minTestTeam`); with a smaller size in `config.toml` they **skip** rather than fail:
+- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load`, config.toml's rules, fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` only records the timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, **earliest first**, including timers those runs arm, and never from inside `AfterFunc` (see [Concurrency and locking](#concurrency-and-locking)); `pending()` counts timers neither fired nor stopped. Every helper (`scanAt`, `selectAt`) moves the clock with `at`, so due expiries fire before each request, as in real time. Times are written relative to the window (`tick`, a 60th of `game.scan_window`) or to the limit (`rules.Limit()`), so each scenario means the same under any config. The tests use up to 6 distinct members (the 6-point pattern needs all of them), so they need `teams.size` ≥ 6 (`minTestTeam`); with a smaller size in `config.toml` they **skip** rather than fail:
 
   | Test | Covers |
   |---|---|
@@ -539,6 +665,10 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
   | `TestFailedWriteReconciles` | reload after a hand-edited database |
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
+  | `TestPublishTeam` | `PublishTeam` sends the empty state to every member of a started team; after a selection it sends the current state (square selected) without changing it; nothing for an unknown team or a lobby team |
+  | `TestStaleScanIsPublished` | walkthrough 6: at exactly the limit nothing is sent; at limit + 1 µs the stale scan is dropped and `team_state` published, memory agrees, one timer pending for the next scan; after the second expiry an empty stack and no timer pending; the member can scan again under the same selection |
+  | `TestExpiryTimerFollowsWrites` | one timer after two scans; none after a purge; none for a stack of only a wrong scan; none after a cast |
+  | `TestLastCast` | walkthrough 7: `last_cast` null before any cast; set (pattern, shape, `cast_by`, `cast_at`) after a cast; `already_completed` on the repeat; kept by a new selection; two `team_cast` rows; a restart reloads the same `last_cast` (JSON equal) |
 - `internal/server/tests/teamstate_test.go`: `TestSelectAndScanRoutes`, every route and error code over HTTP, including `waypoint_already_scanned`, `member_already_scanned`, a wrong scan being accepted and locking the member, and the body size limit; `TestGameShapes`, `GET /api/game/shapes` without a token (`401 missing_token`) and with one: the seed's 5 shapes, `square` with 18 patterns of 4 points, and the window, grace and capacity from `config.toml`.
-- `internal/server/tests/simulation_test.go`: the countdown under latency (see [The client countdown and latency](#the-client-countdown-and-latency)).
-- `internal/server/tests/events_test.go`: `team_state` on connect.
+- `internal/server/tests/simulation_test.go`: the countdown under latency (see [The client countdown and latency](#the-client-countdown-and-latency)), and `TestSimStaleScanReachesEveryone`: in real time, after one scan with nobody acting, every simulated player's stream shows an empty stack once the scan is older than the simulated window + grace, and every countdown resets.
+- `internal/server/tests/events_test.go`: `team_state` on connect; `TestStartPublishesTeamState`: when the leader starts, every open stream gets `team` then the empty `team_state`, in that order.

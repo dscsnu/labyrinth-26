@@ -66,6 +66,13 @@ type Rules struct {
 	// CodeAttempts is how many random team codes Create tries
 	// (teams.code_attempts).
 	CodeAttempts int
+	// OnStart, if not nil, is called by Start once the team is IN_GAME in
+	// memory and its "team" event is published, with the team's lock still
+	// held. server.Build passes teamstate's PublishTeam, so every member gets
+	// the team's state right after the team itself (AGENTS.md §4: teams
+	// doesn't import teamstate). It must not call back into this team's
+	// writes. Not in config.toml.
+	OnStart func(Team)
 }
 
 // lockRetries bounds lockUsersTeam's retries when the user changes team

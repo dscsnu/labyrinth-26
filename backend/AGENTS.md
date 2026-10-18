@@ -23,6 +23,7 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 14. [Before calling a change done](#14-before-calling-a-change-done)
 15. [Operational rules](#15-operational-rules)
 16. [Adding a use case, step by step](#16-adding-a-use-case-step-by-step)
+17. [Team state is the gameplay loop](#17-team-state-is-the-gameplay-loop)
 
 ## 1. The product
 **Labyrinth 26** is a one-day campus game run by DSC SNU. Teams run around campus scanning QR codes at waypoints to trace shapes on the map.
@@ -121,7 +122,7 @@ internal/<usecase>/
 - **A use case may import:**
   - `internal/platform/...`
   - another use case's **read API**, through a small interface it declares itself (teamstate's `Teams`, and its `Atlas`, which `*atlas.Atlas` satisfies). Plain types in that API may be used directly (teamstate's `State` holds `atlas.WaypointSet`; it reads `teams.Team`)
-- **A use case never imports** another's `db.go` types or writes. If a write in one must update another's memory, `server.Build` passes a callback (auth's `onSignIn` → `teams.RefreshProfile`).
+- **A use case never imports** another's `db.go` types or writes. If a write in one must update another's memory or publish another's state, `server.Build` passes a callback (auth's `onSignIn` → `teams.RefreshProfile`; teams' `Rules.OnStart` → `teamstate.PublishTeam`, which sends a started team its `team_state`).
 - **No import cycles.** Shared pieces move into `platform/` (that's why `platform/identity` sits between auth and everything else).
 - **`platform/` never imports a use case.**
 - **`internal/server/server.go` is the only place** that constructs use cases and registers routes, in dependency order. `server.Build` loads the atlas first (every game use case reads it), then teams, then teamstate.
@@ -157,7 +158,9 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **`persist`** detaches from the request context and is capped at `storage.write_timeout`, so a client disconnecting can't leave a commit's outcome unknown.
 - **On a persist failure, call `reconcile`:** reload that key from Postgres (Postgres wins), publish the corrected state, and return the original error. **Never apply after a failed persist.**
 - **Rejections and no-ops return before step 4:** nothing written, nothing published.
-- **A memory-only change** (data another use case already saved) skips step 4 and says so in its doc comment (`teams.RefreshProfile`).
+- **A memory-only change** skips step 4 and says so in its doc comment. Only two kinds qualify:
+  - data another use case already saved (`teams.RefreshProfile`: the user use case wrote the profile)
+  - a change `Load` reproduces from what's already stored (`teamstate.expire`: it drops correct scans that went stale. Postgres never stores the stack, only `team_scan`; after a restart the same scans are stale by their stored times, and the timer `Load` arms drops them at once)
 - **The database is a backstop:** mirror invariants as constraints (unique, check, foreign key), and map violations to rule errors in `db.go` (`mapMemberInsertErr`). When a rule can't be a constraint (it depends on time, like teamstate's stack), say so in the README's concurrency section.
 - **`execOne`** for writes that must affect exactly one row, so memory/Postgres disagreement is detected rather than ignored.
 - **Multi-statement writes** go in one `pgx.BeginFunc` transaction.
@@ -195,6 +198,8 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **Publish through the shared `*live.Hub`,** addressed by user ID, after apply and while holding the entry lock (so a key's events stay in order).
 - **Never publish** on a rejection or no-op.
 - **A new event that must arrive on connect** needs a `Snapshot(userID)` on the use case, included in `server.events`.
+- **Changes caused by time passing** are published by the server when they happen (teamstate's `Clock` timers and `expire`), like any other change. See §17.
+- **The wire-level reference** (endpoint, format, every event, triggers, ordering, heartbeat, reconnection) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
 
 ## 10. Configuration: no hard-coded constants
 - **Every tunable lives in `backend/config.toml`:** sizes, counts, durations, timeouts, limits, intervals. Never write `30 * time.Second` or `6` in a use case, a test, or a doc comment.
@@ -260,7 +265,7 @@ Each use case's `README.md` documents it **completely enough to rebuild it witho
 ## 13. Tests
 - **Where tests live:** `internal/<package>/tests/`, a separate package named `tests`, holding a `doc.go` (package comment: whose tests these are) and the `*_test.go` files (Go only runs tests from files with that suffix). Run one package's with `go test ./internal/<package>/...`.
 - **Tests are black-box:** they import the package and use only its exported API, so they test exactly what other packages rely on, and refactoring internals doesn't break them.
-- **Exporting a seam for a test** is allowed only when it's a sensible API in its own right, documented like any other: `atlas.New(Source, Rules)` (build an atlas from given content, which `Load` also uses), `teamstate.Rules.Clock` (inject the clock; nil means the real one), `teamstate.Rules.Limit()`, `teamstate.NewStack`, `teams.Store.All()`, `auth.Issuer` / `auth.AccessAudience` (the frontend must match them). Never export a field or a "ForTesting" function just to reach inside. If a behaviour can only be reached through internals, test it end to end instead (auth's state-vs-access token tests live in `internal/server/tests`).
+- **Exporting a seam for a test** is allowed only when it's a sensible API in its own right, documented like any other: `atlas.New(Source, Rules)` (build an atlas from given content, which `Load` also uses), `teamstate.Rules.Clock` (a `teamstate.Clock` interface, `Now()` and `AfterFunc(d, f) (stop func() bool)`; nil means the real one, `time.Now` and `time.AfterFunc`. Tests pass a fake whose timers fire only when the test advances it, never from inside `AfterFunc`), `teamstate.Rules.Limit()`, `teamstate.NewStack`, `teams.Store.All()`, `auth.Issuer` / `auth.AccessAudience` (the frontend must match them). Never export a field or a "ForTesting" function just to reach inside. If a behaviour can only be reached through internals, test it end to end instead (auth's state-vs-access token tests live in `internal/server/tests`).
 - **Test every edge case.** Every rule, error code and boundary in the README's case tables gets a test: exactly at a limit and just past it, retries, concurrent duplicates, the smallest and largest content (1-point and 6-point patterns), and config values from `configtest.Settings`.
 - **Store tests** run against real Postgres via `pgtest`, each package in its own schema:
   ```go
@@ -289,7 +294,7 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 - **Run the race tests three times**; a flaky pass is a fail.
 - **Check tests ran:** with `-v`, nothing may be `SKIP`.
 - **Hot-path changes:** `go run ./cmd/loadtest -players 600 -rush-window 3s` with 0 errors.
-- **Docs:** the README sections in §12 match the code, every new test is in the Tests table, every new config key is in `config.toml` and the READMEs, and every route change is in `openapi.yaml`.
+- **Docs:** the README sections in §12 match the code, every new test is in the Tests table, every new config key is in `config.toml` and the READMEs, and every route change is in `openapi.yaml`. A gameplay change also passes the checklist in §17.
 - **Report honestly:** what was verified and how; what wasn't run; bugs found and not fixed.
 
 ## 15. Operational rules
@@ -306,6 +311,30 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 4. Put every tunable in `config.toml` and pass it in through `Rules` (§10).
 5. Wire it in `server.Build`, in dependency order, and register its routes (§2, §4).
    Document every route in `internal/server/openapi.yaml` (§7).
-6. Add live events and a `Snapshot` if clients need its state live (§9).
+6. Add live events and a `Snapshot` if clients need its state live (§9). Per-team gameplay results don't get their own event: they go inside `team_state` (§17).
 7. Write the tests for every case in the README (§13).
 8. Finish the README to §12 depth, update `backend/README.md`, and run §14.
+
+## 17. Team state is the gameplay loop
+Everything a team's players see about the game loop reaches them as **one struct**. Keep it that way.
+
+- **One struct, sent whole.** Per-team gameplay state lives in `teamstate.State`. Clients get it as one JSON object, the `View`, which is the `team_state` event. It's sent whole over the event stream on connect and after every change, and it's the response of every teamstate route (`GET /api/teams/me/state`, both selection routes, and `ScanResult.state` on a scan).
+- **Clients never poll** and never assemble gameplay from several sources. Everything the play screen shows about the game comes from the latest `View`. The other inputs are the static `GET /api/game/shapes` and the `team` event, which covers the roster.
+- **Static vs per-team.** Static definitions (waypoints, shapes, patterns, spell values) belong to `atlas`. Per-team gameplay state belongs in `State`.
+- **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them.
+- **The server publishes time-driven changes.** A correct scan going stale is a change like any other. The store arms a `Clock` timer for it and `expire` publishes the new `team_state`. Clients never infer such a change. They use timestamps (`scanned_at`, `expires_at`, `cast_at`) only for display and their own countdown (`frontend/src/lib/game/scanGate.ts`), never to change the state they show.
+- **Rejected or no-op requests publish nothing** (§6, §9). That includes `409`s, clearing with nothing selected, and an expiry timer that finds nothing stale.
+
+**A new gameplay feature isn't done until it has all of these:**
+
+| # | Where | What |
+|---|---|---|
+| 1 | `teamstate.State` (`read.go`) | the field, documented |
+| 2 | `View` (`read.go`) | its JSON field, built in `view` |
+| 3 | Postgres | persisted by the write-through and reloaded by `Load` (`stateOf`), or listed as memory-only in the teamstate README's Memory ↔ Postgres table, with why |
+| 4 | publish | every change to it publishes `team_state` (the write, or a timer) |
+| 5 | `internal/server/openapi.yaml` | the field in the `TeamState` schema, with a description |
+| 6 | SSE reference | `internal/server/README.md`, "The event stream": the JSON example and the triggers table |
+| 7 | frontend type | `frontend/src/lib/types/Game.type.ts` (`TeamStateSchema`) |
+| 8 | tests | a store test, a restart test (JSON equal before and after), and a server or simulation test over HTTP and the stream (`internal/server/tests`) |
+| 9 | teamstate README | every section §12 lists that it touches |

@@ -32,6 +32,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Instance lock** | A Postgres advisory lock (key `7272027`) the process holds from just after connecting until it exits, checked every **5 s** (`storage.instance_lock_check`). A second backend, `migrate` or `seed` on the same database refuses to run. |
 | **Unrouted request** | One no route pattern matches: an unknown path, or a known path with the wrong method. `envelopeUnrouted` answers it in the JSON envelope. |
 | **Sign-in hook** | The `onSignIn` function `Build` gives auth: after every sign-in it calls `teams.Store.RefreshProfile`, so a renamed user shows the new name in their team at once. |
+| **Start hook** | The `teams.Rules.OnStart` function `Build` gives teams: after a team starts (and its `team` event is published) it calls `teamstate.Store.PublishTeam`, so every member's open stream gets the team's (empty) `team_state` at once. teams can't import teamstate (AGENTS.md §4), hence the callback. |
 
 ## Startup and shutdown
 `main.go`'s `run` does these steps in order. Any error returned is logged as `fatal` and the process exits with status `1`.
@@ -89,7 +90,7 @@ Every number below that comes from `config.toml` is shown with its current value
   4. `auth.NewLoginCodes(db, auth.login_code_ttl)`.
   5. `auth.NewGoogle(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, PUBLIC_URL + "/auth/google/callback", google)`.
   6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`.
-  7. `teams.Load(ctx, db, hub, log, teams.Rules{…})`: reads every team into memory. An error is returned as is.
+  7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start before `Build` returns and routes are served.
   8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
   9. `teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas. It needs the atlas (through its `Atlas` interface) and `teamStore` (through its `Teams` interface), so it runs after steps 6 and 7.
   10. The `App` (with `Atlas: theAtlas`), then a `http.ServeMux` with, in this order:
@@ -164,38 +165,175 @@ http.Server              ReadHeaderTimeout 10 s, ReadTimeout 30 s, IdleTimeout 2
 - No other middleware: no CORS, logging, recovery or rate limiting at this layer.
 
 ## The event stream
-`GET /api/teams/me/events`, authed. `events` does:
+The complete reference for the live stream: what it carries, what triggers each event, and the guarantees a client can rely on. AGENTS.md §9 and §17 hold the rules for publishing.
 
+### Endpoint
+| | |
+|---|---|
+| Backend | `GET /api/teams/me/events`, `Authorization: Bearer <jwt>` (any signed-in user, in a team or not). No token or a bad one: `401 missing_token` / `401 invalid_token`, no stream |
+| Browser | `GET /team/events`, same origin, through the SvelteKit proxy `frontend/src/routes/team/events/+server.ts`: `new EventSource("/team/events")` |
+| Proxy | Reads the httpOnly session token (`locals.token`; none → `401 not signed in`), calls the backend with it (`backendFetch`) and returns the backend's body unchanged with `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`. A backend `401` stays `401`; any other failure is `502 event stream unavailable`. The browser closing its request aborts the backend request too (`signal: request.signal`) |
+| Response | `200`, `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no` (so nginx doesn't buffer). The body never ends on its own |
+
+### How `events` serves a stream
 1. `userID := identity.UserID(r)`.
 2. **`sub := a.Hub.Subscribe(userID)`**, then `defer sub.Close()`.
 3. **Initial snapshots**, read from memory after subscribing:
    - `a.Teams.Snapshot(userID)`: `team` with the same JSON as `GET /api/teams/me`, or `no_team` with `{}` if the user is in no team (or the team failed to encode, which is logged).
-   - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` with the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged).
+   - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` with the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged). Sent for a `LOBBY` team too (an empty state).
 4. `live.Serve(w, r, sub, initial, live.heartbeat)`: clears the read deadline, writes the initial events, then every event from `sub`, plus `: ping` after **25 s** (`live.heartbeat`) with no event. Returns when the client disconnects, the subscription is dropped or the hub closes.
 5. The deferred `sub.Close()` removes the subscription; the `/healthz` count drops.
 
-**Why subscribe first.** A change published between reading the snapshot and subscribing would be lost. Subscribing first means any change after the snapshot is also queued. The cost: a change that lands between subscribing and reading the snapshot is delivered twice (once inside the snapshot, once queued). Events are full snapshots, so a repeat is harmless.
+**The stream follows the user.** Subscriptions are keyed by user ID, not team. Joining, leaving or a new team all arrive on the same stream (`TestTeamEventStream`). Each tab is its own subscription and gets every event.
 
-**A brief step back is possible.** Writers apply a change before publishing it. If change X is published (queued) and change Y is applied before the snapshot is read, the client sees Y (snapshot), then X (queued), then Y (queued once published). The final state is always the newest, because each publish happens after subscribing.
+### Wire format
+Each event is exactly `event: <name>\n` + `data: <compact JSON on one line>\n` + `\n`. A heartbeat is the comment `: ping\n\n`, which `EventSource` ignores. No `id:` or `retry:` fields are sent. Each write is flushed at once.
 
-**The stream follows the user.** Subscriptions are keyed by user, not team. Joining, leaving or a new team all arrive on the same stream (`TestTeamEventStream`).
-
-Byte-level example for a user in team `482913`, as `live.Serve` writes it (see `internal/platform/README.md` for the format):
+Byte-level example for a user in the lobby team `482913` with two members, from connect to the first ping (`␤` = `\n`):
 ```
 HTTP/1.1 200 OK
 Content-Type: text/event-stream
 Cache-Control: no-store
 X-Accel-Buffering: no
 
-event: team
-data: {"id":"482913","name":"Live","leader_id":"6f1c…","status":"LOBBY","created_at":"2026-10-17T12:00:00Z","started_at":null,"members":[…]}
-
-event: team_state
-data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"stack":[]}
-
-: ping
-
+event: team␤
+data: {"id":"482913","name":"Scanners","leader_id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","status":"LOBBY","created_at":"2026-10-17T11:50:00Z","started_at":null,"members":[{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","name":"Asha","avatar_url":null,"is_ready":false,"joined_at":"2026-10-17T11:50:00Z"},{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02","name":"Bilal","avatar_url":"https://example.com/b.png","is_ready":true,"joined_at":"2026-10-17T11:51:30Z"}]}␤
+␤
+event: team_state␤
+data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[]}␤
+␤
+: ping␤
+␤
 ```
+
+### Events
+| Event | Data | Same JSON as | Schema (`openapi.yaml`) |
+|---|---|---|---|
+| `team` | the user's team | `GET /api/teams/me` | `Team` |
+| `no_team` | `{}` | (`GET /api/teams/me` is `404 not_in_team`) | none |
+| `team_state` | the user's team's game state, the `View` | `GET /api/teams/me/state` | `TeamState` |
+
+Every event is a **full snapshot**, never a diff: the newest event of each name is the whole truth.
+
+**`team`**, an `IN_GAME` team of **6** (`teams.size`), members in join order (field meanings: `internal/teams/README.md`):
+```json
+{
+  "id": "482913",
+  "name": "Scanners",
+  "leader_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01",
+  "status": "IN_GAME",
+  "created_at": "2026-10-17T11:50:00Z",
+  "started_at": "2026-10-17T11:58:00Z",
+  "members": [
+    {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "name": "Asha",   "avatar_url": null, "is_ready": false, "joined_at": "2026-10-17T11:50:00Z"},
+    {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "name": "Bilal",  "avatar_url": "https://example.com/b.png", "is_ready": true, "joined_at": "2026-10-17T11:51:30Z"},
+    {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b03", "name": "Chen",   "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:52:10Z"},
+    {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b04", "name": "Divya",  "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:53:00Z"},
+    {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b05", "name": "Emeka",  "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:54:45Z"},
+    {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b06", "name": "Farah",  "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:56:20Z"}
+  ]
+}
+```
+The leader can't set `is_ready`, and start ignores the leader's flag. Emails are never included.
+
+**`no_team`**: always the data `{}`. The user is in no team: on connect, after leaving, or when their team was deleted.
+
+**`team_state`**, the same team after it cast the square `1001 1002 1007 1008` at 12:00:12 (Divya's scan), selected `square` again at 12:05:00 (Farah), and scanned `1001` (Asha, 12:05:10) and `1002` (Bilal, 12:05:20); limit **65 s** (`game.scan_window` + `game.scan_grace`):
+```json
+{
+  "team_id": "482913",
+  "waypoints": ["1001", "1002", "1007", "1008"],
+  "patterns": [["1001", "1002", "1007", "1008"]],
+  "shapes": ["square"],
+  "selection": {"shape": "square", "selected_by": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b06", "selected_at": "2026-10-17T12:05:00Z"},
+  "last_cast": {
+    "pattern": ["1001", "1002", "1007", "1008"],
+    "shape": "square",
+    "cast_by": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b04",
+    "cast_at": "2026-10-17T12:00:12Z",
+    "already_completed": false
+  },
+  "stack": [
+    {"waypoint_id": "1001", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:10Z", "expires_at": "2026-10-17T12:06:15Z"},
+    {"waypoint_id": "1002", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "scanned_at": "2026-10-17T12:05:20Z", "expires_at": "2026-10-17T12:06:25Z"}
+  ]
+}
+```
+| Field | Meaning |
+|---|---|
+| `team_id` | the team |
+| `waypoints` | every waypoint the team ever had a scan accepted at, sorted |
+| `patterns` | every completed pattern, each as its sorted waypoint IDs |
+| `shapes` | every shape with at least one completed pattern, in atlas index order |
+| `selection` | the shape being attempted, who selected it and when; `null` if none |
+| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, and `already_completed` (the team had cast that pattern before, so progress didn't grow). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`) |
+| `stack` | the live scans, bottom (oldest) first. Stale correct scans are left out; wrong scans are included with nothing marking them |
+| `stack[].expires_at` | `scanned_at` + **65 s**: when that correct scan goes stale. At that moment the server publishes a new `team_state` without it (below) |
+
+Every field, rule and case: `internal/teamstate/README.md`, "API".
+
+### What publishes what
+Every event below goes to **every open stream** of each listed user. "Members" means the team's members after the change. Each is published after the change is applied, while the writer still holds the entry lock.
+
+| Trigger | Event | To |
+|---|---|---|
+| **Connect** (`GET /api/teams/me/events`) | `team` (or `no_team`), then `team_state` if in a team | that stream only |
+| teams `POST /api/teams` (create) | `team` | the creator (its only member) |
+| teams `POST /api/teams/join` | `team` | members, the joiner included |
+| teams `POST /api/teams/leave`, others remain | `team` (new `leader_id` if the leader left) | the remaining members |
+| | `no_team` | the user who left |
+| teams `POST /api/teams/leave`, last member | `no_team` | the user who left (the team is deleted) |
+| teams `PUT /api/teams/me/ready`, flag changed | `team` | members |
+| teams `PUT /api/teams/me/ready`, flag already that value | nothing (no-op) | |
+| teams `POST /api/teams/me/start` | `team` (`status` `IN_GAME`, `started_at` set), then `team_state` (the team's state, empty: no selection, stack `[]`, no progress) through the start hook (`OnStart` → `teamstate.PublishTeam`) | members |
+| Sign-in (`onSignIn` → `teams.RefreshProfile`), name or avatar changed | `team` | members |
+| Sign-in, nothing changed or not in a team | nothing | |
+| teams write fails to persist (`reconcile`) | `team` reloaded from Postgres | its members |
+| | `no_team` | users no longer in it (all old members if the team is gone) |
+| teamstate `PUT /api/teams/me/state/selection` (select, reselect) | `team_state` (stack purged) | members |
+| teamstate `DELETE /api/teams/me/state/selection`, something selected | `team_state` (selection `null`, stack `[]`) | members |
+| teamstate `DELETE …/selection`, nothing selected | nothing (no-op) | |
+| teamstate `POST /api/teams/me/state/scans`, `scan_added` (wrong scans included) | `team_state` | members |
+| teamstate `POST …/scans`, `pattern_completed` (a cast) | `team_state` (selection `null`, stack `[]`, new `last_cast`) | members |
+| teamstate expiry timer: a correct scan is now stale (`expire`) | `team_state` (stack without it) | members |
+| teamstate expiry timer, nothing stale (a write rebuilt the stack first) | nothing | |
+| teamstate write fails to persist (`reconcile`) | `team_state` reloaded from Postgres (nothing if the reload fails too) | members |
+| Any rejection (`4xx`) or `500` before persisting | nothing | |
+
+The HTTP response to a write carries the same JSON as its event (`ScanResult.state` for a scan), but on a different connection: a client may see either first.
+
+### Ordering
+- **One stream is FIFO.** `Hub.Send` puts events on the subscription's one channel, and `Serve` writes them in that order.
+- **Per team, in order.** Each use case publishes while holding the team's entry lock (`teams`' entry, or `teamstate`'s entry for writes, `expire` and `reconcile`), so one team's `team` events arrive in the order they were applied, and so do its `team_state` events.
+- **No order between `team` and `team_state`,** with one exception. They're published under different locks; a `team` and a `team_state` from changes at the same moment may arrive either way round. Each is still the full truth for its part. **The exception is a start:** teams calls the start hook after publishing the `IN_GAME` `team`, still holding the team's entry lock, so on every member's stream the start's `team` comes before its `team_state` (`TestStartPublishesTeamState`).
+- **Expiry is ordered with writes.** `expire` takes the same entry lock as a scan, and re-checks the stack under it, so a stale-scan event never arrives after a later write that already dropped the scan.
+
+**Why subscribe first.** A change published between reading the snapshot and subscribing would be lost. Subscribing first means any change after the snapshot is also queued. The cost: a change that lands between subscribing and reading the snapshot is delivered **twice** (once inside the snapshot, once queued). Events are full snapshots, so a repeat is harmless.
+
+**A brief step back is possible.** Writers apply a change before publishing it. If change X is published (queued) and change Y is applied before the snapshot is read, the client sees Y (snapshot), then X (queued), then Y (queued once published). The final state is always the newest, because each publish happens after subscribing. `team` and `team_state` snapshots are read separately, so they may also disagree briefly on connect; the change's own events follow and correct it.
+
+### Heartbeat
+After **25 s** (`live.heartbeat`) with no event, `Serve` writes `: ping\n\n` and flushes, so mobile networks and proxies don't drop the idle connection. Every event resets the timer, so a busy stream gets no pings. The first ping comes 25 s after the initial events. Keep `live.heartbeat` under any proxy's idle timeout.
+
+### Slow clients
+Each subscription buffers **16** (`live.subscriber_buffer`) unread events. `Hub.Send` never blocks: when an event arrives while 16 are unread, that subscription is **dropped**. `Serve` writes the 16 buffered events, then the response ends. The client reconnects and starts from fresh snapshots, so it loses nothing. Other streams, the same user's other tabs included, are unaffected.
+
+### Reconnection
+- The browser's `EventSource` reconnects by itself after any end of the response (drop, restart, network loss), after its default delay: no `retry:` is sent.
+- Nothing is replayed (no `id:`, so no `Last-Event-ID`). The **first events after each connect are full snapshots** (`team`/`no_team`, then `team_state`), which is all a client needs.
+- `/team` and `/play` show "reconnecting…" while `EventSource` is between connections (`onerror`), and "live ●" once it's open.
+
+### Shutdown and restart
+- On shutdown, `srv.Shutdown` runs `Hub.Close`, which closes every subscription: each `Serve` returns and its response ends. New subscriptions are refused (closed at once).
+- After a restart, `Build` reloads memory, and teamstate re-arms every team's expiry timer. A stack that went stale while the backend was down is dropped at once, before anyone connects. Clients reconnect and get snapshots of the reloaded state.
+
+### Never sent
+- Anything for a **rejection** (every `4xx`) or a **no-op** (ready unchanged, clear with nothing selected, a sign-in that changes nothing, an expiry timer that finds nothing stale).
+- Whether a scan was **wrong**: `team_state` has no such flag; wrong scans look like correct ones.
+- **Stale** correct scans: left out of `stack`.
+- **Diffs**, event IDs or `retry:` fields.
+- Another team's state, or any member's email.
+- `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load.
 
 ## API
 | Method | Path | Auth | Response |
@@ -250,7 +388,9 @@ Any other path or method:
 | No token, or a bad one | `401` (no stream) |
 | User in no team | `no_team` only |
 | User in a team | `team`, then `team_state` |
-| A change to the user's team or state | One event per change, on every one of the user's streams |
+| A change to the user's team or state | One event per change, on every one of the user's streams (see [What publishes what](#what-publishes-what)) |
+| A correct scan in the team's stack passes **65 s** (`game.scan_window` + `game.scan_grace`) with nobody acting | `team_state` without it, at the first microsecond it's stale (`TestSimStaleScanReachesEveryone`) |
+| A rejected or no-op request | Nothing |
 | Several tabs | Each tab is its own subscription; each gets every event |
 | Client disconnects | `Serve` returns on the request context; subscription removed; `/healthz` count drops |
 | A queued event arrives while **16** (`live.subscriber_buffer`) are already unread | That stream is dropped: the buffered events are written, then the response ends. The browser's `EventSource` reconnects and gets fresh snapshots |
@@ -270,8 +410,10 @@ Any other path or method:
 - **Requests run concurrently.** All shared state is in the stores (their own locks) and the hub (one mutex). `App` itself is read-only after `Build`.
 - **Snapshots are read lock-free** from the stores. `team` and `team_state` are read separately, so a change between the two reads can make them disagree briefly; the change's own events follow and correct it.
 - **The sweep goroutine** only touches Postgres (`auth_code`), never memory.
+- **teamstate's expiry timers** (`time.AfterFunc`, at most one per team) run in their own goroutines and take the team's entry lock like a write; see `internal/teamstate/README.md`, "Concurrency and locking".
 - **One process per database** is enforced by the instance lock, which the stores' "memory is the truth" design relies on. Its watcher goroutine checks it every **5 s** (`storage.instance_lock_check`) on the lock's own connection.
 - **The sign-in hook** runs in the callback's goroutine and takes the user's team entry lock like any team write.
+- **The start hook** runs inside `teams.Start`, holding the team's teams entry lock, and takes the team's teamstate entry lock (`PublishTeam`). So the lock order across the two use cases is teams entry → teamstate entry. teamstate never takes a teams entry lock (it reads teams through `ByID`/`ForUser`, which take only teams' index lock, briefly), so this can't deadlock.
 
 ## Failure and recovery
 | Case | Result |
@@ -344,7 +486,8 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 ### `openStream(p)` (`tests/events_test.go`)
 - Opens `GET /api/teams/me/events` with `p`'s token on a cancellable context (cancelled at cleanup). Fails unless `200` and `Content-Type: text/event-stream`.
 - A goroutine scans lines: `event: X` sets the name; `data: {...}` is parsed as JSON and sent to `states` if the name is `team_state`, else to `events`. Comment lines (`: ping`) are ignored. Both channels hold 64 and close when the body ends.
-- `stream.next(t, what)`: the next `team` or `no_team` event, failing after 3 s or if the stream closed.
+- `stream.next(t, what)`: the next `team` or `no_team` event, failing after 3 s or if the stream closed. `stream.nextState(t, what)` likewise for the next `team_state`.
+- `stream.seen()`: the names of every event received so far, across both channels, in arrival order (for checking order between `team` and `team_state`).
 - `expectTeam(t, what, ev, n)`: fails unless `ev` is `team` with `n` members; returns its data. `expectNoTeam` likewise for `no_team`. `memberReady(team, id)` reads a member's `is_ready`.
 - `stream.cancel()` disconnects, which is how cleanup is tested.
 
@@ -386,9 +529,11 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSimLatencyBeyondGraceLosesBottomScan` | `tests/simulation_test.go` | the same at 700 ms each way (1.4 s > 1 s): the bottom scan is stale on arrival, `scan_added` |
 | `TestSimGateClosesThenReselectOpens` | `tests/simulation_test.go` | once a countdown runs out the client sends nothing (0 requests); a reselect resets every client's countdown and the square can be scanned |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
+| `TestSimStaleScanReachesEveryone` | `tests/simulation_test.go` | real time: after one scan, with nobody acting, every player's stream gets a `team_state` with an empty stack once the scan is older than `simWindow` + `simGrace` (3 s), and every countdown resets |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
 | `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401`; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
 | `TestStreamIncludesTeamState` | `tests/events_test.go` | `team_state` follows `team` on connect; `GET /api/teams/me/state` works, and is `404 not_in_team` without a team |
+| `TestStartPublishesTeamState` | `tests/events_test.go` | a full, ready team with every member's stream open: when the leader starts, each stream gets the `IN_GAME` `team`, then an empty `team_state`, in that order (events seen: `team`, `team_state`, `team`, `team_state`), without reconnecting |
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 

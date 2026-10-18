@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -29,6 +30,11 @@ var must = pgtest.Must[teams.Team]
 // its lobby team has a leader and two joiners. With a smaller size in
 // config.toml it skips rather than fails.
 const minRestartTeam = 3
+
+// minStartTeam is the smallest teams.size TestStartCallsOnStart works with:
+// it needs a non-leader member who isn't ready yet. With a smaller size in
+// config.toml it skips rather than fails.
+const minStartTeam = 2
 
 // sinkMembers is where BenchmarkForUser stores what it read, so the compiler
 // can't discard the reads.
@@ -250,5 +256,68 @@ func TestRefreshProfile(t *testing.T) {
 	case ev := <-sub.C:
 		t.Fatalf("no-op refresh published %s", ev.Name)
 	default:
+	}
+}
+
+// TestStartCallsOnStart checks that Rules.OnStart runs once per started team,
+// after the team is IN_GAME in memory and its "team" event is published, and
+// that rejected starts (not everyone ready, already started) don't call it.
+func TestStartCallsOnStart(t *testing.T) {
+	db := pgtest.Open(t, pgtest.URL(t, "teams_test"))
+	ctx := context.Background()
+	set := configtest.Settings(t)
+	if set.Teams.Size < minStartTeam {
+		t.Skipf("needs teams.size >= %d", minStartTeam)
+	}
+	users := newUsers(t, db, set.Teams.Size)
+	hub := live.NewHub(set.Live.SubscriberBuffer)
+
+	var s *teams.Store
+	var sub *live.Subscription // opened just before the start, so it holds only the start's events
+	var calls []teams.Team
+	s = pgtest.Must(teams.Load(ctx, db, hub, pgtest.Quiet, teams.Rules{
+		Size:          set.Teams.Size,
+		NameMaxLength: set.Teams.NameMaxLength,
+		WriteTimeout:  set.Storage.WriteTimeout.Duration,
+		CodeAttempts:  set.Teams.CodeAttempts,
+		OnStart: func(team teams.Team) {
+			// Called under the team's lock: reads still work, and the
+			// member already has the started team on their stream.
+			if got, _ := s.ByID(team.ID); got.Status != teams.InGame {
+				t.Errorf("OnStart: team is %s in memory, want IN_GAME", got.Status)
+			}
+			var last live.Event
+			select {
+			case last = <-sub.C:
+			default:
+			}
+			if last.Name != "team" || !strings.Contains(string(last.Data), `"IN_GAME"`) {
+				t.Errorf("OnStart: last event %q %s, want the started team", last.Name, last.Data)
+			}
+			calls = append(calls, team)
+		},
+	}))
+
+	team := must(s.Create(ctx, users[0], "Starters"))
+	for _, u := range users[1:] {
+		must(s.Join(ctx, u, team.ID))
+	}
+	if _, err := s.Start(ctx, users[0]); !errors.Is(err, teams.ErrNotAllReady) {
+		t.Fatalf("start before ready: %v", err)
+	}
+	for _, u := range users[1:] {
+		must(s.SetReady(ctx, u, true))
+	}
+	if len(calls) != 0 {
+		t.Fatalf("OnStart called %d times before the start", len(calls))
+	}
+	sub = hub.Subscribe(users[1])
+	defer sub.Close()
+	started := must(s.Start(ctx, users[0]))
+	if _, err := s.Start(ctx, users[0]); !errors.Is(err, teams.ErrTeamLocked) {
+		t.Fatalf("second start: %v", err)
+	}
+	if len(calls) != 1 || calls[0].ID != started.ID || calls[0].Status != teams.InGame {
+		t.Fatalf("OnStart calls: %+v, want one with the started team", calls)
 	}
 }

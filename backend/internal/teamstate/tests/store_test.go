@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,24 +39,81 @@ var square = []string{"1001", "1002", "1007", "1008"}
 // start is the fake clock's starting time.
 var start = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 
-// clock is a fake clock tests set by hand.
+// clock is a fake teamstate.Clock that tests advance by hand. Timers fire
+// only when at moves time past them, in order, never from inside AfterFunc
+// (the store calls AfterFunc holding a team's lock, and the timer's callback
+// takes that lock).
 type clock struct {
-	mu sync.Mutex
-	t  time.Time
+	mu     sync.Mutex
+	t      time.Time
+	timers []*fakeTimer
 }
 
-// now returns the fake time.
-func (c *clock) now() time.Time {
+// fakeTimer is one pending AfterFunc call.
+type fakeTimer struct {
+	due     time.Time
+	f       func()
+	stopped bool
+}
+
+// Now returns the fake time.
+func (c *clock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.t
 }
 
-// at sets the fake time to d after start.
+// AfterFunc records f to run once the fake time reaches now + d.
+func (c *clock) AfterFunc(d time.Duration, f func()) func() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ft := &fakeTimer{due: c.t.Add(d), f: f}
+	c.timers = append(c.timers, ft)
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		was := !ft.stopped
+		ft.stopped = true
+		return was
+	}
+}
+
+// at sets the fake time to d after start, then runs every timer now due,
+// earliest first, including ones those runs schedule.
 func (c *clock) at(d time.Duration) {
 	c.mu.Lock()
 	c.t = start.Add(d)
 	c.mu.Unlock()
+	for {
+		c.mu.Lock()
+		var next *fakeTimer
+		for _, ft := range c.timers {
+			if !ft.stopped && !ft.due.After(c.t) && (next == nil || ft.due.Before(next.due)) {
+				next = ft
+			}
+		}
+		if next != nil {
+			next.stopped = true
+		}
+		c.mu.Unlock()
+		if next == nil {
+			return
+		}
+		next.f()
+	}
+}
+
+// pending counts timers not yet fired or stopped.
+func (c *clock) pending() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, ft := range c.timers {
+		if !ft.stopped {
+			n++
+		}
+	}
+	return n
 }
 
 // seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
@@ -149,7 +207,7 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		o.rules(&rules)
 	}
 	clk := &clock{t: start}
-	rules.Clock = clk.now
+	rules.Clock = clk
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: rules.MaxPatternPoints}))
 	st := pgtest.Must(teamstate.Load(ctx, db, at, ts, hub, pgtest.Quiet, rules))
 	return &fixtureEnv{atlas: at, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
@@ -788,5 +846,178 @@ func TestStateIsPublished(t *testing.T) {
 	}
 	if sel.Selection == nil || sel.Selection.Shape != "square" || !slices.Equal(stackWaypoints(scanned), []string{"1010"}) {
 		t.Fatalf("events: %+v / %+v", sel, scanned)
+	}
+}
+
+// TestPublishTeam checks that PublishTeam sends the team's current state to
+// every member without changing it (the empty state right after a start,
+// then the state after a selection), and publishes nothing for a team still
+// in the lobby or a team that doesn't exist.
+func TestPublishTeam(t *testing.T) {
+	f := started(t)
+	subs := make([]*live.Subscription, len(f.users))
+	for i, u := range f.users {
+		subs[i] = f.hub.Subscribe(u)
+		defer subs[i].Close()
+	}
+
+	f.state.PublishTeam(f.teamID)
+	for i, sub := range subs {
+		v := nextState(t, sub)
+		if v.TeamID != f.teamID || v.Selection != nil || len(v.Stack) != 0 || len(v.Waypoints) != 0 {
+			t.Fatalf("member %d: state after start %+v, want empty", i, v)
+		}
+	}
+
+	f.selectAt(t, 0, 0, "square")
+	nextState(t, subs[0]) // the selection's own event
+	f.state.PublishTeam(f.teamID)
+	if v := nextState(t, subs[0]); v.Selection == nil || v.Selection.Shape != "square" {
+		t.Fatalf("republished state %+v, want the square selected", v)
+	}
+	if got, _ := json.Marshal(f.view(t)); f.loggedScans(t) != 0 || !strings.Contains(string(got), `"square"`) {
+		t.Fatalf("PublishTeam changed state: %s", got)
+	}
+
+	f.state.PublishTeam("000000") // no such team
+	lobby := started(t, fixtureOptions{lobby: true})
+	lobbySub := lobby.hub.Subscribe(lobby.users[0])
+	defer lobbySub.Close()
+	lobby.state.PublishTeam(lobby.teamID)
+	select {
+	case ev := <-subs[0].C:
+		t.Fatalf("unknown team published %s", ev.Name)
+	case ev := <-lobbySub.C:
+		t.Fatalf("lobby team published %s", ev.Name)
+	default:
+	}
+}
+
+// nextState waits briefly for the next team_state event on sub and decodes
+// it, failing if none arrives.
+func nextState(t *testing.T, sub *live.Subscription) teamstate.View {
+	t.Helper()
+	select {
+	case ev := <-sub.C:
+		if ev.Name != "team_state" {
+			t.Fatalf("event %q, want team_state", ev.Name)
+		}
+		var v teamstate.View
+		if err := json.Unmarshal(ev.Data, &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	case <-time.After(time.Second):
+		t.Fatal("no team_state event")
+	}
+	return teamstate.View{}
+}
+
+// TestStaleScanIsPublished checks that when a correct scan goes stale, with
+// nobody acting, the store drops it and publishes team_state at once: the
+// first instant it's stale (limit + 1 µs), not before; then the next scan's
+// expiry is armed, and nothing is left pending once the stack is empty.
+func TestStaleScanIsPublished(t *testing.T) {
+	f := started(t)
+	f.selectAt(t, 0, 0, "square")
+	f.scanAt(t, 0, 0, "1001")
+	f.scanAt(t, f.tick(10), 1, "1002")
+	sub := f.hub.Subscribe(f.users[4])
+	defer sub.Close()
+
+	limit := f.rules.Limit()
+	f.clock.at(limit) // exactly limit old: still live, nothing sent
+	select {
+	case ev := <-sub.C:
+		t.Fatalf("published %s before the scan was stale", ev.Name)
+	default:
+	}
+	f.clock.at(limit + time.Microsecond)
+	if got := stackWaypoints(nextState(t, sub)); !slices.Equal(got, []string{"1002"}) {
+		t.Fatalf("after the first expiry: %v", got)
+	}
+	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1002"}) {
+		t.Fatalf("memory after the first expiry: %v", got)
+	}
+	if f.clock.pending() != 1 {
+		t.Fatalf("%d timers pending, want 1 (for 1002)", f.clock.pending())
+	}
+
+	f.clock.at(f.tick(10) + limit + time.Microsecond)
+	if got := stackWaypoints(nextState(t, sub)); len(got) != 0 {
+		t.Fatalf("after the second expiry: %v", got)
+	}
+	if f.clock.pending() != 0 {
+		t.Fatalf("%d timers pending on an empty stack", f.clock.pending())
+	}
+	// Both members are free again, with the selection still active.
+	f.scanAt(t, f.tick(10)+limit+f.tick(1), 0, "1001")
+}
+
+// TestExpiryTimerFollowsWrites checks that every write re-arms or cancels the
+// team's timer: one per team, none after a cast or a purge, and none for a
+// stack holding only wrong scans (they never go stale).
+func TestExpiryTimerFollowsWrites(t *testing.T) {
+	f := started(t, fixtureOptions{sql: `
+		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
+	f.selectAt(t, 0, 0, "square")
+	f.scanAt(t, f.tick(1), 0, "1001")
+	f.scanAt(t, f.tick(2), 1, "1002")
+	if n := f.clock.pending(); n != 1 {
+		t.Fatalf("%d timers after two scans, want 1", n)
+	}
+	f.selectAt(t, f.tick(3), 0, "square") // purge
+	if n := f.clock.pending(); n != 0 {
+		t.Fatalf("%d timers after a purge", n)
+	}
+	f.scanAt(t, f.tick(4), 0, "1012") // wrong
+	if n := f.clock.pending(); n != 0 {
+		t.Fatalf("%d timers for a wrong-only stack", n)
+	}
+	f.selectAt(t, f.tick(5), 0, "square")
+	for i, w := range square {
+		f.scanAt(t, f.tick(6+float64(i)), i, w)
+	}
+	if n := f.clock.pending(); n != 0 {
+		t.Fatalf("%d timers after a cast", n)
+	}
+}
+
+// TestLastCast checks that a cast sets last_cast (pattern, shape, who, when),
+// that a new selection keeps it, that a repeat cast is marked
+// already_completed, that every cast is logged in team_cast, and that a
+// restart reloads the newest one.
+func TestLastCast(t *testing.T) {
+	f := started(t)
+	if v := f.view(t); v.LastCast != nil {
+		t.Fatalf("last_cast before any cast: %+v", v.LastCast)
+	}
+	for round := range 2 {
+		t0 := time.Duration(round) * 2 * f.rules.Limit()
+		f.selectAt(t, t0, 0, "square")
+		for i, w := range square {
+			f.scanAt(t, t0+f.tick(float64(i)), i, w)
+		}
+		lc := f.view(t).LastCast
+		if lc == nil || !slices.Equal(lc.Pattern, square) || lc.Shape != "square" || lc.CastBy != f.users[3] ||
+			!lc.CastAt.Equal(start.Add(t0+f.tick(3))) || lc.AlreadyCompleted != (round == 1) {
+			t.Fatalf("round %d: last_cast %+v", round, lc)
+		}
+	}
+	f.selectAt(t, 5*f.rules.Limit(), 0, "triangle")
+	if f.view(t).LastCast == nil {
+		t.Fatal("a new selection cleared last_cast")
+	}
+
+	var casts int
+	if err := f.db.Pool().QueryRow(context.Background(),
+		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&casts); err != nil || casts != 2 {
+		t.Fatalf("team_cast has %d rows (%v), want 2", casts, err)
+	}
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
+	before := pgtest.Must(json.Marshal(f.view(t).LastCast))
+	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.ForUser(f.users[0])).LastCast))
+	if string(before) != string(after) {
+		t.Fatalf("last_cast across restart\nbefore: %s\nafter:  %s", before, after)
 	}
 }

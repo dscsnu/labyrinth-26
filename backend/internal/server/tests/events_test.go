@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -21,6 +23,17 @@ type stream struct {
 	events chan sseEvent // team / no_team
 	states chan sseEvent // team_state
 	cancel context.CancelFunc
+
+	mu    sync.Mutex
+	names []string // every event's name, in arrival order; guarded by mu
+}
+
+// seen returns the names of every event received so far, in order, across
+// both channels.
+func (s *stream) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.names)
 }
 
 // openStream connects p to the team event stream and parses events in the
@@ -55,6 +68,9 @@ func (e *env) openStream(p player) *stream {
 			case strings.HasPrefix(line, "data: "):
 				var data map[string]any
 				json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data)
+				s.mu.Lock()
+				s.names = append(s.names, name)
+				s.mu.Unlock()
 				if name == "team_state" {
 					s.states <- sseEvent{name: name, data: data}
 				} else {
@@ -219,4 +235,52 @@ func TestStreamIncludesTeamState(t *testing.T) {
 		t.Fatalf("GET /api/teams/me/state: %v", r.payload)
 	}
 	expect(t, "GET state, no team", e.call("GET", "/api/teams/me/state", e.newPlayer("b"), nil), http.StatusNotFound, "not_in_team")
+}
+
+// nextState returns the next team_state event, failing after 3 s.
+func (s *stream) nextState(t *testing.T, what string) sseEvent {
+	t.Helper()
+	select {
+	case ev, ok := <-s.states:
+		if !ok {
+			t.Fatalf("%s: stream closed", what)
+		}
+		return ev
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s: no team_state within 3s", what)
+	}
+	return sseEvent{}
+}
+
+// TestStartPublishesTeamState checks that when the leader starts, every
+// member's open stream gets the IN_GAME team and then the team's empty
+// team_state, in that order, without reconnecting.
+func TestStartPublishesTeamState(t *testing.T) {
+	e := setup(t)
+	teamID, ps := e.fullTeam("start")
+	for _, p := range ps[1:] {
+		expect(t, "ready", e.call("PUT", "/api/teams/me/ready", p, map[string]bool{"ready": true}), http.StatusOK, "")
+	}
+
+	streams := make([]*stream, len(ps))
+	for i, p := range ps {
+		streams[i] = e.openStream(p)
+		expectTeam(t, "initial team", streams[i].next(t, "initial team"), len(ps))
+		streams[i].nextState(t, "initial team_state")
+	}
+
+	expect(t, "start", e.call("POST", "/api/teams/me/start", ps[0], nil), http.StatusOK, "")
+	for i, s := range streams {
+		if team := expectTeam(t, "started team", s.next(t, "started team"), len(ps)); team["status"] != "IN_GAME" {
+			t.Fatalf("member %d: team status %v, want IN_GAME", i, team["status"])
+		}
+		st := s.nextState(t, "team_state after start")
+		if st.data["team_id"] != teamID || len(st.data["waypoints"].([]any)) != 0 || len(st.data["stack"].([]any)) != 0 || st.data["selection"] != nil {
+			t.Fatalf("member %d: team_state after start %v, want empty", i, st.data)
+		}
+		want := []string{"team", "team_state", "team", "team_state"}
+		if got := s.seen(); !slices.Equal(got, want) {
+			t.Fatalf("member %d: events %v, want %v", i, got, want)
+		}
+	}
 }

@@ -129,8 +129,9 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 
 	// 5. apply
 	e.cur.Store(&next)
-	// 6. publish
+	// 6. publish, and time the next expiry
 	s.publish(t.ID, &next)
+	s.scheduleExpiry(e, t.ID, &next)
 	return s.view(t.ID, next), nil
 }
 
@@ -167,8 +168,9 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 
 	// 5. apply
 	e.cur.Store(&next)
-	// 6. publish
+	// 6. publish, and time the next expiry
 	s.publish(t.ID, &next)
+	s.scheduleExpiry(e, t.ID, &next)
 	return s.view(t.ID, next), nil
 }
 
@@ -238,12 +240,13 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 		next.Shapes = cur.Shapes.With(cur.Selection.Shape)
 		next.Selection = Selection{}
 		next.Stack = NewStack(s.rules.MaxPatternPoints)
+		next.LastCast = Cast{Active: true, Pattern: completed, By: userID, At: now, AlreadyCompleted: res.AlreadyCompleted}
 	}
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		if isComplete {
-			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, wrong)
+			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, wrong, res.AlreadyCompleted)
 		}
 		return s.db.insertScan(ctx, t.ID, waypointID, userID, now, wrong)
 	}); err != nil {
@@ -252,8 +255,35 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 
 	// 5. apply
 	e.cur.Store(&next)
-	// 6. publish
+	// 6. publish, and time the next expiry
 	s.publish(t.ID, &next)
+	s.scheduleExpiry(e, t.ID, &next)
 	res.State = s.view(t.ID, next)
 	return res, nil
+}
+
+// PublishTeam sends teamID's current state to its members as "team_state",
+// changing nothing. teams calls it (through teams.Rules.OnStart, wired in
+// server.Build) right after a team starts, so every member gets the new
+// team's (empty) state after its "team" event without reconnecting. It
+// publishes nothing if the team doesn't exist or isn't IN_GAME.
+//
+// Not a write: nothing is built, persisted or applied, so it keeps only steps
+// 1, 2 and 6. It takes the team's state lock so its event is ordered with
+// the team's writes. The state entry it locks is created empty if the team
+// had none: the same empty State ForTeam reports for a team without an entry,
+// so reads (and a restart, which creates no entry) see no difference.
+func (s *Store) PublishTeam(teamID string) {
+	// 2. validate, before 1. lock: an IN_GAME team's status never changes
+	t, ok := s.teams.ByID(teamID)
+	if !ok || t.Status != teams.InGame {
+		return
+	}
+
+	// 1. lock
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+
+	// 6. publish
+	s.publish(teamID, e.cur.Load())
 }

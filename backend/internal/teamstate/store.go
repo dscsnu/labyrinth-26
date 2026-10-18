@@ -21,19 +21,49 @@ import (
 // its own per-team lock.
 //
 //	atlas     Atlas                    static waypoints/shapes/patterns (atlas use case), no lock
+//	clock     Clock                    now and timers (real, or a fake in tests)
 //	Store.mu (RWMutex) guards:
 //	  states  map[teamID]*entry        created on a team's first write
 //	entry
-//	  mu   Mutex                       writers to this team's state queue here
-//	  cur  atomic.Pointer[State]       the current snapshot; readers load it lock-free
+//	  mu          Mutex                writers to this team's state queue here
+//	  cur         atomic.Pointer[State] the current snapshot; readers load it lock-free
+//	  stopExpiry  func() bool          cancels the team's one pending expiry timer (under mu)
 //
 // A State is fixed size (bitsets, a selection and a fixed-array stack), so a
 // new snapshot is a plain struct copy.
 
-// entry holds one team's state: its write lock and its current snapshot.
+// entry holds one team's state: its write lock, its current snapshot, and
+// the timer for its next time-driven change.
 type entry struct {
 	mu  sync.Mutex
 	cur atomic.Pointer[State]
+	// stopExpiry cancels the pending expiry timer (scheduleExpiry), or is nil
+	// if none is pending. Guarded by mu.
+	stopExpiry func() bool
+}
+
+// Clock is where the store gets time from: the current time, and timers for
+// changes that happen because time passed (a correct scan going stale) rather
+// than because someone acted. systemClock is the real one; tests pass a fake
+// they advance by hand.
+type Clock interface {
+	// Now returns the current time, in UTC truncated to microseconds
+	// (Postgres's precision), so a restart reproduces times exactly.
+	Now() time.Time
+	// AfterFunc calls f in its own goroutine after d (at once if d <= 0),
+	// and returns a function that cancels the call if it hasn't run yet.
+	AfterFunc(d time.Duration, f func()) (stop func() bool)
+}
+
+// systemClock is the real Clock: time.Now and time.AfterFunc.
+type systemClock struct{}
+
+// Now returns the current time in UTC, truncated to microseconds.
+func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+
+// AfterFunc schedules f with time.AfterFunc.
+func (systemClock) AfterFunc(d time.Duration, f func()) func() bool {
+	return time.AfterFunc(d, f).Stop
 }
 
 // Teams is what team state needs from the teams use case. A team only gets
@@ -74,10 +104,9 @@ type Rules struct {
 	MaxPatternPoints int
 	// WriteTimeout bounds each write-through (storage.write_timeout).
 	WriteTimeout time.Duration
-	// Clock is the store's clock; nil means the real one (systemNow). Tests
-	// pass a fake. It must return UTC truncated to microseconds, Postgres's
-	// precision, so a restart reproduces times exactly. Not in config.toml.
-	Clock func() time.Time
+	// Clock is the store's time source; nil means the real one
+	// (systemClock). Tests pass a fake. Not in config.toml.
+	Clock Clock
 }
 
 // Limit is the most a pattern's scans may span, bottom to top, and the age
@@ -98,12 +127,12 @@ type Store struct {
 	mu     sync.RWMutex
 	states map[string]*entry
 
-	// now is the clock: Rules.Clock, or systemNow.
-	now func() time.Time
+	// clock is Rules.Clock, or systemClock.
+	clock Clock
 }
 
-// systemNow is the real clock, in UTC at Postgres's microsecond precision.
-func systemNow() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+// now returns the store's current time.
+func (s *Store) now() time.Time { return s.clock.Now() }
 
 // Load reads every team's stored state, checking it against a. Call once at
 // startup, after atlas.Load and teams.Load.
@@ -114,9 +143,9 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, t Teams, hub *live.Hub,
 		return nil, fmt.Errorf("load team state: %w", err)
 	}
 
-	s := &Store{rules: rules, db: d, atlas: a, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, now: systemNow}
-	if rules.Clock != nil {
-		s.now = rules.Clock
+	s := &Store{rules: rules, db: d, atlas: a, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, clock: rules.Clock}
+	if s.clock == nil {
+		s.clock = systemClock{}
 	}
 	for teamID, rows := range stored {
 		st, err := s.stateOf(rows)
@@ -126,6 +155,14 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, t Teams, hub *live.Hub,
 		e := &entry{}
 		e.cur.Store(&st)
 		s.states[teamID] = e
+	}
+	// Stacks from before the restart keep ageing. Timers are armed only once
+	// the map is complete: one that's already due fires at once, and its
+	// callback reads the map.
+	for teamID, e := range s.states {
+		e.mu.Lock()
+		s.scheduleExpiry(e, teamID, e.cur.Load())
+		e.mu.Unlock()
 	}
 	log.Info("loaded team state", "teams", len(s.states))
 	return s, nil
@@ -159,6 +196,13 @@ func (s *Store) stateOf(rows *teamRows) (State, error) {
 			return st, fmt.Errorf("selection: unknown shape %q", sel.shapeID)
 		}
 		st.Selection = Selection{Active: true, Shape: shape, By: sel.selectedBy, At: sel.selectedAt.UTC()}
+	}
+	if lc := rows.lastCast; lc != nil {
+		p, ok := s.atlas.PatternByID(lc.patternID)
+		if !ok {
+			return st, fmt.Errorf("last cast: unknown pattern %d", lc.patternID)
+		}
+		st.LastCast = Cast{Active: true, Pattern: p, By: lc.castBy, At: lc.castAt.UTC(), AlreadyCompleted: lc.alreadyCompleted}
 	}
 	for _, sc := range rows.stack {
 		w, ok := s.atlas.WaypointIndex(sc.waypointID)
@@ -216,11 +260,63 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 		if st, err = s.stateOf(rows); err == nil {
 			e.cur.Store(&st)
 			s.publish(teamID, &st)
+			s.scheduleExpiry(e, teamID, &st)
 			return writeErr
 		}
 	}
 	s.log.Error("reload of team state failed; keeping memory as is", "team_id", teamID, "error", err)
 	return writeErr
+}
+
+// scheduleExpiry sets e's timer for st's next time-driven change: the moment
+// its oldest correct scan goes stale (wrong scans never do). It cancels any
+// pending timer first, so each team has at most one. Call with e.mu held,
+// after every apply.
+func (s *Store) scheduleExpiry(e *entry, teamID string, st *State) {
+	if e.stopExpiry != nil {
+		e.stopExpiry()
+		e.stopExpiry = nil
+	}
+	at, ok := st.Stack.NextExpiry(s.rules.Limit())
+	if !ok {
+		return
+	}
+	e.stopExpiry = s.clock.AfterFunc(at.Sub(s.now()), func() { s.expire(teamID) })
+}
+
+// expire runs when a correct scan in teamID's stack goes stale. It drops the
+// stale scans from memory and publishes the result, so every client sees the
+// stack shrink without anyone acting, then schedules the next expiry.
+//
+// A memory-only change (AGENTS.md §6): nothing is persisted, because
+// Postgres never stores the stack itself; it's rebuilt from team_scan by time
+// on load, which drops the same scans.
+func (s *Store) expire(teamID string) {
+	// 1. lock
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+	cur := e.cur.Load()
+
+	// 2. validate: is anything stale yet? (A write may have purged or
+	// rebuilt the stack since this timer was set.)
+	live := cur.Stack.Live(s.now(), s.rules.Limit())
+	if len(live) == cur.Stack.Len() {
+		s.scheduleExpiry(e, teamID, cur)
+		return
+	}
+
+	// 3. build
+	next := *cur
+	next.Stack = NewStack(s.rules.MaxPatternPoints)
+	for _, sc := range live {
+		next.Stack = next.Stack.Push(sc)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish
+	s.publish(teamID, &next)
+	s.scheduleExpiry(e, teamID, &next)
 }
 
 // publish sends a team's state to its members as a "team_state" event.

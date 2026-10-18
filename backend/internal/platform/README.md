@@ -281,7 +281,7 @@ event: team␤
 data: {"id":"482913","name":"Live","leader_id":"6f1c…","status":"LOBBY","created_at":"2026-10-17T12:00:00Z","started_at":null,"members":[…]}␤
 ␤
 event: team_state␤
-data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"stack":[]}␤
+data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[]}␤
 ␤
 : ping␤
 ␤
@@ -289,7 +289,7 @@ event: team␤
 data: {"id":"482913",…,"members":[…,{"id":"9a2b…","name":"b","avatar_url":null,"is_ready":true,"joined_at":"2026-10-17T12:00:05Z"}]}␤
 ␤
 ```
-A user in no team gets `event: no_team␤data: {}␤␤` instead of the first two events.
+A user in no team gets `event: no_team␤data: {}␤␤` instead of the first two events. Every event, what triggers it and the ordering guarantees: `internal/server/README.md`, "The event stream".
 
 `Data` must not contain a newline: SSE would split it into two `data:` lines. `json.Marshal` never emits one (newlines inside strings are escaped as `\n`).
 
@@ -374,6 +374,8 @@ The migrations:
 | `0003_content_progress.sql` | content: `waypoint`, `shape`, `pattern`, `pattern_waypoint`; progress: `team_scan`, `team_pattern` |
 | `0004_selection_stack.sql` | `team_selection`; index `team_scan_team_id_idx` on `team_scan (team_id, id DESC)` |
 | `0005_scan_cleanup.sql` | Drops `team_scan_team_idx` (`team_id`, from 0003), redundant with 0004's index. Adds `COMMENT ON TABLE team_scan` correcting 0003's SQL comment ("every scan, including repeats"): one row per **accepted** scan; rejected scans are never written. Never edit 0003 to fix it: its checksum would change |
+| `0006_wrong_scans.sql` | Adds `team_scan.wrong BOOLEAN NOT NULL DEFAULT false`: a scan that didn't fit the selected shape, so a restart rebuilds it as never-stale |
+| `0007_team_cast.sql` | `team_cast` (`id` identity PK, `team_id` → `team` `ON DELETE CASCADE`, `pattern_id` → `pattern`, `cast_by` → `userprofile`, `cast_at`, `already_completed`): every cast, repeats included; the newest row per team is `last_cast` after a restart. Index `team_cast_team_id_idx` on `(team_id, id DESC)` |
 
 Each use case's README documents its tables and constraints.
 

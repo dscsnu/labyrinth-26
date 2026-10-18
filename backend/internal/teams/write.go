@@ -291,7 +291,9 @@ func equalPtr(a, b *string) bool {
 
 // Start moves the leader's team from LOBBY to IN_GAME once it has exactly
 // Rules.Size members and every non-leader member is ready. The roster is frozen
-// from then on: nobody can join, leave or change ready.
+// from then on: nobody can join, leave or change ready. After publishing the
+// "team" event it calls Rules.OnStart (if set) with the started team, still
+// holding the team's lock; a rejected or failed start doesn't call it.
 func (s *Store) Start(ctx context.Context, userID uuid.UUID) (Team, error) {
 	// 1. lock
 	e, t, err := s.lockUsersTeam(userID)
@@ -331,7 +333,12 @@ func (s *Store) Start(ctx context.Context, userID uuid.UUID) (Team, error) {
 	next.StartedAt = &startedAt
 	// 5. apply
 	e.cur.Store(&next)
-	// 6. publish
+	// 6. publish: the team, then (through OnStart) anything other use cases
+	// show for a started team. Still under the lock, so a member's stream
+	// gets "team" before what follows from it.
 	s.publish(&next)
+	if s.rules.OnStart != nil {
+		s.rules.OnStart(next)
+	}
 	return next, nil
 }

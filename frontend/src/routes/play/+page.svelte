@@ -2,6 +2,7 @@
     import { ScanGate } from "#lib/game/scanGate.ts";
     import { ScanResultSchema, TeamStateSchema, type TeamState } from "#lib/types/Game.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
+    import { goto } from "$app/navigation";
     import { onMount, untrack } from "svelte";
     import type { PageProps } from "./$types";
 
@@ -36,6 +37,12 @@
     });
     let selected = $derived(ts.selection?.shape ?? null);
     let selectedShape = $derived(game.shapes.find((s) => s.id === selected));
+    // Every scan is final: once you've scanned for this attempt, you're locked
+    // until it ends (cast or restart). Wrong scans aren't marked, on purpose.
+    let iScanned = $derived(ts.stack.some((s) => s.user_id === user?.id));
+    // A stack as big as the type's largest pattern that hasn't cast must hold
+    // a wrong scan: completion would have purged it. Only a restart helps.
+    let stuck = $derived(!!selectedShape && selectedShape.points.length > 0 && ts.stack.length >= Math.max(...selectedShape.points));
     let busy = $state(false);
     let waypoint = $state("");
     let message = $state<{ ok: boolean; text: string } | null>(null);
@@ -54,6 +61,12 @@
         events.onerror = () => (connected = false);
         events.addEventListener("team", (e) => (team = TeamSchema.parse(JSON.parse(e.data))));
         events.addEventListener("team_state", (e) => observe(TeamStateSchema.parse(JSON.parse(e.data))));
+        // /play needs a team: without one (never had one, or it's gone) the
+        // player belongs on /team, where they can create or join one.
+        events.addEventListener("no_team", () => {
+            events.close();
+            goto("/team");
+        });
         return () => {
             clearInterval(tick);
             events.close();
@@ -69,14 +82,20 @@
         return { res, json: await res.json().catch(() => ({})) };
     };
 
-    const selectShape = async (shape: string) => {
+    const selectShape = async (shape: string, restart = false) => {
         busy = true;
         const { res, json } = await call("/play/selection", "PUT", { shape });
         busy = false;
         if (!res.ok) return (message = { ok: false, text: `${json.code}: ${json.message}` });
         observe(TeamStateSchema.parse(json.payload));
-        message = { ok: true, text: `selected ${shape}: stack purged` };
+        message = restart
+            ? { ok: true, text: "attempt restarted: every scan cleared, everyone can scan again" }
+            : { ok: true, text: `selected ${shape}: stack purged` };
     };
+
+    // Restarting is reselecting the same type: the backend purges every scan,
+    // wrong ones included, and unlocks every member. Any member can do it.
+    const restart = () => selected && selectShape(selected, true);
 
     const giveUp = async () => {
         busy = true;
@@ -130,7 +149,15 @@
     {/each}
 </p>
 {#if selected}
-    <p>Selected: <b>{selectedShape?.name ?? selected}</b> <button disabled={busy} onclick={giveUp}>give up</button></p>
+    <p>
+        Selected: <b>{selectedShape?.name ?? selected}</b>
+        <button disabled={busy} onclick={restart}>restart attempt</button>
+        <button disabled={busy} onclick={giveUp}>give up</button>
+    </p>
+    <p><small>
+        Every scan is final. If someone scans a point that doesn't fit, this attempt can't cast
+        (you won't be told which scan it was): restart to clear every scan and try again.
+    </small></p>
 {:else}
     <p>No type selected.</p>
 {/if}
@@ -142,18 +169,35 @@
     {:else if open}
         <b>{(remaining / 1000).toFixed(1)} s</b> left
     {:else}
-        <b style="color: red">time's up</b>: select the type again to restart
+        <b style="color: red">time's up</b>
+        <button disabled={busy} onclick={restart}>restart attempt</button>
     {/if}
 </p>
+{#if stuck}
+    <p style="color: red">
+        Everyone needed has scanned and nothing cast, so a scan didn't fit.
+        <button disabled={busy} onclick={restart}>restart attempt</button>
+    </p>
+{/if}
+{#if selected && iScanned}
+    <p>You've scanned for this attempt; a teammate scans the next point. Locked until it casts or someone restarts.</p>
+{/if}
 <form onsubmit={scan}>
     <input bind:value={waypoint} inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="1001" required
-        disabled={!selected || !open || busy} />
-    <button disabled={!selected || !open || busy}>Scan</button>
+        disabled={!selected || !open || iScanned || busy} />
+    <button disabled={!selected || !open || iScanned || busy}>Scan</button>
     <small>dev seed waypoints: 1001–1011</small>
 </form>
 
 {#if message}
     <p style:color={message.ok ? "green" : "red"}>{message.text}</p>
+{/if}
+
+{#if ts.last_cast}
+    <p>
+        Last cast: <b>{ts.last_cast.shape}</b> {ts.last_cast.pattern.join("-")} by {memberName(ts.last_cast.cast_by)}
+        at {new Date(ts.last_cast.cast_at).toLocaleTimeString()}{ts.last_cast.already_completed ? " (cast before)" : ""}
+    </p>
 {/if}
 
 <h3>Stack (bottom → top)</h3>
