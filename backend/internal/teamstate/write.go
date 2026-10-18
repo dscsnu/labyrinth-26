@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/atlas"
 	"labyrinth/internal/teams"
 )
 
@@ -99,7 +100,7 @@ func (s *Store) inGameTeam(userID uuid.UUID) (teams.Team, error) {
 // earlier attempt never count toward a new one.
 func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (View, error) {
 	// 2. validate, before 1. lock: content and team need no lock
-	shape, ok := s.content.ShapeIndex(shapeID)
+	shape, ok := s.atlas.ShapeIndex(shapeID)
 	if !ok {
 		return View{}, ErrUnknownShape
 	}
@@ -117,7 +118,7 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	now := s.now()
 	next := *cur
 	next.Selection = Selection{Active: true, Shape: shape, By: userID, At: now}
-	next.Stack = newStack(s.rules.MaxPatternPoints)
+	next.Stack = NewStack(s.rules.MaxPatternPoints)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -155,7 +156,7 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	// 3. build
 	next := *cur
 	next.Selection = Selection{}
-	next.Stack = newStack(s.rules.MaxPatternPoints)
+	next.Stack = NewStack(s.rules.MaxPatternPoints)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -177,7 +178,7 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 // a wrong scan is still pushed, marked wrong, and poisons the selection.
 func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (ScanResult, error) {
 	// 2. validate, before 1. lock: content and team need no lock
-	w, ok := s.content.WaypointIndex(waypointID)
+	w, ok := s.atlas.WaypointIndex(waypointID)
 	if !ok {
 		return ScanResult{}, ErrUnknownWaypoint
 	}
@@ -196,8 +197,8 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	if !cur.Selection.Active {
 		return ScanResult{}, ErrNoShapeSelected
 	}
-	live := cur.Stack.Live(now, s.rules.limit())
-	var set WaypointSet
+	live := cur.Stack.Live(now, s.rules.Limit())
+	var set atlas.WaypointSet
 	for _, sc := range live {
 		if sc.Waypoint == w {
 			return ScanResult{}, ErrWaypointAlreadyScanned
@@ -210,12 +211,12 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	set = set.With(w)
 	// A scan that doesn't fit isn't rejected: it's pushed anyway, marked
 	// wrong, and its member and waypoint slots stay occupied.
-	wrong := !s.content.FitsShape(cur.Selection.Shape, set)
+	wrong := !s.atlas.FitsShape(cur.Selection.Shape, set)
 
 	// 3. build: drop stale scans (keep the live ones, wrong scans included),
 	// push this one. Every live correct scan is at most the limit old and this
 	// one is now, so correct bottom-to-top spans at most the limit.
-	stack := newStack(s.rules.MaxPatternPoints)
+	stack := NewStack(s.rules.MaxPatternPoints)
 	for _, sc := range live {
 		stack = stack.Push(sc)
 	}
@@ -227,22 +228,22 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	res := ScanResult{Outcome: OutcomeScanAdded}
 	// A wrong scan can't complete: it's in the set, so the set is never a
 	// pattern of the selected shape.
-	completed, isComplete := s.content.PatternFor(set)
-	isComplete = isComplete && s.content.Patterns[completed].Shape == cur.Selection.Shape
+	completed, isComplete := s.atlas.PatternFor(set)
+	isComplete = isComplete && s.atlas.Pattern(completed).Shape == cur.Selection.Shape
 	if isComplete {
 		res.Outcome = OutcomePatternCompleted
-		res.Pattern = s.content.WaypointIDs(set)
+		res.Pattern = s.atlas.WaypointIDs(set)
 		res.AlreadyCompleted = cur.Patterns.Has(completed)
 		next.Patterns = cur.Patterns.With(completed)
 		next.Shapes = cur.Shapes.With(cur.Selection.Shape)
 		next.Selection = Selection{}
-		next.Stack = newStack(s.rules.MaxPatternPoints)
+		next.Stack = NewStack(s.rules.MaxPatternPoints)
 	}
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		if isComplete {
-			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.content.Patterns[completed].dbID, wrong)
+			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, wrong)
 		}
 		return s.db.insertScan(ctx, t.ID, waypointID, userID, now, wrong)
 	}); err != nil {

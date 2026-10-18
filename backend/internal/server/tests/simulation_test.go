@@ -1,4 +1,4 @@
-package server_test
+package tests
 
 // Simulated teams: each player is a client with its own network delay, its
 // own event stream, and the frontend's countdown rule (scanGate, mirrored from

@@ -1,4 +1,4 @@
-package live
+package tests
 
 import (
 	"testing"
@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"labyrinth/internal/platform/config/configtest"
+	"labyrinth/internal/platform/live"
 )
 
 // testBuffer returns config.toml's live.subscriber_buffer, the buffer the hub
@@ -19,12 +20,12 @@ func testBuffer(t *testing.T) int {
 // buffer behind is dropped while others keep receiving.
 func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 	buffer := testBuffer(t)
-	h := NewHub(buffer)
+	h := live.NewHub(buffer)
 	user := uuid.New()
 	slow, fast := h.Subscribe(user), h.Subscribe(user)
 
 	for i := range buffer + 1 {
-		h.Send(user, Event{Name: "team", Data: []byte{byte('0' + i%10)}})
+		h.Send(user, live.Event{Name: "team", Data: []byte{byte('0' + i%10)}})
 		<-fast.C // fast keeps up
 	}
 
@@ -36,7 +37,7 @@ func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 		t.Fatalf("slow subscriber got %d buffered events before being dropped, want %d", n, buffer)
 	}
 
-	h.Send(user, Event{Name: "team", Data: []byte("x")})
+	h.Send(user, live.Event{Name: "team", Data: []byte("x")})
 	if ev, ok := <-fast.C; !ok || string(ev.Data) != "x" {
 		t.Fatalf("fast subscriber stopped receiving: %v %v", ev, ok)
 	}
@@ -48,7 +49,7 @@ func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 // TestHubCloseAndRemove checks that Close is idempotent, that closing the hub
 // ends every stream, and that late subscribers start closed.
 func TestHubCloseAndRemove(t *testing.T) {
-	h := NewHub(testBuffer(t))
+	h := live.NewHub(testBuffer(t))
 	a, b := h.Subscribe(uuid.New()), h.Subscribe(uuid.New())
 
 	a.Close()
@@ -75,11 +76,11 @@ func TestHubCloseAndRemove(t *testing.T) {
 // TestHubSendsOnlyToThatUser checks that events reach only the addressed
 // user's streams.
 func TestHubSendsOnlyToThatUser(t *testing.T) {
-	h := NewHub(testBuffer(t))
+	h := live.NewHub(testBuffer(t))
 	alice, bob := uuid.New(), uuid.New()
 	a, b := h.Subscribe(alice), h.Subscribe(bob)
 
-	h.Send(alice, Event{Name: "team", Data: []byte("{}")})
+	h.Send(alice, live.Event{Name: "team", Data: []byte("{}")})
 	if ev := <-a.C; ev.Name != "team" {
 		t.Fatalf("alice got %v", ev)
 	}

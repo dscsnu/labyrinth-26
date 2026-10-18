@@ -1,4 +1,4 @@
-package auth
+package tests
 
 // Login code tests against a real Postgres (TEST_DATABASE_URL), in schema
 // auth_test.
@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/auth"
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/postgres/pgtest"
@@ -20,12 +21,12 @@ import (
 
 // codesFixture returns a login code store with config.toml's TTL, a user and
 // one fresh code for them.
-func codesFixture(t *testing.T) (*LoginCodes, *postgres.DB, uuid.UUID, string) {
+func codesFixture(t *testing.T) (*auth.LoginCodes, *postgres.DB, uuid.UUID, string) {
 	t.Helper()
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "auth_test"))
 	u := pgtest.Must(user.New(db).SignInWithGoogle(ctx, user.GoogleProfile{Subject: "s", Email: "a@snu.edu.in", Name: "A"}))
-	codes := NewLoginCodes(db, configtest.Settings(t).Auth.LoginCodeTTL.Duration)
+	codes := auth.NewLoginCodes(db, configtest.Settings(t).Auth.LoginCodeTTL.Duration)
 	return codes, db, u.ID, pgtest.Must(codes.Create(ctx, u.ID))
 }
 

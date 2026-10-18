@@ -1,4 +1,4 @@
-package server_test
+package tests
 
 // Integration tests: the real router and database, with a fake Google OIDC
 // provider. Requires TEST_DATABASE_URL pointing at a disposable Postgres; the
@@ -474,5 +474,23 @@ func TestEmailInUse(t *testing.T) {
 	loc := e.callback(url.Values{"state": {state}, "code": {"good-code"}}, cookie)
 	if loc.Path != "/auth/error" || loc.Query().Get("reason") != "email_in_use" {
 		t.Fatalf("redirect %s", loc)
+	}
+}
+
+// TestStateAndAccessTokensNotInterchangeable checks that the OAuth state
+// cookie and an access token, both signed with the same key, are each refused
+// where the other belongs: they carry different audiences.
+func TestStateAndAccessTokensNotInterchangeable(t *testing.T) {
+	e := setup(t)
+	access := e.signIn()
+	_, stateCookie := e.login("/")
+
+	if status, body := e.me(stateCookie.Value); status != http.StatusUnauthorized || body["code"] != "invalid_token" {
+		t.Fatalf("state token as bearer: %d %v", status, body)
+	}
+	forged := &http.Cookie{Name: stateCookie.Name, Value: access}
+	loc := e.callback(url.Values{"state": {"anything"}, "code": {"good-code"}}, forged)
+	if loc.Path != "/auth/error" || loc.Query().Get("reason") != "state_invalid" {
+		t.Fatalf("access token as state cookie: redirected to %s", loc)
 	}
 }

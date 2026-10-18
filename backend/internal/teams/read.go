@@ -2,6 +2,8 @@ package teams
 
 import (
 	"errors"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +59,24 @@ func (s *Store) ForUser(userID uuid.UUID) (Team, error) {
 		return Team{}, ErrNotInTeam
 	}
 	return *e.cur.Load(), nil
+}
+
+// All returns every team in memory, sorted by ID: for admin views, and for
+// comparing memory across a restart. It holds the shared lock while it copies
+// the index, then loads each snapshot lock-free.
+func (s *Store) All() []Team {
+	s.mu.RLock()
+	entries := make([]*entry, 0, len(s.teams))
+	for _, e := range s.teams {
+		entries = append(entries, e)
+	}
+	s.mu.RUnlock()
+	out := make([]Team, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, *e.cur.Load())
+	}
+	slices.SortFunc(out, func(a, b Team) int { return strings.Compare(a.ID, b.ID) })
+	return out
 }
 
 // ByID returns a team by its ID.

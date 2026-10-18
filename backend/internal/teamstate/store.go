@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/atlas"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/teams"
@@ -19,7 +20,7 @@ import (
 // The in-memory layout. Team state is separate from teams: its own map and
 // its own per-team lock.
 //
-//	content   *Content                 static waypoints/shapes/patterns, no lock
+//	atlas     Atlas                    static waypoints/shapes/patterns (atlas use case), no lock
 //	Store.mu (RWMutex) guards:
 //	  states  map[teamID]*entry        created on a team's first write
 //	entry
@@ -43,6 +44,24 @@ type Teams interface {
 	ByID(teamID string) (teams.Team, bool)
 }
 
+// Atlas is what team state needs from the atlas use case: the static
+// waypoints, shapes and patterns. The atlas never changes after startup, so
+// reading it needs no lock.
+type Atlas interface {
+	WaypointIndex(id string) (int, bool)
+	ShapeIndex(id string) (int, bool)
+	PatternByID(id int) (int, bool)
+	SetOf(ids []string) (atlas.WaypointSet, error)
+	PatternFor(set atlas.WaypointSet) (int, bool)
+	FitsShape(shape int, set atlas.WaypointSet) bool
+	WaypointIDs(set atlas.WaypointSet) []string
+	ShapePatterns(shape int) []int
+	ShapeCount() int
+	Waypoint(i int) atlas.Waypoint
+	Shape(i int) atlas.Shape
+	Pattern(i int) atlas.Pattern
+}
+
 // Rules are the scanning settings from config.toml.
 type Rules struct {
 	// ScanWindow is the span a pattern's scans must fit in, bottom to top
@@ -55,52 +74,50 @@ type Rules struct {
 	MaxPatternPoints int
 	// WriteTimeout bounds each write-through (storage.write_timeout).
 	WriteTimeout time.Duration
+	// Clock is the store's clock; nil means the real one (systemNow). Tests
+	// pass a fake. It must return UTC truncated to microseconds, Postgres's
+	// precision, so a restart reproduces times exactly. Not in config.toml.
+	Clock func() time.Time
 }
 
-// limit is the most a pattern's scans may span, bottom to top, and the age
-// at which a scan goes stale: the scan window plus its grace.
-func (r Rules) limit() time.Duration { return r.ScanWindow + r.ScanGrace }
+// Limit is the most a pattern's scans may span, bottom to top, and the age
+// at which a correct scan goes stale: the scan window plus its grace.
+func (r Rules) Limit() time.Duration { return r.ScanWindow + r.ScanGrace }
 
 // Store is the team state use case: each team's selection, scan stack and
 // completions in memory, written through to Postgres.
 type Store struct {
-	rules   Rules
-	db      db
-	content *Content
-	game    Game // built once from content and rules
-	teams   Teams
-	hub     *live.Hub
-	log     *slog.Logger
+	rules Rules
+	db    db
+	atlas Atlas
+	game  Game // built once from the atlas and rules
+	teams Teams
+	hub   *live.Hub
+	log   *slog.Logger
 
 	mu     sync.RWMutex
 	states map[string]*entry
 
-	// now is the clock, swappable in tests. Times are UTC and truncated to
-	// microseconds, Postgres's precision, so a restart reproduces them exactly.
+	// now is the clock: Rules.Clock, or systemNow.
 	now func() time.Time
 }
 
 // systemNow is the real clock, in UTC at Postgres's microsecond precision.
 func systemNow() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
 
-// Load reads the static content and every team's stored state, enforcing
-// rules. Call once at startup, after teams.Load.
-func Load(ctx context.Context, pg *postgres.DB, t Teams, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
+// Load reads every team's stored state, checking it against a. Call once at
+// startup, after atlas.Load and teams.Load.
+func Load(ctx context.Context, pg *postgres.DB, a Atlas, t Teams, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
 	d := db{pool: pg.Pool()}
-	rows, err := d.selectContent(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load content: %w", err)
-	}
-	content, err := newContent(rows, rules.MaxPatternPoints)
-	if err != nil {
-		return nil, fmt.Errorf("invalid content: %w", err)
-	}
 	stored, err := d.selectTeams(ctx, "", rules.MaxPatternPoints)
 	if err != nil {
 		return nil, fmt.Errorf("load team state: %w", err)
 	}
 
-	s := &Store{rules: rules, db: d, content: content, game: newGame(content, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, now: systemNow}
+	s := &Store{rules: rules, db: d, atlas: a, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, now: systemNow}
+	if rules.Clock != nil {
+		s.now = rules.Clock
+	}
 	for teamID, rows := range stored {
 		st, err := s.stateOf(rows)
 		if err != nil {
@@ -110,42 +127,41 @@ func Load(ctx context.Context, pg *postgres.DB, t Teams, hub *live.Hub, log *slo
 		e.cur.Store(&st)
 		s.states[teamID] = e
 	}
-	log.Info("loaded team state", "teams", len(s.states),
-		"waypoints", len(content.Waypoints), "shapes", len(content.Shapes), "patterns", len(content.Patterns))
+	log.Info("loaded team state", "teams", len(s.states))
 	return s, nil
 }
 
 // emptyState is the state of a team that hasn't done anything: no progress,
 // no selection, and an empty stack of the configured capacity.
 func (s *Store) emptyState() State {
-	return State{Stack: newStack(s.rules.MaxPatternPoints)}
+	return State{Stack: NewStack(s.rules.MaxPatternPoints)}
 }
 
-// stateOf rebuilds a State from stored IDs, failing on any ID the content
+// stateOf rebuilds a State from stored IDs, failing on any ID the atlas
 // doesn't have.
 func (s *Store) stateOf(rows *teamRows) (State, error) {
 	st := s.emptyState()
 	var err error
-	if st.Waypoints, err = s.content.SetOf(rows.waypoints); err != nil {
+	if st.Waypoints, err = s.atlas.SetOf(rows.waypoints); err != nil {
 		return st, err
 	}
 	for _, id := range rows.patterns {
-		p, ok := s.content.patternByDBID[id]
+		p, ok := s.atlas.PatternByID(id)
 		if !ok {
 			return st, fmt.Errorf("unknown pattern %d", id)
 		}
 		st.Patterns = st.Patterns.With(p)
-		st.Shapes = st.Shapes.With(s.content.Patterns[p].Shape)
+		st.Shapes = st.Shapes.With(s.atlas.Pattern(p).Shape)
 	}
 	if sel := rows.selection; sel != nil {
-		shape, ok := s.content.ShapeIndex(sel.shapeID)
+		shape, ok := s.atlas.ShapeIndex(sel.shapeID)
 		if !ok {
 			return st, fmt.Errorf("selection: unknown shape %q", sel.shapeID)
 		}
 		st.Selection = Selection{Active: true, Shape: shape, By: sel.selectedBy, At: sel.selectedAt.UTC()}
 	}
 	for _, sc := range rows.stack {
-		w, ok := s.content.WaypointIndex(sc.waypointID)
+		w, ok := s.atlas.WaypointIndex(sc.waypointID)
 		if !ok {
 			return st, fmt.Errorf("stack scan: unknown waypoint %q", sc.waypointID)
 		}

@@ -11,21 +11,23 @@ Every number below that comes from `config.toml` is shown with its current value
 4. [Data model: memory](#data-model-memory)
 5. [Data model: Postgres](#data-model-postgres)
 6. [Memory ↔ Postgres](#memory--postgres)
-7. [How waypoints and patterns are stored](#how-waypoints-and-patterns-are-stored)
-8. [The client countdown and latency](#the-client-countdown-and-latency)
-9. [Walkthroughs](#walkthroughs)
-10. [The write-through](#the-write-through)
-11. [API](#api)
-12. [Rules and cases](#rules-and-cases)
-13. [Concurrency and locking](#concurrency-and-locking)
-14. [Failure and recovery](#failure-and-recovery)
-15. [Limits and how to change them](#limits-and-how-to-change-them)
-16. [Not decided yet](#not-decided-yet)
-17. [Tests](#tests)
+7. [The client countdown and latency](#the-client-countdown-and-latency)
+8. [Walkthroughs](#walkthroughs)
+9. [The write-through](#the-write-through)
+10. [API](#api)
+11. [Rules and cases](#rules-and-cases)
+12. [Concurrency and locking](#concurrency-and-locking)
+13. [Failure and recovery](#failure-and-recovery)
+14. [Limits and how to change them](#limits-and-how-to-change-them)
+15. [Not decided yet](#not-decided-yet)
+16. [Tests](#tests)
+
+The waypoints, shapes and patterns themselves are static content owned by the **atlas** use case: how they're loaded, validated and stored (indexes, bitmasks, `FitsShape`) is in [`internal/atlas/README.md`](../atlas/README.md). This README covers what teams do with them.
 
 ## Concepts
 | Term | Meaning |
 |---|---|
+| **Atlas** | The static content (waypoints, shapes, patterns), loaded once at startup by the atlas use case and read here through the [`Atlas` interface](#storego-the-in-memory-layout). Never changes while the backend runs. |
 | **Waypoint** | A physical location with a QR code. Identified by a **4-digit ID** (`"1001"`; leading zeros allowed). |
 | **Pattern** | A set of **1 to 6** (`game.max_pattern_points`) waypoints that forms a shape on the map. Identified **by that set**, e.g. `["1001","1002","1007","1008"]`, in any order. Its database `id` is only an internal key. |
 | **Shape** | What a pattern looks like: `square`, `triangle`, `collinear`, `tree`, `lightning` in the 2025 seed. A shape has many patterns. Completing any one completes the shape. |
@@ -37,6 +39,8 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection. |
 | **Countdown** | The client's timer: **1 m** (`game.scan_window`) from the moment that phone first sees a non-empty stack. After it the phone sends no scans. The grace is never shown; it absorbs network delay (see [The client countdown and latency](#the-client-countdown-and-latency)). |
 | **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts and sizes, plus the window, grace and stack capacity in milliseconds and points. Static while the backend runs. |
+
+**Client words.** The client's **"type"** is our **Shape**, its **"shape"** is our **Pattern**, its **"point"** is our **Waypoint**, and its **"buffer"** is our **Stack**. This README and the code always use the code's words. The full vocabulary, spells included, is in [`internal/atlas/README.md`](../atlas/README.md).
 
 ## The game flow
 1. **Select.** Any member selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}`. **Every selection purges the stack**, reselecting the same shape included.
@@ -74,60 +78,71 @@ Every number below that comes from `config.toml` is shown with its current value
   - `View`, `SelectionView`, `StackScanView`: the JSON shapes.
   - `Game`, `GameShape`: the JSON of `GET /api/game/shapes`.
 - **`Stack` methods** (all on values; none modifies the receiver):
-  - `newStack(cap)` is an empty stack.
+  - `NewStack(cap)` is an empty stack (exported so tests can build one).
   - `Len()` counts scans, stale ones included.
   - `At(i)` is the i-th from the bottom.
   - `Push(sc)` returns the stack with `sc` on top. Scan never pushes onto a full stack (its scans always fit one pattern); if it did, the bottom would be dropped.
   - `Live(now, limit)` returns the correct scans at most `limit` old plus every wrong scan, bottom to top.
-- **`newGame(content, rules)`** builds the `Game` once, in `Load`: for each shape in index order, its ID and name, how many patterns it has (`len(shapePatterns[i])`), and the distinct sizes of those patterns, ascending; plus `ScanWindowMS`, `ScanGraceMS` (`Duration.Milliseconds()`, so sub-millisecond parts are dropped) and `MaxPatternPoints` from `Rules`.
+- **`newGame(atlas, rules)`** builds the `Game` once, in `Load`: for each shape in index order (`ShapeCount`, `Shape(i)`), its ID and name, how many patterns it has (`len(ShapePatterns(i))`), and the distinct sizes of those patterns (`Pattern(p).Waypoints.Len()`), ascending; plus `ScanWindowMS`, `ScanGraceMS` (`Duration.Milliseconds()`, so sub-millisecond parts are dropped) and `MaxPatternPoints` from `Rules`.
 - **Reads**, all from memory:
   - `Game()`: the prebuilt `Game`; no lock, it never changes
-  - `Content()`
   - `ForTeam(teamID)` → `State`
   - `ForUser(userID)` → `View`
   - `Snapshot(userID)`: the live event for a new stream
-- **`view`** converts indexes and bits to IDs, times to UTC, and leaves stale correct scans out of `stack` (wrong scans are included, with no flag distinguishing them).
+- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, and leaves stale correct scans out of `stack` (wrong scans are included, with no flag distinguishing them).
 
 ### `write.go`: writes, each written through
 - **`Select`**, **`ClearSelection`** and **`Scan`** each follow the [write-through](#the-write-through) steps, numbered in the code.
-- **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Content.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (still pushed, marked `Wrong`). Completion is `Content.PatternFor(stack ∪ {w})` (one map lookup) being a pattern of the selected shape; a wrong scan can't complete because it's in the set.
+- **Lock-free checks first** (§6 variation (a)): `Select` resolves the shape with `Atlas.ShapeIndex`, `Scan` the waypoint with `Atlas.WaypointIndex`, both before the team and the lock.
+- **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Atlas.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (still pushed, marked `Wrong`). Completion is `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape; a wrong scan can't complete because it's in the set. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern` and `Atlas.Pattern(p).ID` is the key written to `team_pattern`.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME`.
 - **Declared here:** the errors, the `Outcome…` constants, and `ScanResult`.
 
 ### `db.go`: SQL
-- **`selectContent`** reads waypoints, shapes, and patterns with their waypoint lists (`array_agg`).
+Only the per-team tables. The content tables are read by the atlas (`internal/atlas/db.go`).
 - **`selectTeams(ctx, teamID, stackSize)`** reads every team's stored state, or one team's (`teamID != ""`), into `teamRows`: distinct visited waypoints, completed patterns, selection, and the stack. Used by `Load` and `reconcile`. The stack query is a `JOIN LATERAL`: for each selection, the team's newest `stackSize` `team_scan` rows with `id > after_scan_id`, returned oldest first, with the `wrong` flag so wrong scans rebuild as never-stale.
 - **`insertScan`**: one `team_scan` row, with the `wrong` flag (a scan that doesn't complete anything).
 - **`insertCompletingScan`**: one transaction: `team_scan` row, `team_pattern` row (`ON CONFLICT DO NOTHING`), delete `team_selection`.
 - **`upsertSelection`**: upserts `team_selection` with `after_scan_id` = the team's latest `team_scan.id` (0 if none). That's the purge: earlier scans are no longer after it.
 - **`deleteSelection`**: deletes `team_selection`, and fails unless exactly one row went (memory had a selection, so Postgres must too).
 
-### `content.go`: static content and bitsets
-- **`newContent(rows, maxPoints)`** validates the content rows (see [Loading at startup](#loading-at-startup)) and builds every lookup table (see [How waypoints and patterns are stored](#how-waypoints-and-patterns-are-stored)).
-- **`checkNesting`** rejects a pattern contained in a larger pattern of the same shape: scanning the larger one, the stack would equal the smaller one first and complete it early.
-- **Lookups:**
-  - `WaypointIndex`, `ShapeIndex`, `SetOf`
-  - `PatternFor(set)`: exact match
-  - `FitsShape(shape, set)`: is `set` inside some pattern of `shape`? One AND-compare per pattern of the shape, stopping at the first match (at most 156, the seed's triangles). The empty set fits nothing. Used to label a scan wrong, not to reject it. See [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)
-  - `WaypointIDs(set)`: a set back to sorted IDs (views, `ScanResult.Pattern`)
-- **Bitsets:** `WaypointSet`, `ShapeSet` and `PatternSet`, with their `Has`, `With`, `Contains`, `Len` and `Indexes` methods.
-
 ### `store.go`: the in-memory layout
-- **`Rules`** are the settings from `config.toml`: `ScanWindow`, `ScanGrace`, `MaxPatternPoints`, `WriteTimeout`. `limit()` is window + grace.
-- **`Load`** reads content and every team's stored state, and builds the `Game` (`newGame`). It runs after `teams.Load`, because it reads teams through the `Teams` interface.
-- **`stateOf(teamRows)`** rebuilds a `State` from IDs, failing on unknown waypoints, patterns or shapes.
+- **`Teams`** is what team state needs from the teams use case: `ForUser(userID)` and `ByID(teamID)`.
+- **`Atlas`** is what team state needs from the atlas use case, declared here (AGENTS.md §4) and satisfied by `*atlas.Atlas`. The atlas never changes after startup, so every call is lock-free:
+
+  | Method | Teamstate uses it for |
+  |---|---|
+  | `WaypointIndex(id)` | `Scan`: unknown waypoint → `404 unknown_waypoint`; `stateOf`: a stored stack scan's waypoint |
+  | `ShapeIndex(id)` | `Select`: unknown shape → `404 unknown_shape`; `stateOf`: a stored selection's shape |
+  | `PatternByID(id)` | `stateOf`: a stored `team_pattern` key → pattern index |
+  | `SetOf(ids)` | `stateOf`: stored visited waypoints → `State.Waypoints` |
+  | `PatternFor(set)` | `Scan`: is the stack plus this scan exactly a pattern? |
+  | `FitsShape(shape, set)` | `Scan`: is the scan **wrong**? |
+  | `WaypointIDs(set)` | `view` (visited waypoints, completed patterns), `ScanResult.Pattern` |
+  | `ShapePatterns(shape)` | `newGame`: each shape's pattern count and sizes |
+  | `ShapeCount()` | `newGame`: how many shapes |
+  | `Waypoint(i)` | `view`: a stack scan's waypoint ID |
+  | `Shape(i)` | `view` (completed shapes, selection), `newGame` |
+  | `Pattern(i)` | `Scan` (the completed pattern's shape and Postgres `ID`), `stateOf` (a completed pattern's shape), `view`, `newGame` |
+- **`Rules`** are the settings from `config.toml`: `ScanWindow`, `ScanGrace`, `MaxPatternPoints`, `WriteTimeout`, and `Clock` (the clock; nil means the real one, tests pass a fake). `Limit()` is window + grace.
+- **`Load(ctx, pg, atlas, teams, hub, log, rules)`** reads every team's stored state, checking it against the atlas, and builds the `Game` (`newGame`). It runs after `atlas.Load` (it's handed the `*atlas.Atlas`) and after `teams.Load` (it reads teams through the `Teams` interface).
+- **`stateOf(teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes.
 - **`lockTeam`** gets or creates a team's entry and locks it.
 - **`persist`** runs a `db.go` write detached from the request, capped at **5 s** (`storage.write_timeout`).
 - **`reconcile`** reloads one team's state from Postgres after a failed write and publishes it.
 - **`publish`** and **`event`** send `team_state` to every member.
-- **`now`** is the clock (UTC, truncated to microseconds, Postgres's precision). Tests swap it for a fake.
+- **`now`** is the clock: `Rules.Clock` if set, else the real clock (UTC, truncated to microseconds, Postgres's precision, so a restart reproduces times exactly).
 
 ## Data model: memory
 ```
 Store
   rules    Rules                     from config.toml
-  content  *Content                  static; read with no lock
+  db       db                        the pool, for db.go
+  atlas    Atlas                     the static content (*atlas.Atlas); read with no lock
   game     Game                      built once by newGame; read with no lock
+  teams    Teams                     the teams use case (*teams.Store)
+  hub      *live.Hub                 where team_state events go
+  log      *slog.Logger
   mu       sync.RWMutex              guards the map below; never held during I/O
   states   map[teamID]*entry         created on a team's first write
   now      func() time.Time          the clock
@@ -137,12 +152,12 @@ entry
   cur  atomic.Pointer[State]         the current snapshot; readers load it lock-free
 
 State                                (never modified once stored)
-  Waypoints  WaypointSet  uint64     visited waypoints, bit i = waypoint index i
-  Patterns   PatternSet   [32]uint64 completed patterns, bit i = pattern index i
-  Shapes     ShapeSet     uint64     completed shapes, bit i = shape index i
+  Waypoints  atlas.WaypointSet  uint64      visited waypoints, bit i = waypoint index i
+  Patterns   atlas.PatternSet   [32]uint64  completed patterns, bit i = pattern index i
+  Shapes     atlas.ShapeSet     uint64      completed shapes, bit i = shape index i
   Selection  Selection
     Active   bool                    false → no selection; other fields zero
-    Shape    int                     index into Content.Shapes
+    Shape    int                     the shape's index in the atlas
     By       uuid.UUID               the member who selected
     At       time.Time               when
   Stack      Stack                   scans since the selection
@@ -155,26 +170,20 @@ Stack                                a value; Push returns a new one
   Cap      int                       game.max_pattern_points (6)
 
 StackScan
-  Waypoint int                       index into Content.Waypoints
+  Waypoint int                       the waypoint's index in the atlas
   UserID   uuid.UUID                 who scanned
   At       time.Time                 when
   Wrong    bool                      the scan didn't fit the selected shape;
                                      never ages out; not exposed in View
 ```
 - **Size:** a `State` is a fixed 1248 bytes (`Stack` 920, `Selection` 56), so a new snapshot is a plain struct copy with no heap allocation for its contents. 10,000 teams' states are about 12 MB.
+- **The sets are the atlas's types** (`atlas.WaypointSet`, `atlas.PatternSet`, `atlas.ShapeSet`), over the atlas's indexes. How they're laid out and why: [`internal/atlas/README.md`](../atlas/README.md), "How waypoints and patterns are stored".
 - **Why a circular buffer:** dropping stale scans from the bottom never moves the rest. `At(i)` is `scans[(bottom+i) % Cap]`.
 - **Stale correct scans** stay in `Stack` until the next accepted scan rebuilds it from the live ones (or a selection or completion purges it). Every reader uses `Live`, so they're never seen. Wrong scans never leave until a purge.
 - **The array is 16 long** although only **6** (`game.max_pattern_points`) are used, because Go array sizes must be constants and `game.max_pattern_points` is read at startup. 16 is the most `teams.size` allows, and a pattern can't have more points than members.
 
 ## Data model: Postgres
-Content (migration `0003`), read once at startup:
-
-| Table | Columns | Constraints and what they back |
-|---|---|---|
-| `waypoint` | `id` TEXT, `name`, `latitude`, `longitude` | `id ~ '^[0-9]{4}$'`: 4-digit IDs |
-| `shape` | `id` TEXT, `name` | `id` lowercase slug |
-| `pattern` | `id` INTEGER, `shape_id` | `shape_id` → `shape` |
-| `pattern_waypoint` | `pattern_id`, `waypoint_id` | PK on both; FKs to `pattern` and `waypoint` |
+The content tables (`waypoint`, `shape`, `pattern`, `pattern_waypoint`, migration `0003`) belong to the atlas: see [`internal/atlas/README.md`](../atlas/README.md), "Data model: Postgres". The per-team tables below refer to them (`team_scan.waypoint_id` → `waypoint`, `team_pattern.pattern_id` → `pattern`, `team_selection.shape_id` → `shape`).
 
 Per team, written through:
 
@@ -191,75 +200,14 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`.
 ## Memory ↔ Postgres
 | Postgres | Rebuilt in memory (by `Load`, or `reconcile` for one team) |
 |---|---|
-| `waypoint`, `shape`, `pattern`, `pattern_waypoint` | `Content` and all its lookup tables |
+| `waypoint`, `shape`, `pattern`, `pattern_waypoint` | Not here: the atlas, rebuilt by `atlas.Load` before this `Load` ([`internal/atlas/README.md`](../atlas/README.md)) |
 | `DISTINCT waypoint_id FROM team_scan` | `State.Waypoints` |
 | `team_pattern` | `State.Patterns`, and `State.Shapes` from each pattern's shape |
 | `team_selection` | `State.Selection` |
 | newest **6** (`game.max_pattern_points`) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag) |
-| (none: built from `Content` and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
+| (none: built from the atlas and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
 
 Why the stacks agree: memory pushes every accepted scan and only drops stale *correct* scans, which are always the oldest. The live correct scans fit one pattern, so there are at most **6** (`game.max_pattern_points`) of them, and they're the newest rows since the selection — exactly what the query returns, after the same time filter. Wrong scans are never dropped, in memory or after a restart.
-
-## How waypoints and patterns are stored
-
-### Names: Shape and Pattern
-The client's word **"type"** is our **Shape** (`square`, `triangle`, …), and its **"shape"** is our **Pattern** (one particular set of waypoints, e.g. `1001 1002 1007 1008`). This README and the code always use Shape and Pattern.
-
-### Indexes
-At startup every waypoint, shape and pattern gets a small **index**: its position in a `Content` slice.
-- Waypoints and shapes are ordered by ID; patterns by their Postgres key.
-- With the 2025 seed: waypoints `1001`→0 … `1011`→10; shapes `collinear`→0, `lightning`→1, `square`→2, `tree`→3, `triangle`→4; patterns 0–358.
-- Indexes exist **only in memory** and may change between restarts. Postgres, the API and live events always use IDs.
-
-### Sets are bitmasks
-Bit *i* means item *i*:
-
-| Type | Go type | Holds |
-|---|---|---|
-| `WaypointSet` | `uint64` | up to 64 waypoints |
-| `ShapeSet` | `uint64` | up to 64 shapes |
-| `PatternSet` | `[32]uint64` | up to 2048 patterns |
-
-Example: the square `1001, 1002, 1007, 1008` is indexes 0, 1, 6, 7, so its `WaypointSet` is `0b11000011` = **195**. Any scan order sets the same bits.
-
-### Static content: `Content` (built once, never written, so no locks)
-| Field | Maps | Used for |
-|---|---|---|
-| `Waypoints`, `Shapes`, `Patterns` | index → item. A `Pattern` is `{dbID, Shape index, Waypoints bitmask}` | turning indexes back into IDs |
-| `waypointIndex` | `"1007"` → 6 | validating a scan, `SetOf` |
-| `shapeIndex` | `"square"` → 2 | validating a selection |
-| `patternBySet` | bitmask → pattern index, e.g. `195` → the square | the completion check, in one map lookup (`PatternFor`; about 2 ns on the `content_test.go` fixture, `BenchmarkScanLookups`) |
-| `shapePatterns` | shape index → its patterns | `FitsShape`, `checkNesting`, `newGame` (each shape's pattern count and sizes) |
-| `patternByDBID` | Postgres key → pattern index | loading `team_pattern` |
-
-### Bit operations
-| Question | Operation |
-|---|---|
-| Visited 1007? | `Waypoints & (1<<6) != 0` (`Has`) |
-| Stack plus this scan | `set | 1<<w` (`With`) |
-| Still inside a pattern of the shape? | any `p` of the shape with `p & set == set` (`Contains`, in `FitsShape`) |
-| Stack *is* a pattern? | `patternBySet[set]` (exact) |
-
-### Does a set still fit the shape?
-Every scan asks `FitsShape(shape, stack ∪ {w})`: is there a pattern of the selected shape that contains every waypoint so far? A `false` doesn't reject the scan — it marks it **wrong** and poisons the selection.
-
-1. The empty set fits nothing (returns `false` at once). A scan's set always has at least the new waypoint, so this only matters to direct callers.
-2. For each pattern index `p` in `shapePatterns[shape]`: if `Patterns[p].Waypoints & set == set` (`Contains`), return `true`.
-3. None matched: `false`.
-
-The cost is one AND-compare per pattern of the shape, with an early exit. The 2025 seed has:
-
-| Shape | Patterns |
-|---|---|
-| `collinear` | 9 |
-| `lightning` | 77 |
-| `square` | 18 |
-| `tree` | 99 |
-| `triangle` | 156 |
-
-Measured once on the 2025 seed, by hand (the committed `BenchmarkScanLookups` runs on the small test fixture instead): about **1 ns** when a match is found (early), about **9 ns** for a miss (every pattern of the largest shape checked).
-
-**Why not a lookup table.** The alternative is a precomputed map from every `(shape, subset of one of its patterns)` to `true`. On the seed that's **983** entries, and, measured once on the 2025 seed, it took a flat **15–19 ns**: hashing a key costs more than scanning at most 156 `uint64`s. So the loop stays. Revisit only if a shape grows to thousands of patterns.
 
 ## The client countdown and latency
 The server allows a pattern's scans to span **65 s** (window + grace), measured by **its own clock** from the moment it accepted the bottom scan. A phone can't see that moment: it only learns of the first scan when a response or event reaches it, after some network delay. So the client counts down the **window only**, and the **grace pays for the network**.
@@ -297,7 +245,7 @@ So **a phone is safe whenever *d*<sub>down</sub> + *d*<sub>up</sub> ≤ *G***: t
 
 Had D's request taken 4.0 s instead (*d*<sub>down</sub> + *d*<sub>up</sub> = 5.5 s > 5 s), it would land at 01:05.400: A's scan is 65.4 s old, stale and dropped first, so the answer is `scan_added` with stack `1002 1007 1008`.
 
-**Tested** end to end in `internal/server/simulation_test.go`, with the window shrunk to 2 s and the grace to 1 s so the tests run in seconds. Each simulated player has its own request and response delays, its own event stream, and a Go copy of `ScanGate`:
+**Tested** end to end in `internal/server/tests/simulation_test.go`, with the window shrunk to 2 s and the grace to 1 s so the tests run in seconds. Each simulated player has its own request and response delays, its own event stream, and a Go copy of `ScanGate`:
 
 | Test | Shows |
 |---|---|
@@ -307,7 +255,7 @@ Had D's request taken 4.0 s instead (*d*<sub>down</sub> + *d*<sub>up</sub> = 5.5
 | `TestSimGateClosesThenReselectOpens` | After a countdown runs out the client sends nothing; a reselect resets every player's countdown and the square can be scanned again |
 | `TestSimRaceSameWaypoint` | Two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every screen converges on a one-scan stack |
 
-The countdown itself is unit-tested in `frontend/src/lib/game/scanGate.test.ts` (`bun run test` in `frontend/`). Keep `scanGate.ts` and the Go `scanGate` in `simulation_test.go` in step.
+The countdown itself is unit-tested in `frontend/src/lib/game/scanGate.test.ts` (`bun run test` in `frontend/`). Keep `scanGate.ts` and the Go `scanGate` in `internal/server/tests/simulation_test.go` in step.
 
 ## Walkthroughs
 Team `482913`, members A–F, 2025 seed (square = `1001 1002 1007 1008` = indexes 0, 1, 6, 7; `square` = shape 2), config.toml as shipped (limit 65 s). Times are `mm:ss` after 12:00. Stacks are written bottom → top as `waypoint/member@time`.
@@ -368,7 +316,7 @@ Bottom scan at 00:00, everything else in order, top scan at:
 Every function in `write.go` runs these steps, marked in the code:
 1. **lock** the team's entry (`lockTeam`)
 2. **validate**:
-   - first content and team, **before** the lock (an `IN_GAME` team's status and roster never change). This is AGENTS.md §6 variation (a); the code labels it `2. validate, before 1. lock`
+   - first the atlas lookup (shape or waypoint ID) and the team, **before** the lock (an `IN_GAME` team's status and roster never change). This is AGENTS.md §6 variation (a); the code labels it `2. validate, before 1. lock`
    - then the `State`, under the lock (`2. validate (state)`)
 3. **build** the next `State` (a copy)
 4. **persist**: one `db.go` call (`insertScan`, `insertCompletingScan`, `upsertSelection` or `deleteSelection`), detached from the request and capped at **5 s** (`storage.write_timeout`)
@@ -451,15 +399,15 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 ### Loading at startup
 The backend refuses to start if any of these hold:
 
-| Case |
-|---|
-| `config.toml` is invalid (see `internal/platform/config`), e.g. a missing key, or `max_pattern_points` > `teams.size` |
-| A waypoint ID isn't exactly 4 digits |
-| More than 64 waypoints, 64 shapes or 2048 patterns |
-| A pattern names an unknown waypoint or shape, has no waypoints, or has more than 6 (`game.max_pattern_points`) |
-| Two patterns have the same set of waypoints |
-| A pattern is contained in a larger pattern of the same shape |
-| Stored progress or a selection refers to a waypoint, pattern or shape that no longer exists |
+| Case | Error |
+|---|---|
+| `config.toml` is invalid (see `internal/platform/config`), e.g. a missing key, or `max_pattern_points` > `teams.size` | from `config.Load`, before anything loads |
+| The content is invalid (bad waypoint IDs, too many items, unknown, empty, oversized, duplicate or nested patterns) | from `atlas.Load`, before this `Load` runs: every case, in order, is in [`internal/atlas/README.md`](../atlas/README.md), "Loading at startup" |
+| Reading the per-team tables fails | `load team state: …` |
+| Stored visited waypoints name a waypoint the atlas doesn't have | `team 482913 state: unknown waypoint "1012"` |
+| A `team_pattern` key the atlas doesn't have | `team 482913 state: unknown pattern 400` |
+| A selection's shape the atlas doesn't have | `team 482913 state: selection: unknown shape "hexagon"` |
+| A stack scan's waypoint the atlas doesn't have | `team 482913 state: stack scan: unknown waypoint "1012"` |
 
 ### Select: `PUT /api/teams/me/state/selection`
 Checked in this order:
@@ -541,41 +489,33 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
 | Postgres unreachable | Reads keep working from memory; writes fail |
 | Backend restarts | Progress, selections and live stacks reload exactly; scans keep their original times, so they go stale when they would have |
 | `config.toml` changes between restarts | A longer window can revive scans that were stale; a smaller capacity loads fewer scans. Both apply consistently from then on |
-| Content edited while running | Not seen until restart. Don't. |
+| Content edited while running | Not seen until restart (the atlas loads once). Don't: if the new content drops a waypoint, pattern or shape a team's stored state refers to, the next start refuses. See [`internal/atlas/README.md`](../atlas/README.md) |
 
 ## Limits and how to change them
 | Limit | Where | To change |
 |---|---|---|
 | Scan window 1 m | `config.toml` `game.scan_window` | Edit and restart |
 | Grace 5 s | `config.toml` `game.scan_grace` (0 allowed, but the key must be present) | Edit and restart |
-| 6 points per pattern / stack capacity | `config.toml` `game.max_pattern_points` (≤ `teams.size`) | Edit and restart. Content with bigger patterns is refused at startup |
+| 6 points per pattern / stack capacity | `config.toml` `game.max_pattern_points` (≤ `teams.size`) | Edit and restart. Content with bigger patterns is refused at startup (by `atlas.Load`) |
 | 16 slots in a `Stack` | `config.MaxTeamSize` | Fixed array size; raise with the team-size cap |
-| 64 waypoints | `WaypointSet uint64`, `maxWaypoints` | Make it `[2]uint64` (arrays are still valid map keys, so `patternBySet` keeps working), update the bit methods, test across the word boundary |
-| 64 shapes | `ShapeSet uint64`, `maxShapes` | Same approach |
-| 2048 patterns | `PatternSet [32]uint64`, `maxPatterns` | Make the array longer |
+| 64 waypoints, 64 shapes, 2048 patterns | the atlas's set types (`atlas.MaxWaypoints`, `atlas.MaxShapes`, `atlas.MaxPatterns`) | See [`internal/atlas/README.md`](../atlas/README.md), "Limits and how to change them". `State` holds one of each set, so a wider set makes every snapshot bigger |
 
 ## Not decided yet
 - **⚠ QR verification.** `POST …/scans` accepts the raw 4-digit waypoint ID, so a player can claim a scan without being there. This must be replaced before the event (rotating or signed QR codes, verified server-side).
 - **Whether the leader alone should select.** Currently any member can.
 
 ## Tests
-- `content_test.go` (no database). A four-waypoint fixture: triangles `1001 1002 1003` and `1002 1003 1004`, line `1001 1004`. `game.max_pattern_points` comes from `config.toml`; below the fixture's 3 points (`fixtureMaxPoints`) these tests **skip**:
+- The content lookups teamstate relies on (`PatternFor`, `FitsShape`, `SetOf`, validation, the seed loading, `BenchmarkLookups`) are tested in the atlas: [`internal/atlas/README.md`](../atlas/README.md), "Tests".
+- `tests/stack_test.go` (no database):
 
   | Test | Covers |
   |---|---|
-  | `TestPatternLookupIgnoresScanOrder` | a pattern is found from its waypoints in any order; partial, extra and empty sets match nothing; an unknown waypoint is an error |
-  | `TestPatternIndexes` | waypoint and shape indexes in ID order; each shape's patterns; patterns by Postgres key; `WaypointIDs` sorts |
-  | `TestContentValidation` | each startup refusal, by its error: ID not 4 digits (`A1`, `10001`), unknown waypoint, unknown shape, empty pattern, two patterns with the same waypoints, a pattern over `game.max_pattern_points`, a pattern nested in a larger one of its shape, more than 64 waypoints, 64 shapes, 2048 patterns |
-  | `TestBitsets` | `PatternSet` across 64-bit words (bits 0, 63, 64, 70, 2047); `WaypointSet` `With`, `Has`, `Len`, `Contains` |
-  | `TestMixedSizesAllowedWhenNotNested` | a shape may mix 2- and 3-point patterns when none is inside another |
-  | `TestStack` | bottom-to-top order, overflow dropping the bottom, `Push` leaving the original alone, `Live` at exactly the limit, and a wrong scan staying live however old it is |
-  | `TestFitsShape` | one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
+  | `TestStack` | bottom-to-top order, overflow dropping the bottom, `Push` leaving the original alone, `Live` at exactly the limit, everything stale an hour later, and a wrong scan staying live however old it is |
 
-- `store_test.go` (real Postgres, config.toml's rules, fake clock). Times are written relative to the window (`tick`, a 60th of `game.scan_window`) or to the limit (`rules.limit()`), so each scenario means the same under any config. The tests use up to 6 distinct members (the 6-point pattern needs all of them), so they need `teams.size` ≥ 6 (`minTestTeam`); with a smaller size in `config.toml` they **skip** rather than fail:
+- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load`, config.toml's rules, fake clock). Times are written relative to the window (`tick`, a 60th of `game.scan_window`) or to the limit (`rules.Limit()`), so each scenario means the same under any config. The tests use up to 6 distinct members (the 6-point pattern needs all of them), so they need `teams.size` ≥ 6 (`minTestTeam`); with a smaller size in `config.toml` they **skip** rather than fail:
 
   | Test | Covers |
   |---|---|
-  | `TestDevSeedLoads` | seed loads under config.toml's rules and re-seeds |
   | `TestWritesRequireGame` | input validation and lobby refusals for every write |
   | `TestScanNeedsSelection` | scanning before selecting changes nothing |
   | `TestSquareNeedsDistinctMembers` | walkthrough 1: member and waypoint rejections change nothing, the triangle that doesn't count, completion, `expires_at`, no selection after |
@@ -599,7 +539,6 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
   | `TestFailedWriteReconciles` | reload after a hand-edited database |
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
-  | `BenchmarkScanLookups` | `FitsShape`, `PatternFor` and `WaypointIndex`+`Has` on the `content_test.go` fixture (not the seed), results kept in package-level sinks. On an i7-12650H: about 1 ns, 2 ns and 6 ns |
-- `internal/server/teamstate_test.go`: `TestSelectAndScanRoutes`, every route and error code over HTTP, including `waypoint_already_scanned`, `member_already_scanned`, a wrong scan being accepted and locking the member, and the body size limit; `TestGameShapes`, `GET /api/game/shapes` without a token (`401 missing_token`) and with one: the seed's 5 shapes, `square` with 18 patterns of 4 points, and the window, grace and capacity from `config.toml`.
-- `internal/server/simulation_test.go`: the countdown under latency (see [The client countdown and latency](#the-client-countdown-and-latency)).
-- `internal/server/events_test.go`: `team_state` on connect.
+- `internal/server/tests/teamstate_test.go`: `TestSelectAndScanRoutes`, every route and error code over HTTP, including `waypoint_already_scanned`, `member_already_scanned`, a wrong scan being accepted and locking the member, and the body size limit; `TestGameShapes`, `GET /api/game/shapes` without a token (`401 missing_token`) and with one: the seed's 5 shapes, `square` with 18 patterns of 4 points, and the window, grace and capacity from `config.toml`.
+- `internal/server/tests/simulation_test.go`: the countdown under latency (see [The client countdown and latency](#the-client-countdown-and-latency)).
+- `internal/server/tests/events_test.go`: `team_state` on connect.

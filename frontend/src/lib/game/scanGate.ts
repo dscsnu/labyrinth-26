@@ -5,7 +5,7 @@
  * the server's "too late" case.
  *
  * Rule (mirrored by the backend's simulation tests, internal/server/
- * simulation_test.go — keep them in step):
+ * tests/simulation_test.go — keep them in step):
  * - the countdown starts when this client first sees a non-empty stack: its
  *   own 200 for the first scan, or a teammate's scan arriving as a
  *   team_state event

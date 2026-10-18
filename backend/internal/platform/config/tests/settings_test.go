@@ -1,4 +1,4 @@
-package config
+package tests
 
 import (
 	"os"
@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"labyrinth/internal/platform/config"
 )
 
 // validTOML is a complete, valid config.toml.
@@ -50,14 +52,14 @@ func writeTOML(t *testing.T, content string) string {
 // TestRepositoryConfigLoads checks that the committed backend/config.toml is
 // valid.
 func TestRepositoryConfigLoads(t *testing.T) {
-	if _, err := LoadSettings(filepath.Join("..", "..", "..", "config.toml")); err != nil {
+	if _, err := config.LoadSettings(filepath.Join("..", "..", "..", "..", "config.toml")); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // TestLoadSettings checks that a valid file decodes every value.
 func TestLoadSettings(t *testing.T) {
-	s, err := LoadSettings(writeTOML(t, validTOML))
+	s, err := config.LoadSettings(writeTOML(t, validTOML))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +103,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 			t.Fatalf("%s: %q must appear exactly once in validTOML", name, c.from)
 		}
 		content := strings.Replace(validTOML, c.from, c.to, 1)
-		_, err := LoadSettings(writeTOML(t, content))
+		_, err := config.LoadSettings(writeTOML(t, content))
 		if err == nil || !strings.Contains(err.Error(), c.wantInErr) {
 			t.Errorf("%s: got %v, want an error mentioning %q", name, err, c.wantInErr)
 		}

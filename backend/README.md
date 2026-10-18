@@ -26,16 +26,17 @@ docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t
 TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test ./...
 ```
 
-The end-to-end tests in `internal/server` run the full login flow against a fake Google OIDC provider, plus the team and live-stream flows. Store tests in `auth`, `user`, `teams`, `teamstate` and `platform/postgres` each use their own schema. They **wipe schemas** in `TEST_DATABASE_URL`, so never point it at a real database.
+Every package's tests live in its own `tests/` subfolder (`internal/<package>/tests/`, package `tests`), black-box against the package's exported API; `go test ./internal/teamstate/...` runs one package's. The end-to-end tests in `internal/server/tests` run the full login flow against a fake Google OIDC provider, plus the team and live-stream flows. Store tests in `atlas`, `auth`, `user`, `teams`, `teamstate` and `platform/postgres` each use their own schema. They **wipe schemas** in `TEST_DATABASE_URL`, so never point it at a real database.
 
 ## Code layout: one package per use case
 
 ```
 internal/
+  atlas/       static game content: waypoints, shapes, patterns (and their spells); read-only, loaded once
   auth/        Google sign-in, access tokens, the auth middleware
   user/        players, helpers and admins
   teams/       teams of teams.size (6) players with a leader, lobby → game
-  teamstate/   scanned waypoints and completed patterns per team
+  teamstate/   each team's selection, scan stack, visited waypoints and completed patterns
   server/      wires the use cases together; /healthz and the live event stream
   platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
 cmd/
@@ -43,7 +44,7 @@ cmd/
   docaudit/    checks doc comments
 ```
 
-Every use case has the same four files, plus a `doc.go` and a README describing how each file works, its state, API, and every rule and case. **`AGENTS.md` has the rules for adding or changing code, and new use cases must follow them.** `go run ./cmd/docaudit` checks that every declaration has a doc comment.
+Every use case has the same four files (except `atlas`, which is read-only: no `api.go` or `write.go`), plus a `doc.go` and a README describing how each file works, its state, API, and every rule and case. **`AGENTS.md` has the rules for adding or changing code, and new use cases must follow them.** `go run ./cmd/docaudit` checks that every declaration has a doc comment.
 
 | File | Holds |
 |---|---|
@@ -52,11 +53,11 @@ Every use case has the same four files, plus a `doc.go` and a README describing 
 | `write.go` | its writes |
 | `db.go` | its SQL |
 
-`teams` and `teamstate` keep their state **in memory** (`store.go` describes the layout). Reads never touch Postgres, and every write in `write.go` runs the same marked write-through steps: **lock → validate → build → persist (`db.go`) → apply → publish**. Memory only changes after Postgres commits. `auth` and `user` keep nothing in memory; their reads and writes call `db.go` directly.
+`teams` and `teamstate` keep their state **in memory** (`store.go` describes the layout). Reads never touch Postgres, and every write in `write.go` runs the same marked write-through steps: **lock → validate → build → persist (`db.go`) → apply → publish**. Memory only changes after Postgres commits. `auth` and `user` keep nothing in memory; their reads and writes call `db.go` directly. `atlas` holds the static content in memory, built once at startup and never written, so it has no locks and no write-through.
 
 Operational rules that follow from keeping state in memory:
 - **Run exactly one backend instance.** A second one refuses to start (Postgres advisory lock), before migrating. The running backend re-checks the lock every **5 s** (`storage.instance_lock_check`) and shuts down (exit 1) if it has lost it, e.g. after a Postgres restart; let your supervisor restart it. Scale up the machine, not out.
-- **Don't edit game data with SQL while the backend runs.** Memory won't see the change, and could act on stale data. Use the API, or stop the backend, edit, and start it again. Content (waypoints, patterns) is only read at startup.
+- **Don't edit game data with SQL while the backend runs.** Memory won't see the change, and could act on stale data. Use the API, or stop the backend, edit, and start it again. Content (waypoints, shapes, patterns) is only read at startup, by `atlas`.
 - `go run . seed` loads the 2025 placeholder content (waypoints `1001`–`1011`, 359 patterns). It refuses to run while the backend is serving; stop the backend, seed, start it.
 
 ## Load test

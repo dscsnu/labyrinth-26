@@ -36,8 +36,8 @@ func (t *Tokens) IssueAccess(u user.User) (string, time.Time, error) {
 		AvatarURL: u.AvatarURL,
 		Role:      u.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    issuer,
-			Audience:  jwt.ClaimStrings{accessAudience},
+			Issuer:    Issuer,
+			Audience:  jwt.ClaimStrings{AccessAudience},
 			Subject:   u.ID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(exp),
@@ -51,7 +51,7 @@ func (t *Tokens) IssueAccess(u user.User) (string, time.Time, error) {
 func (t *Tokens) issueState(s oauthState, ttl time.Duration) (string, error) {
 	now := time.Now()
 	s.RegisteredClaims = jwt.RegisteredClaims{
-		Issuer:    issuer,
+		Issuer:    Issuer,
 		Audience:  jwt.ClaimStrings{stateAudience},
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),

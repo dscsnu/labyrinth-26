@@ -55,6 +55,7 @@ Every number below that comes from `config.toml` is shown with its current value
 - **Reads**, from memory only:
   - `ForUser(userID)`: two map lookups under a brief shared lock, then a lock-free snapshot load. About 60 ns per read, measured with `BenchmarkForUser` (one team of **6** (`teams.size`) members, 16 goroutines reading at once, on an i7-12650H)
   - `ByID(teamID)`
+  - `All()`: every team, sorted by ID. Copies the index under the shared lock, then loads each snapshot lock-free. For admin views; the restart test compares `All()` (plus each member's `ForUser`) before and after.
   - `Snapshot(userID)`: the `team`/`no_team` event for a new stream
   - `Store.Size()`: the method returning **6** (`teams.size`), the team size from `Rules`. Used by tests.
 
@@ -296,12 +297,12 @@ Checked in this order:
 - **Team names aren't moderated.** Any name within the length and character rules is accepted.
 
 ## Tests
-- `store_test.go`:
+- `tests/store_test.go`:
   - restart reproduces memory exactly (`TestSurvivesRestart`): a started team of `teams.size`, a lobby whose leader left, and a deleted team, with `teams.size` + 4 users; needs `teams.size` ≥ 3 (`minRestartTeam`, a leader and two joiners in the lobby), else it skips
   - reads work with the database closed (`TestReadsDoNotTouchDatabase`)
   - a failed write leaves memory unchanged, and a hand-edited database is reconciled (`TestFailedWriteReconciles`)
   - `TestRefreshProfile`: a new name and avatar show in `ByID` and publish `team`; the same values again, and a user in no team, publish nothing
   - `BenchmarkForUser`: parallel `ForUser` reads of one full team; results summed into the `sinkMembers` sink
-- `internal/server/teams_test.go`: every rule and error code in order; leadership handover and deletion; name validation; both races. Team size and name length come from `config.toml`, not repeated numbers.
-- `internal/server/auth_test.go` `TestSignInRefreshesTeamProfile`: signing in again with a new name and no picture shows the new name and the old avatar in `GET /api/teams/me`.
-- `internal/server/events_test.go`: `team`/`no_team` events, stream auth and cleanup.
+- `internal/server/tests/teams_test.go`: every rule and error code in order; leadership handover and deletion; name validation; both races. Team size and name length come from `config.toml`, not repeated numbers.
+- `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile`: signing in again with a new name and no picture shows the new name and the old avatar in `GET /api/teams/me`.
+- `internal/server/tests/events_test.go`: `team`/`no_team` events, stream auth and cleanup.

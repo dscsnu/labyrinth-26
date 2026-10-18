@@ -536,7 +536,9 @@ components:
                 selected_at: { type: string, format: date-time }
         stack:
           type: array
-          description: Live scans toward the selected type, bottom (oldest) first; stale ones left out.
+          description: >-
+            Live scans toward the selected type, bottom (oldest) first. Stale correct scans are left out; wrong scans
+            (ones that didn't fit the type) never go stale and are included, with nothing marking them as wrong.
           items: { $ref: "#/components/schemas/StackScan" }
     StackScan:
       type: object
@@ -545,7 +547,7 @@ components:
         waypoint_id: { type: string, example: "1001" }
         user_id: { type: string, format: uuid }
         scanned_at: { type: string, format: date-time }
-        expires_at: { type: string, format: date-time, description: "scanned_at + game.scan_window + game.scan_grace: when it goes stale." }
+        expires_at: { type: string, format: date-time, description: "scanned_at + game.scan_window + game.scan_grace: when a correct scan goes stale. A wrong scan stays in the stack past it, until the team selects again." }
 
     ScanResult:
       type: object

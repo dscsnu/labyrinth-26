@@ -1,4 +1,4 @@
-package live
+package tests
 
 import (
 	"bufio"
@@ -12,18 +12,19 @@ import (
 	"github.com/google/uuid"
 
 	"labyrinth/internal/platform/config/configtest"
+	"labyrinth/internal/platform/live"
 )
 
 // TestHeartbeatOnlyWhenIdle checks that a stream receiving events gets no
 // pings, and an idle one does, one heartbeat after its last event.
 func TestHeartbeatOnlyWhenIdle(t *testing.T) {
 	const heartbeat = 150 * time.Millisecond
-	hub := NewHub(configtest.Settings(t).Live.SubscriberBuffer)
+	hub := live.NewHub(configtest.Settings(t).Live.SubscriberBuffer)
 	user := uuid.New()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sub := hub.Subscribe(user)
 		defer sub.Close()
-		Serve(w, r, sub, []Event{{Name: "hello", Data: []byte("{}")}}, heartbeat)
+		live.Serve(w, r, sub, []live.Event{{Name: "hello", Data: []byte("{}")}}, heartbeat)
 	}))
 	defer srv.Close()
 
@@ -51,7 +52,7 @@ func TestHeartbeatOnlyWhenIdle(t *testing.T) {
 	// Busy: an event every heartbeat/5 for 3 heartbeats.
 	busyUntil := time.Now().Add(3 * heartbeat)
 	for time.Now().Before(busyUntil) {
-		hub.Send(user, Event{Name: "tick", Data: []byte("{}")})
+		hub.Send(user, live.Event{Name: "tick", Data: []byte("{}")})
 		time.Sleep(heartbeat / 5)
 	}
 	drain := func(d time.Duration) (pings, ticks int) {

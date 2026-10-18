@@ -1,11 +1,11 @@
-package teamstate
+package tests
 
-// Store-level tests against a real Postgres (TEST_DATABASE_URL), in schema
+// teamstate.Store-level tests against a real Postgres (TEST_DATABASE_URL), in schema
 // teamstate_test, with the 2025 dev seed, config.toml's rules and a fake
 // clock. In the seed the square T6, R, SARC, C1 is waypoints 1001, 1002, 1007,
 // 1008, and every three waypoints form a triangle or a collinear pattern.
 // Times are written with f.tick, a 60th of game.scan_window (1 s with
-// config.toml as shipped), or relative to f.rules.limit() (window + grace,
+// config.toml as shipped), or relative to f.rules.Limit() (window + grace,
 // 65 s as shipped), so the scenarios hold for any config. Times in comments
 // are the shipped values, after the fake clock's start.
 
@@ -22,11 +22,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"labyrinth/internal/atlas"
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/postgres/pgtest"
 	"labyrinth/internal/teams"
+	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
 )
 
@@ -56,6 +58,10 @@ func (c *clock) at(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
+// smaller game.max_pattern_points the seed can't load, so these tests skip.
+const seedMaxPoints = 4
+
 // minTestTeam is the team size these tests are written for: they use up to
 // six distinct members (the hexagon needs all six). With a smaller teams.size
 // in config.toml they skip rather than fail.
@@ -63,12 +69,13 @@ const minTestTeam = 6
 
 // fixtureEnv is a seeded database with one team, its stores and a fake clock.
 type fixtureEnv struct {
+	atlas  *atlas.Atlas
 	db     *postgres.DB
 	dbURL  string
 	teams  *teams.Store
-	state  *Store
+	state  *teamstate.Store
 	hub    *live.Hub
-	rules  Rules
+	rules  teamstate.Rules
 	clock  *clock
 	teamID string
 	users  []uuid.UUID
@@ -78,10 +85,10 @@ type fixtureEnv struct {
 type fixtureOptions struct {
 	// lobby leaves the team in the lobby instead of starting it.
 	lobby bool
-	// sql runs after the seed and before Load, e.g. to add content.
+	// sql runs after the seed and before teamstate.Load, e.g. to add content.
 	sql string
 	// rules adjusts the rules from config.toml.
-	rules func(*Rules)
+	rules func(*teamstate.Rules)
 }
 
 // started seeds the dev content and returns one IN_GAME team of teams.size
@@ -94,6 +101,9 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	}
 	ctx := context.Background()
 	set := configtest.Settings(t)
+	if set.Game.MaxPatternPoints < seedMaxPoints {
+		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, set.Game.MaxPatternPoints)
+	}
 	if set.Teams.Size < minTestTeam {
 		t.Skipf("teamstate tests need teams.size >= %d", minTestTeam)
 	}
@@ -129,7 +139,7 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		}
 		pgtest.Must(ts.Start(ctx, ids[0]))
 	}
-	rules := Rules{
+	rules := teamstate.Rules{
 		ScanWindow:       set.Game.ScanWindow.Duration,
 		ScanGrace:        set.Game.ScanGrace.Duration,
 		MaxPatternPoints: set.Game.MaxPatternPoints,
@@ -139,9 +149,10 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		o.rules(&rules)
 	}
 	clk := &clock{t: start}
-	st := pgtest.Must(Load(ctx, db, ts, hub, pgtest.Quiet, rules))
-	st.now = clk.now
-	return &fixtureEnv{db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
+	rules.Clock = clk.now
+	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: rules.MaxPatternPoints}))
+	st := pgtest.Must(teamstate.Load(ctx, db, at, ts, hub, pgtest.Quiet, rules))
+	return &fixtureEnv{atlas: at, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
 }
 
 // tick returns n sixtieths of game.scan_window: n seconds with config.toml's
@@ -152,7 +163,7 @@ func (f *fixtureEnv) tick(n float64) time.Duration {
 }
 
 // scanAt scans waypoint as member i at d after start, failing on error.
-func (f *fixtureEnv) scanAt(t *testing.T, d time.Duration, i int, waypoint string) ScanResult {
+func (f *fixtureEnv) scanAt(t *testing.T, d time.Duration, i int, waypoint string) teamstate.ScanResult {
 	t.Helper()
 	f.clock.at(d)
 	res, err := f.state.Scan(context.Background(), f.users[i], waypoint)
@@ -170,7 +181,7 @@ func (f *fixtureEnv) scanErrAt(d time.Duration, i int, waypoint string) error {
 }
 
 // selectAt selects shape as member i at d after start, failing on error.
-func (f *fixtureEnv) selectAt(t *testing.T, d time.Duration, i int, shape string) View {
+func (f *fixtureEnv) selectAt(t *testing.T, d time.Duration, i int, shape string) teamstate.View {
 	t.Helper()
 	f.clock.at(d)
 	v, err := f.state.Select(context.Background(), f.users[i], shape)
@@ -181,7 +192,7 @@ func (f *fixtureEnv) selectAt(t *testing.T, d time.Duration, i int, shape string
 }
 
 // view returns the team's current view.
-func (f *fixtureEnv) view(t *testing.T) View {
+func (f *fixtureEnv) view(t *testing.T) teamstate.View {
 	t.Helper()
 	return pgtest.Must(f.state.ForUser(f.users[0]))
 }
@@ -199,7 +210,7 @@ func (f *fixtureEnv) loggedScans(t *testing.T) int {
 
 // stackWaypoints returns the waypoint IDs a view shows in the stack, bottom
 // to top.
-func stackWaypoints(v View) []string {
+func stackWaypoints(v teamstate.View) []string {
 	ids := []string{}
 	for _, s := range v.Stack {
 		ids = append(ids, s.WaypointID)
@@ -208,27 +219,10 @@ func stackWaypoints(v View) []string {
 }
 
 // expectOutcome fails unless res has the outcome.
-func expectOutcome(t *testing.T, what string, res ScanResult, outcome string) {
+func expectOutcome(t *testing.T, what string, res teamstate.ScanResult, outcome string) {
 	t.Helper()
 	if res.Outcome != outcome {
 		t.Fatalf("%s: outcome %q, want %q (stack %v)", what, res.Outcome, outcome, stackWaypoints(res.State))
-	}
-}
-
-// TestDevSeedLoads checks that the 2025 seed loads and validates under
-// config.toml's rules, and can be applied twice.
-func TestDevSeedLoads(t *testing.T) {
-	f := started(t, fixtureOptions{lobby: true})
-	c := f.state.Content()
-	if len(c.Waypoints) != 11 || len(c.Shapes) != 5 || len(c.Patterns) != 359 {
-		t.Fatalf("loaded %d waypoints, %d shapes, %d patterns", len(c.Waypoints), len(c.Shapes), len(c.Patterns))
-	}
-	set, _ := c.SetOf(square)
-	if p, ok := c.PatternFor(set); !ok || c.Shapes[c.Patterns[p].Shape].ID != "square" {
-		t.Fatalf("%v should be a square", square)
-	}
-	if err := f.db.SeedDev2025(context.Background()); err != nil {
-		t.Fatalf("seeding again: %v", err)
 	}
 }
 
@@ -238,22 +232,22 @@ func TestWritesRequireGame(t *testing.T) {
 	f := started(t, fixtureOptions{lobby: true})
 	ctx := context.Background()
 
-	if _, err := f.state.Scan(ctx, f.users[0], "9999"); !errors.Is(err, ErrUnknownWaypoint) {
+	if _, err := f.state.Scan(ctx, f.users[0], "9999"); !errors.Is(err, teamstate.ErrUnknownWaypoint) {
 		t.Fatalf("unknown waypoint: %v", err)
 	}
-	if _, err := f.state.Select(ctx, f.users[0], "hexagon"); !errors.Is(err, ErrUnknownShape) {
+	if _, err := f.state.Select(ctx, f.users[0], "hexagon"); !errors.Is(err, teamstate.ErrUnknownShape) {
 		t.Fatalf("unknown shape: %v", err)
 	}
-	if _, err := f.state.Scan(ctx, uuid.New(), "1001"); !errors.Is(err, ErrNotInTeam) {
+	if _, err := f.state.Scan(ctx, uuid.New(), "1001"); !errors.Is(err, teamstate.ErrNotInTeam) {
 		t.Fatalf("no team: %v", err)
 	}
-	if _, err := f.state.Scan(ctx, f.users[0], "1001"); !errors.Is(err, ErrNotInGame) {
+	if _, err := f.state.Scan(ctx, f.users[0], "1001"); !errors.Is(err, teamstate.ErrNotInGame) {
 		t.Fatalf("lobby scan: %v", err)
 	}
-	if _, err := f.state.Select(ctx, f.users[0], "square"); !errors.Is(err, ErrNotInGame) {
+	if _, err := f.state.Select(ctx, f.users[0], "square"); !errors.Is(err, teamstate.ErrNotInGame) {
 		t.Fatalf("lobby select: %v", err)
 	}
-	if _, err := f.state.ClearSelection(ctx, f.users[0]); !errors.Is(err, ErrNotInGame) {
+	if _, err := f.state.ClearSelection(ctx, f.users[0]); !errors.Is(err, teamstate.ErrNotInGame) {
 		t.Fatalf("lobby clear: %v", err)
 	}
 }
@@ -262,7 +256,7 @@ func TestWritesRequireGame(t *testing.T) {
 // refused and changes nothing.
 func TestScanNeedsSelection(t *testing.T) {
 	f := started(t)
-	if err := f.scanErrAt(0, 0, "1001"); !errors.Is(err, ErrNoShapeSelected) {
+	if err := f.scanErrAt(0, 0, "1001"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("scan without selection: %v", err)
 	}
 	if v := f.view(t); len(v.Waypoints) != 0 || len(v.Stack) != 0 || f.loggedScans(t) != 0 {
@@ -282,16 +276,16 @@ func TestSquareNeedsDistinctMembers(t *testing.T) {
 		t.Fatalf("selection: %+v", v.Selection)
 	}
 	res := f.scanAt(t, f.tick(1), 0, "1001")
-	expectOutcome(t, "first scan", res, OutcomeScanAdded)
-	if !res.State.Stack[0].ExpiresAt.Equal(start.Add(f.tick(1) + f.rules.limit())) {
+	expectOutcome(t, "first scan", res, teamstate.OutcomeScanAdded)
+	if !res.State.Stack[0].ExpiresAt.Equal(start.Add(f.tick(1) + f.rules.Limit())) {
 		t.Fatalf("expires_at %v", res.State.Stack[0].ExpiresAt)
 	}
 	f.scanAt(t, f.tick(5), 1, "1002")
 
-	if err := f.scanErrAt(f.tick(6), 0, "1007"); !errors.Is(err, ErrMemberAlreadyScanned) {
+	if err := f.scanErrAt(f.tick(6), 0, "1007"); !errors.Is(err, teamstate.ErrMemberAlreadyScanned) {
 		t.Fatalf("same member, another waypoint: %v", err)
 	}
-	if err := f.scanErrAt(f.tick(7), 2, "1001"); !errors.Is(err, ErrWaypointAlreadyScanned) {
+	if err := f.scanErrAt(f.tick(7), 2, "1001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("another member, same waypoint: %v", err)
 	}
 	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1001", "1002"}) || f.loggedScans(t) != 2 {
@@ -299,9 +293,9 @@ func TestSquareNeedsDistinctMembers(t *testing.T) {
 	}
 
 	// 1001, 1002, 1007 is a triangle, but the team selected a square.
-	expectOutcome(t, "third scan", f.scanAt(t, f.tick(10), 2, "1007"), OutcomeScanAdded)
+	expectOutcome(t, "third scan", f.scanAt(t, f.tick(10), 2, "1007"), teamstate.OutcomeScanAdded)
 	res = f.scanAt(t, f.tick(12), 3, "1008")
-	expectOutcome(t, "fourth scan", res, OutcomePatternCompleted)
+	expectOutcome(t, "fourth scan", res, teamstate.OutcomePatternCompleted)
 	if !slices.Equal(res.Pattern, square) || res.AlreadyCompleted {
 		t.Fatalf("completion: %+v", res)
 	}
@@ -310,7 +304,7 @@ func TestSquareNeedsDistinctMembers(t *testing.T) {
 		len(st.Patterns) != 1 || !slices.Equal(st.Waypoints, square) {
 		t.Fatalf("after completion: %+v", st)
 	}
-	if err := f.scanErrAt(f.tick(13), 4, "1009"); !errors.Is(err, ErrNoShapeSelected) {
+	if err := f.scanErrAt(f.tick(13), 4, "1009"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("selection should clear after completion: %v", err)
 	}
 }
@@ -329,12 +323,12 @@ func TestEverySelectionPurges(t *testing.T) {
 		t.Fatalf("reselecting the same shape should purge: %+v", v)
 	}
 	res := f.scanAt(t, f.tick(5), 3, "1008") // without the purge this would complete the square
-	expectOutcome(t, "after reselect", res, OutcomeScanAdded)
+	expectOutcome(t, "after reselect", res, teamstate.OutcomeScanAdded)
 	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1008"}) {
 		t.Fatalf("stack after reselect: %v", got)
 	}
 	// Members who scanned before the purge may scan again at once.
-	expectOutcome(t, "member 0 after purge", f.scanAt(t, f.tick(6), 0, "1001"), OutcomeScanAdded)
+	expectOutcome(t, "member 0 after purge", f.scanAt(t, f.tick(6), 0, "1001"), teamstate.OutcomeScanAdded)
 
 	if v := f.selectAt(t, f.tick(7), 2, "triangle"); len(v.Stack) != 0 || v.Selection.Shape != "triangle" {
 		t.Fatalf("selecting another shape should purge: %+v", v)
@@ -352,7 +346,7 @@ func TestRescanIsRejected(t *testing.T) {
 	sub := f.hub.Subscribe(f.users[2])
 	defer sub.Close()
 	for _, member := range []int{0, 1} {
-		if err := f.scanErrAt(f.tick(2), member, "1001"); !errors.Is(err, ErrWaypointAlreadyScanned) {
+		if err := f.scanErrAt(f.tick(2), member, "1001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 			t.Fatalf("member %d rescanning 1001: %v", member, err)
 		}
 	}
@@ -388,7 +382,7 @@ func TestConcurrentRescansAddOneScan(t *testing.T) {
 		switch {
 		case err == nil:
 			ok++
-		case !errors.Is(err, ErrWaypointAlreadyScanned):
+		case !errors.Is(err, teamstate.ErrWaypointAlreadyScanned):
 			t.Fatalf("unexpected error %v", err)
 		}
 	}
@@ -409,9 +403,9 @@ func TestLateRepeatDoesNotRejectThePattern(t *testing.T) {
 
 	// At limit + 5 (70 s), member 0's scan (70 s old) is stale: dropped,
 	// nothing else.
-	limit := f.rules.limit()
+	limit := f.rules.Limit()
 	res := f.scanAt(t, limit+f.tick(5), 3, "1008")
-	expectOutcome(t, "fourth scan after the first went stale", res, OutcomeScanAdded)
+	expectOutcome(t, "fourth scan after the first went stale", res, teamstate.OutcomeScanAdded)
 	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1002", "1007", "1008"}) {
 		t.Fatalf("stack: %v", got)
 	}
@@ -420,23 +414,23 @@ func TestLateRepeatDoesNotRejectThePattern(t *testing.T) {
 	// scan is stale; not rejected. Span 1002@10 to 1001@71 is 61 s, within
 	// the limit.
 	res = f.scanAt(t, limit+f.tick(6), 0, "1001")
-	expectOutcome(t, "rescan", res, OutcomePatternCompleted)
+	expectOutcome(t, "rescan", res, teamstate.OutcomePatternCompleted)
 }
 
 // TestGraceTolerance checks the window and its grace: spans up to window +
 // grace complete, and a microsecond more drops the bottom scan.
 func TestGraceTolerance(t *testing.T) {
 	f := started(t)
-	limit := f.rules.limit()
+	limit := f.rules.Limit()
 	cases := []struct {
 		name string
 		span time.Duration
 		want string
 	}{
-		{"within the window", f.rules.ScanWindow - f.tick(1), OutcomePatternCompleted},
-		{"over the window, inside the grace (don't punish)", f.rules.ScanWindow + f.rules.ScanGrace/2, OutcomePatternCompleted},
-		{"exactly window + grace", limit, OutcomePatternCompleted},
-		{"one microsecond over", limit + time.Microsecond, OutcomeScanAdded},
+		{"within the window", f.rules.ScanWindow - f.tick(1), teamstate.OutcomePatternCompleted},
+		{"over the window, inside the grace (don't punish)", f.rules.ScanWindow + f.rules.ScanGrace/2, teamstate.OutcomePatternCompleted},
+		{"exactly window + grace", limit, teamstate.OutcomePatternCompleted},
+		{"one microsecond over", limit + time.Microsecond, teamstate.OutcomeScanAdded},
 	}
 	t0 := time.Duration(0)
 	for _, c := range cases {
@@ -458,13 +452,13 @@ func TestStaleScanFreesItsWaypointAndMember(t *testing.T) {
 	f.scanAt(t, 0, 0, "1001")
 	f.scanAt(t, f.tick(10), 1, "1002")
 
-	limit := f.rules.limit()
+	limit := f.rules.Limit()
 	res := f.scanAt(t, limit+f.tick(1), 2, "1001") // 66 s: member 0's 1001 is stale
 	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1002", "1001"}) {
 		t.Fatalf("stack: %v", got)
 	}
 	f.scanAt(t, limit+f.tick(2), 0, "1007") // member 0 is free again
-	expectOutcome(t, "complete", f.scanAt(t, limit+f.tick(3), 3, "1008"), OutcomePatternCompleted)
+	expectOutcome(t, "complete", f.scanAt(t, limit+f.tick(3), 3, "1008"), teamstate.OutcomePatternCompleted)
 }
 
 // TestWrongScanLocksMember checks that a waypoint that can't be part of any
@@ -476,7 +470,7 @@ func TestWrongScanLocksMember(t *testing.T) {
 	f.selectAt(t, 0, 0, "square")
 
 	res := f.scanAt(t, f.tick(1), 0, "1012") // in no square
-	expectOutcome(t, "wrong waypoint", res, OutcomeScanAdded)
+	expectOutcome(t, "wrong waypoint", res, teamstate.OutcomeScanAdded)
 	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1012"}) {
 		t.Fatalf("stack %v", got)
 	}
@@ -485,11 +479,11 @@ func TestWrongScanLocksMember(t *testing.T) {
 	}
 
 	// The member is locked: they can't scan again to overwrite it.
-	if err := f.scanErrAt(f.tick(2), 0, "1001"); !errors.Is(err, ErrMemberAlreadyScanned) {
+	if err := f.scanErrAt(f.tick(2), 0, "1001"); !errors.Is(err, teamstate.ErrMemberAlreadyScanned) {
 		t.Fatalf("member rescanned after a wrong scan: %v", err)
 	}
 	// The waypoint slot is taken too.
-	if err := f.scanErrAt(f.tick(3), 1, "1012"); !errors.Is(err, ErrWaypointAlreadyScanned) {
+	if err := f.scanErrAt(f.tick(3), 1, "1012"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("another member rescanned the wrong waypoint: %v", err)
 	}
 }
@@ -503,19 +497,19 @@ func TestWrongScanPoisonsSelection(t *testing.T) {
 	f.scanAt(t, f.tick(1), 0, "1001")
 	f.scanAt(t, f.tick(2), 1, "1002")
 	// 1003 is in no square with 1001 and 1002: wrong, and it poisons the set.
-	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, "1003"), OutcomeScanAdded)
+	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, "1003"), teamstate.OutcomeScanAdded)
 
 	// The remaining correct waypoints still can't complete it.
 	f.scanAt(t, f.tick(4), 3, "1007")
-	expectOutcome(t, "cannot complete a poisoned selection", f.scanAt(t, f.tick(5), 4, "1008"), OutcomeScanAdded)
+	expectOutcome(t, "cannot complete a poisoned selection", f.scanAt(t, f.tick(5), 4, "1008"), teamstate.OutcomeScanAdded)
 
 	// Reselecting purges the wrong scan; the square then completes.
 	f.selectAt(t, f.tick(6), 0, "square")
-	res := ScanResult{}
+	res := teamstate.ScanResult{}
 	for i, w := range square {
 		res = f.scanAt(t, f.tick(7)+f.tick(float64(i)), i, w)
 	}
-	expectOutcome(t, "completes after reselect", res, OutcomePatternCompleted)
+	expectOutcome(t, "completes after reselect", res, teamstate.OutcomePatternCompleted)
 }
 
 // TestWrongScanNeverAgesOut checks that a wrong scan stays in the stack past
@@ -527,16 +521,15 @@ func TestWrongScanNeverAgesOut(t *testing.T) {
 	f.scanAt(t, 0, 0, "1001")
 	f.scanAt(t, f.tick(1), 1, "1012") // wrong
 
-	limit := f.rules.limit()
+	limit := f.rules.Limit()
 	res := f.scanAt(t, limit+f.tick(10), 2, "1007")
 	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1012", "1007"}) {
 		t.Fatalf("stack %v: the wrong 1012 should stay, the stale 1001 should drop", got)
 	}
 
 	// A restart reproduces the wrong scan and its never-stale flag.
-	wp, _ := f.state.Content().WaypointIndex("1012")
-	restarted := pgtest.Must(Load(context.Background(), pgtest.Open(t, f.dbURL), f.teams, f.hub, pgtest.Quiet, f.rules))
-	restarted.now = f.clock.now
+	wp, _ := f.atlas.WaypointIndex("1012")
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
 	st := restarted.ForTeam(f.teamID)
 	wrong := false
 	for i := range st.Stack.Len() {
@@ -565,12 +558,12 @@ func TestCompletionPurges(t *testing.T) {
 		member   int
 		waypoint string
 	}{{3, "1008"}, {4, "1009"}} {
-		if err := f.scanErrAt(f.tick(4), c.member, c.waypoint); !errors.Is(err, ErrNoShapeSelected) {
+		if err := f.scanErrAt(f.tick(4), c.member, c.waypoint); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 			t.Fatalf("member %d scanning %s after completion: %v", c.member, c.waypoint, err)
 		}
 	}
 	f.selectAt(t, f.tick(5), 0, "square")
-	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "1008"), OutcomeScanAdded)
+	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "1008"), teamstate.OutcomeScanAdded)
 }
 
 // TestOutOfOrderScanning checks that a pattern completes whatever order the
@@ -582,11 +575,11 @@ func TestOutOfOrderScanning(t *testing.T) {
 	f.selectAt(t, 0, 0, "square")
 
 	order := []string{"1008", "1007", "1002", "1001"} // square, scrambled
-	res := ScanResult{}
+	res := teamstate.ScanResult{}
 	for i, w := range order {
 		res = f.scanAt(t, f.tick(float64(i)), i, w)
 	}
-	expectOutcome(t, "completes out of order", res, OutcomePatternCompleted)
+	expectOutcome(t, "completes out of order", res, teamstate.OutcomePatternCompleted)
 	if !slices.Equal(res.Pattern, square) { // Pattern is returned sorted
 		t.Fatalf("pattern %v", res.Pattern)
 	}
@@ -601,7 +594,7 @@ func TestSinglePointPattern(t *testing.T) {
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES (1001, '1011');`})
 	f.selectAt(t, 0, 0, "dot")
 	res := f.scanAt(t, f.tick(1), 0, "1011")
-	expectOutcome(t, "single point", res, OutcomePatternCompleted)
+	expectOutcome(t, "single point", res, teamstate.OutcomePatternCompleted)
 	if !slices.Equal(res.Pattern, []string{"1011"}) {
 		t.Fatalf("pattern %v", res.Pattern)
 	}
@@ -621,9 +614,9 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 	}
 	f.selectAt(t, 0, 0, "hexagon")
 	for i, w := range hex {
-		want := OutcomeScanAdded
+		want := teamstate.OutcomeScanAdded
 		if i == len(hex)-1 {
-			want = OutcomePatternCompleted
+			want = teamstate.OutcomePatternCompleted
 		}
 		expectOutcome(t, fmt.Sprintf("hexagon point %d", i+1), f.scanAt(t, f.tick(float64(i)), i, w), want)
 	}
@@ -634,7 +627,7 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 func TestCompletingAgain(t *testing.T) {
 	f := started(t)
 	for round := range 2 {
-		t0 := time.Duration(round) * 2 * f.rules.limit()
+		t0 := time.Duration(round) * 2 * f.rules.Limit()
 		f.selectAt(t, t0, 0, "square")
 		for i, w := range square {
 			res := f.scanAt(t, t0+f.tick(float64(i)), i, w)
@@ -662,7 +655,7 @@ func TestClearSelection(t *testing.T) {
 	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"1001"}) {
 		t.Fatalf("after clear: %+v", v)
 	}
-	if err := f.scanErrAt(f.tick(2), 1, "1002"); !errors.Is(err, ErrNoShapeSelected) {
+	if err := f.scanErrAt(f.tick(2), 1, "1002"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("scan after clear: %v", err)
 	}
 }
@@ -676,20 +669,19 @@ func TestRestartRestoresEverything(t *testing.T) {
 	for i, w := range square {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
-	later := f.rules.limit() + f.tick(35) // 100 s: long after the square
+	later := f.rules.Limit() + f.tick(35) // 100 s: long after the square
 	f.selectAt(t, later, 4, "triangle")
 	f.scanAt(t, later, 4, "1003")
 	f.scanAt(t, later+f.tick(1), 5, "1004")
 	f.clock.at(later + f.tick(2))
 
 	before := pgtest.Must(json.Marshal(f.view(t)))
-	restarted := pgtest.Must(Load(context.Background(), pgtest.Open(t, f.dbURL), f.teams, f.hub, pgtest.Quiet, f.rules))
-	restarted.now = f.clock.now
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
 	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.ForUser(f.users[0]))))
 	if string(after) != string(before) {
 		t.Fatalf("state changed across restart\nbefore: %s\nafter:  %s", before, after)
 	}
-	if _, err := restarted.Scan(context.Background(), f.users[5], "1004"); !errors.Is(err, ErrWaypointAlreadyScanned) {
+	if _, err := restarted.Scan(context.Background(), f.users[5], "1004"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("rescan after restart: %v", err)
 	}
 }
@@ -722,11 +714,11 @@ func TestConcurrentScans(t *testing.T) {
 	}
 
 	ok, errs := race([2]func() error{scan(0, "1001"), scan(1, "1001")})
-	if ok != 1 || !errors.Is(errs[0], ErrWaypointAlreadyScanned) {
+	if ok != 1 || !errors.Is(errs[0], teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("two members, one waypoint: %d ok, %v", ok, errs)
 	}
 	ok, errs = race([2]func() error{scan(2, "1002"), scan(2, "1007")})
-	if ok != 1 || !errors.Is(errs[0], ErrMemberAlreadyScanned) {
+	if ok != 1 || !errors.Is(errs[0], teamstate.ErrMemberAlreadyScanned) {
 		t.Fatalf("one member, two waypoints: %d ok, %v", ok, errs)
 	}
 }
@@ -784,8 +776,8 @@ func TestStateIsPublished(t *testing.T) {
 
 	f.selectAt(t, 0, 0, "square")
 	f.scanAt(t, f.tick(1), 0, "1010")
-	var sel, scanned View
-	for _, v := range []*View{&sel, &scanned} {
+	var sel, scanned teamstate.View
+	for _, v := range []*teamstate.View{&sel, &scanned} {
 		ev := <-sub.C
 		if ev.Name != "team_state" {
 			t.Fatalf("event %q", ev.Name)
@@ -797,42 +789,4 @@ func TestStateIsPublished(t *testing.T) {
 	if sel.Selection == nil || sel.Selection.Shape != "square" || !slices.Equal(stackWaypoints(scanned), []string{"1010"}) {
 		t.Fatalf("events: %+v / %+v", sel, scanned)
 	}
-}
-
-// Benchmark sinks: each benchmark stores its results here, so the compiler
-// can't discard the lookups as unused.
-var (
-	// sinkBool holds boolean results.
-	sinkBool bool
-	// sinkInt holds index results.
-	sinkInt int
-)
-
-// BenchmarkScanLookups measures the content lookups a scan relies on, on the
-// small content_test.go fixture (four waypoints, three patterns). Numbers on
-// the 2025 seed are in content.go's FitsShape comment and the README.
-func BenchmarkScanLookups(b *testing.B) {
-	c, err := newContent(fixture(), maxPoints(b))
-	if err != nil {
-		b.Fatal(err)
-	}
-	scanned, _ := c.SetOf([]string{"1001", "1002", "1003"})
-	triangle, _ := c.ShapeIndex("triangle")
-
-	b.Run("FitsShape", func(b *testing.B) {
-		for b.Loop() {
-			sinkBool = c.FitsShape(triangle, scanned)
-		}
-	})
-	b.Run("PatternFor", func(b *testing.B) {
-		for b.Loop() {
-			sinkInt, sinkBool = c.PatternFor(scanned)
-		}
-	})
-	b.Run("WaypointIndex+Has", func(b *testing.B) {
-		for b.Loop() {
-			i, _ := c.WaypointIndex("1002")
-			sinkBool = scanned.Has(i)
-		}
-	})
 }

@@ -147,7 +147,8 @@ Browser                        SvelteKit server                 Backend         
 - **`AccessClaims`**: `Email`, `Name`, `AvatarURL *string`, `Role user.Role`, plus `jwt.RegisteredClaims`. **`UserID()`** parses `sub` as a UUID.
 - **`VerifyAccess(raw)`** parses with `jwt.ParseWithClaims` and requires: algorithm `EdDSA` only; signature valid under the public key; `iss = labyrinth-backend`; `aud` contains `labyrinth-api`; `exp` present and `now < exp` (no leeway); `nbf`, if present, passed. Then it requires `sub` to parse as a UUID (`token subject is not a user id`). `iat` isn't checked.
 - **`oauthState`**: `State`, `Verifier`, `Next`, plus `jwt.RegisteredClaims`. Only `login` and `callback` use it.
-- **`verifyState(raw)`** is `VerifyAccess` with audience `labyrinth-oauth-state` and no subject check. Because the audiences differ, neither kind of token is accepted as the other.
+- **`verifyState(raw)`** is `VerifyAccess` with audience `labyrinth-oauth-state` and no subject check. Because the audiences differ, neither kind of token is accepted as the other (tested end to end: `TestStateAndAccessTokensNotInterchangeable` in `internal/server/tests`).
+- **`Issuer`** (`labyrinth-backend`) and **`AccessAudience`** (`labyrinth-api`) are exported: the SvelteKit server checks the same values when it verifies access tokens (`frontend/src/lib/server/session.ts`), and the tests forge tokens with them.
 - **`keyFunc`** returns the public key for the parser.
 
 ### `write.go`: signing and login codes
@@ -556,15 +557,15 @@ There are no locks and no in-memory state. Everything concurrent is settled by P
 - **The state cookie is signed, not encrypted.** Its payload (state, verifier, next) is readable by whoever holds the cookie, i.e. the browser that started the sign-in.
 
 ## Tests
-`tokens_test.go` (no database):
+`tests/tokens_test.go` (no database):
 
 | Test | Covers |
 |---|---|
 | `TestSafeNext` | `""`, `/`, `/team`, `/team?tab=1#x` kept; `//evil.com`, `//evil.com/path`, `/\evil.com`, `https://evil.com`, `evil.com`, `javascript:alert(1)`, `/ok\r\nSet-Cookie:` → `/` |
 | `TestAccessTokenRoundTrip` | issue then verify: same user ID, email, role; expiry about TTL away |
-| `TestAccessTokenRejections` | subtests: `wrong key`, `expired`, `alg none`, `HS256 with public key as secret`, `state token used as access token`, `access token used as state` |
+| `TestAccessTokenRejections` | subtests: `wrong key`, `expired`, `alg none`, `HS256 with public key as secret`. (State and access tokens refused in each other's place: `TestStateAndAccessTokensNotInterchangeable` in `internal/server/tests`, since it needs the private state functions, reached through the real sign-in flow.) |
 
-`codes_test.go` (real Postgres, schema `auth_test`, `config.toml`'s `auth.login_code_ttl`):
+`tests/codes_test.go` (real Postgres, schema `auth_test`, `config.toml`'s `auth.login_code_ttl`):
 
 | Test | Covers |
 |---|---|
@@ -572,7 +573,7 @@ There are no locks and no in-memory state. Everything concurrent is settled by P
 | `TestConcurrentRedemptionOnce` | 8 concurrent redemptions of one code: exactly one succeeds, the rest get `ErrInvalidCode` (checked as the wrapped `postgres.ErrNotFound`) |
 | `TestCodeExpiryUsesDatabaseClock` | `expires_at − now()` in Postgres is within 5 s under `auth.login_code_ttl` |
 
-`internal/server/auth_test.go` (real Postgres, fake Google issuing RS256 ID tokens, `config.toml`'s settings):
+`internal/server/tests/auth_test.go` (real Postgres, fake Google issuing RS256 ID tokens, `config.toml`'s settings):
 
 | Test | Covers |
 |---|---|
@@ -582,6 +583,6 @@ There are no locks and no in-memory state. Everything concurrent is settled by P
 | `TestSignInRefreshesTeamProfile` | Signing in again with a new name and no picture: the team's member shows the new name at once and keeps the old avatar |
 | `TestEmailInUse` | Another account already has the email: callback → `reason=email_in_use` |
 
-`internal/server/events_test.go`: `TestEventStreamAuthAndCleanup` checks the event stream needs a token (`401`).
+`internal/server/tests/events_test.go`: `TestEventStreamAuthAndCleanup` checks the event stream needs a token (`401`).
 
 Not covered by any test yet: an expired state cookie, `code_missing`, `internal_error`, an empty email, `404 user_not_found` on `/auth/token`, a malformed (non-empty) body on `/auth/token`, the `Bearer` scheme's case and spacing, a missing `exp`, a non-UUID `sub`, the two `WWW-Authenticate` headers, and the cookie's `Secure` flag.

@@ -24,8 +24,8 @@ Every number below that comes from `config.toml` is shown with its current value
 ## Concepts
 | Term | Meaning |
 |---|---|
-| **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). Unexported: the `*postgres.DB` (for `/healthz`) and the heartbeat. |
-| **Build order** | Each use case is constructed after everything it reads. `teamstate` reads `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
+| **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Atlas`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). `Atlas` is the `*atlas.Atlas` (static content); nothing reads `App.Atlas` today (`Build` passes the atlas to teamstate directly), it's there for `main`, tests and future use cases. Unexported: the `*postgres.DB` (for `/healthz`) and the heartbeat. |
+| **Build order** | Each use case is constructed after everything it reads. `atlas` is static content every game use case reads, so `atlas.Load` runs first. `teamstate` reads `atlas` and `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
 | **Authed route** | A route wrapped in auth's `RequireAuth` (passed to each use case as `authAPI.Authed`). It needs `Authorization: Bearer <jwt>` and puts the caller on the request via `platform/identity`. |
 | **Stream** | One open `GET /api/teams/me/events`: one `live.Subscription` in the hub, keyed by the caller's user ID. |
 | **Initial snapshots** | The events a stream sends before anything else: `team` or `no_team`, then `team_state` if the caller is in a team. |
@@ -88,16 +88,17 @@ Every number below that comes from `config.toml` is shown with its current value
   3. `auth.NewTokens(cfg.JWTKey, auth.token_ttl)`: the JWT signer and verifier.
   4. `auth.NewLoginCodes(db, auth.login_code_ttl)`.
   5. `auth.NewGoogle(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, PUBLIC_URL + "/auth/google/callback", google)`.
-  6. `teams.Load(ctx, db, hub, log, teams.Rules{…})`: reads every team into memory. An error is returned as is.
-  7. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
-  8. `teamstate.Load(ctx, db, teamStore, hub, log, teamstate.Rules{…})`: reads content and every team's state. It needs `teamStore` (through its `Teams` interface), so it runs after step 6.
-  9. The `App`, then a `http.ServeMux` with, in this order:
+  6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`.
+  7. `teams.Load(ctx, db, hub, log, teams.Rules{…})`: reads every team into memory. An error is returned as is.
+  8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
+  9. `teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas. It needs the atlas (through its `Atlas` interface) and `teamStore` (through its `Teams` interface), so it runs after steps 6 and 7.
+  10. The `App` (with `Atlas: theAtlas`), then a `http.ServeMux` with, in this order:
      - `GET /healthz` (no auth)
      - `GET /openapi.yaml` and `GET /docs` (no auth; see [API docs](#api-docs-openapi))
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
-     - `user`, `teams`, `teamstate`: each `NewAPI(…).Routes(mux, authAPI.Authed)`
+     - `user`, `teams`, `teamstate`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
      - `GET /api/teams/me/events`, wrapped in `authAPI.Authed`
-  10. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
+  11. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
 - **`envelopeUnrouted(mux)`** wraps the mux. For each request it asks `mux.Handler(r)` for the matching pattern:
   - a pattern matched → `mux.ServeHTTP` as usual
   - no pattern → runs the mux's own fallback handler into a **`statusRecorder`** (records status and headers, discards the plain-text body), then:
@@ -119,7 +120,7 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `teams.code_attempts` | 10 | `teams.Rules.CodeAttempts` |
 | `game.scan_window` | 1 m | `teamstate.Rules.ScanWindow` |
 | `game.scan_grace` | 5 s | `teamstate.Rules.ScanGrace` |
-| `game.max_pattern_points` | 6 | `teamstate.Rules.MaxPatternPoints` |
+| `game.max_pattern_points` | 6 | `atlas.Rules.MaxPatternPoints` and `teamstate.Rules.MaxPatternPoints` |
 | `auth.token_ttl` | 12 h | `auth.NewTokens` |
 | `auth.login_code_ttl` | 2 m | `auth.NewLoginCodes` |
 | `auth.oauth_state_ttl` | 10 m | read by `auth.API` from `cfg.Settings` (state token TTL and cookie `MaxAge`) |
@@ -233,7 +234,8 @@ Any other path or method:
 | A migration fails | `migration NNNN_name: …`; earlier migrations stay applied; exit `1` |
 | Another backend holds the instance lock (serving, `migrate` or `seed`) | `another backend instance is already running against this database`; exit `1`, before migrating or seeding |
 | An applied migration was edited | `migration NNNN_name: migration was edited after it was applied; …`; nothing new applied; exit `1` |
-| `teams.Load` or `teamstate.Load` fails (bad content, unreachable database) | `Build` returns the error; exit `1` |
+| `atlas.Load` fails: bad content (`invalid atlas: …`, every case in `internal/atlas/README.md`) or a failed read (`load atlas: …`) | `Build` returns the error; exit `1`, before teams or team state load |
+| `teams.Load` or `teamstate.Load` fails (unreachable database, or stored team state naming a waypoint, pattern or shape the atlas doesn't have) | `Build` returns the error; exit `1` |
 | Port in use | `ListenAndServe`'s error; exit `1` |
 
 ### `/healthz`
@@ -305,7 +307,7 @@ The `*_test.go` files are package `server_test`. They run the real `server.Build
 
 **⚠ `setup` runs `DROP SCHEMA public CASCADE` on `TEST_DATABASE_URL`.** Point it only at a disposable database.
 
-### `setup(t, allowedDomains...)` (`auth_test.go`)
+### `setup(t, allowedDomains...)` (`tests/auth_test.go`)
 1. Skip if `TEST_DATABASE_URL` is unset.
 2. Wipe: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`. This happens **per test** (every `setup` call), not once per run.
 3. `postgres.Connect`, then `Migrate` **twice** (the second run must be a no-op).
@@ -325,21 +327,21 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 ### Request helpers
 | Helper | File | What it does |
 |---|---|---|
-| `do(req)` | `auth_test.go` | Sends without following redirects; closes the body at cleanup |
-| `get(path, cookies...)` | `auth_test.go` | `GET` with cookies |
-| `login(next)` | `auth_test.go` | `GET /auth/google/login`; checks `302`, PKCE `S256`, `client_id`, `redirect_uri`, and one `HttpOnly` state cookie; returns `state` and the cookie |
-| `callback(query, cookie)` | `auth_test.go` | `GET /auth/google/callback`; checks `302` to `http://frontend.test/auth/…`; returns the redirect URL |
-| `redeem(code)` | `auth_test.go` | `POST /auth/token {"code"}`; returns status and decoded body |
-| `me(token)` | `auth_test.go` | `GET /api/me` |
-| `signIn()` | `auth_test.go` | Runs the whole Google flow for `env.identity` (login, callback, redeem); returns the access token |
-| `newPlayer(name)` | `teams_test.go` | Signs in `name@snu.edu.in` straight through `user.SignInWithGoogle` and `Tokens.IssueAccess`, skipping OAuth; returns `player{id, token}` |
-| `call(method, path, p, body)` | `teams_test.go` | JSON-encodes `body` (none if `nil`), sends with `p`'s Bearer token (none if empty), decodes the envelope into `apiResult{status, code, payload}` |
-| `expect(t, what, got, status, code)` | `teams_test.go` | Fails unless both status and code match (`""` for success) |
-| `members(r)` | `teams_test.go` | The `members` array of a team payload |
-| `fullTeam(prefix)` | `teams_test.go` | `teams.size` players; `[0]` creates, the rest join |
-| `startedTeam(prefix)` | `teamstate_test.go` | `fullTeam`, everyone but the leader ready, leader starts |
+| `do(req)` | `tests/auth_test.go` | Sends without following redirects; closes the body at cleanup |
+| `get(path, cookies...)` | `tests/auth_test.go` | `GET` with cookies |
+| `login(next)` | `tests/auth_test.go` | `GET /auth/google/login`; checks `302`, PKCE `S256`, `client_id`, `redirect_uri`, and one `HttpOnly` state cookie; returns `state` and the cookie |
+| `callback(query, cookie)` | `tests/auth_test.go` | `GET /auth/google/callback`; checks `302` to `http://frontend.test/auth/…`; returns the redirect URL |
+| `redeem(code)` | `tests/auth_test.go` | `POST /auth/token {"code"}`; returns status and decoded body |
+| `me(token)` | `tests/auth_test.go` | `GET /api/me` |
+| `signIn()` | `tests/auth_test.go` | Runs the whole Google flow for `env.identity` (login, callback, redeem); returns the access token |
+| `newPlayer(name)` | `tests/teams_test.go` | Signs in `name@snu.edu.in` straight through `user.SignInWithGoogle` and `Tokens.IssueAccess`, skipping OAuth; returns `player{id, token}` |
+| `call(method, path, p, body)` | `tests/teams_test.go` | JSON-encodes `body` (none if `nil`), sends with `p`'s Bearer token (none if empty), decodes the envelope into `apiResult{status, code, payload}` |
+| `expect(t, what, got, status, code)` | `tests/teams_test.go` | Fails unless both status and code match (`""` for success) |
+| `members(r)` | `tests/teams_test.go` | The `members` array of a team payload |
+| `fullTeam(prefix)` | `tests/teams_test.go` | `teams.size` players; `[0]` creates, the rest join |
+| `startedTeam(prefix)` | `tests/teamstate_test.go` | `fullTeam`, everyone but the leader ready, leader starts |
 
-### `openStream(p)` (`events_test.go`)
+### `openStream(p)` (`tests/events_test.go`)
 - Opens `GET /api/teams/me/events` with `p`'s token on a cancellable context (cancelled at cleanup). Fails unless `200` and `Content-Type: text/event-stream`.
 - A goroutine scans lines: `event: X` sets the name; `data: {...}` is parsed as JSON and sent to `states` if the name is `team_state`, else to `events`. Comment lines (`: ping`) are ignored. Both channels hold 64 and close when the body ends.
 - `stream.next(t, what)`: the next `team` or `no_team` event, failing after 3 s or if the stream closed.
@@ -352,7 +354,7 @@ Calls `server.Build` again on the same database and config, and swaps the handle
   - `openAPI`: `GET /openapi.yaml` with `Content-Type: application/yaml`
   - `docs`: `GET /docs`, a Swagger UI page loading `swagger-ui-dist@5.17.14` (`swaggerUIVersion`) from jsDelivr. The page needs internet access; the spec doesn't.
   - Both are public and need no token. Use **Authorize** in Swagger UI with a token from `POST /auth/token` to try routes.
-- **Kept true by `openapi_test.go`**, which reads the spec and the Go source:
+- **Kept true by `tests/openapi_test.go`**, which reads the spec and the Go source:
 
   | Test | Fails when |
   |---|---|
@@ -365,30 +367,31 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 ## Tests
 | Test | File | Covers |
 |---|---|---|
-| `TestFullLoginFlow` | `auth_test.go` | login → Google → callback → redeem → `/api/me`; code reuse is `400`; a role changed in SQL shows on `/api/me` without a new token; signing in again keeps the user ID and role and updates the name |
-| `TestCallbackFailures` | `auth_test.go` | `ALLOWED_EMAIL_DOMAINS=snu.edu.in`. Subtests, each landing on `/auth/error?reason=`: `state_missing`, `state_mismatch`, `state_invalid` (tampered cookie), `google_access_denied`, `google_exchange_failed`, `email_unverified`, `email_domain_not_allowed`; and `next=//evil.com` becomes `/` |
-| `TestTokenAndAuthErrors` | `auth_test.go` | expired and never-issued codes are `400 invalid_code`, an empty code `400 invalid_body`; `DeleteExpired` removes exactly the expired one; no token is `401 missing_token`, a garbage token `401 invalid_token`; `/healthz` is `200`; `POST /api/me` is `405` |
-| `TestSignInRefreshesTeamProfile` | `auth_test.go` | a team creator signs in again with a new name and no picture: `GET /api/teams/me` shows the new name and the old avatar, with no restart |
-| `TestEmailInUse` | `auth_test.go` | another account already has `player@snu.edu.in`: the callback lands on `reason=email_in_use` |
-| `TestTeamLifecycle` | `teams_test.go` | every teams rule and code on the way from create to start: `401`, `not_in_team`, name trimming, `already_in_team`, `team_full`, `team_not_found`, `invalid_team_id`, `leader_cannot_ready`, `invalid_body`, `not_leader`, `not_all_ready`, `team_not_full`, rejoin resets ready, `team_locked` for start/leave/ready/join in game; members carry no email |
-| `TestLeaderLeaving` | `teams_test.go` | leadership passes to the longest-standing member; the new leader can't ready; the last one out deletes the team |
-| `TestTeamNameValidation` | `teams_test.go` | empty, spaces, `teams.name_max_length` + 1 characters (33) and a newline are `400`; `teams.name_max_length` × `é` and punctuation are `201` |
-| `TestConcurrentJoinsRespectTeamSize` | `teams_test.go` | 2 × (`teams.size` − 1) = 10 concurrent joins into a team of 1: exactly `teams.size − 1` succeed, the rest `team_full` |
-| `TestConcurrentStartAndLeave` | `teams_test.go` | 10 rounds of start racing a leave: either started with `teams.size` (6) and `team_locked`, or left with `teams.size` − 1 and `team_not_full` |
-| `TestUnroutedRequestsUseEnvelope` | `teams_test.go` | `GET /api/nope` with and without a token → `404 not_found`; `DELETE /api/teams` → `405 method_not_allowed` |
-| `TestSelectAndScanRoutes` | `teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), `member_already_scanned`, `pattern_completed`; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `scan_added` and locking the member; state after; reselect; clear |
-| `TestGameShapes` | `teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, and `scan_window_ms`, `scan_grace_ms`, `max_pattern_points` equal to `config.toml`'s |
-| `TestSimTeamCompletesUnderLatency` | `simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack, the square completed and its countdown reset |
-| `TestSimLastScanAtDeadlineWithinGrace` | `simulation_test.go` | the last player at 300 ms each way (0.6 s round trip ≤ the 1 s simulated grace) sends 20 ms before their own countdown ends: `pattern_completed` |
-| `TestSimLatencyBeyondGraceLosesBottomScan` | `simulation_test.go` | the same at 700 ms each way (1.4 s > 1 s): the bottom scan is stale on arrival, `scan_added` |
-| `TestSimGateClosesThenReselectOpens` | `simulation_test.go` | once a countdown runs out the client sends nothing (0 requests); a reselect resets every client's countdown and the square can be scanned |
-| `TestSimRaceSameWaypoint` | `simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
-| `TestTeamEventStream` | `events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
-| `TestEventStreamAuthAndCleanup` | `events_test.go` | no token is `401`; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
-| `TestStreamIncludesTeamState` | `events_test.go` | `team_state` follows `team` on connect; `GET /api/teams/me/state` works, and is `404 not_in_team` without a team |
+| `TestFullLoginFlow` | `tests/auth_test.go` | login → Google → callback → redeem → `/api/me`; code reuse is `400`; a role changed in SQL shows on `/api/me` without a new token; signing in again keeps the user ID and role and updates the name |
+| `TestCallbackFailures` | `tests/auth_test.go` | `ALLOWED_EMAIL_DOMAINS=snu.edu.in`. Subtests, each landing on `/auth/error?reason=`: `state_missing`, `state_mismatch`, `state_invalid` (tampered cookie), `google_access_denied`, `google_exchange_failed`, `email_unverified`, `email_domain_not_allowed`; and `next=//evil.com` becomes `/` |
+| `TestTokenAndAuthErrors` | `tests/auth_test.go` | expired and never-issued codes are `400 invalid_code`, an empty code `400 invalid_body`; `DeleteExpired` removes exactly the expired one; no token is `401 missing_token`, a garbage token `401 invalid_token`; `/healthz` is `200`; `POST /api/me` is `405` |
+| `TestSignInRefreshesTeamProfile` | `tests/auth_test.go` | a team creator signs in again with a new name and no picture: `GET /api/teams/me` shows the new name and the old avatar, with no restart |
+| `TestEmailInUse` | `tests/auth_test.go` | another account already has `player@snu.edu.in`: the callback lands on `reason=email_in_use` |
+| `TestStateAndAccessTokensNotInterchangeable` | `tests/auth_test.go` | the OAuth state cookie used as a bearer token is `401 invalid_token`; an access token used as the state cookie lands on `reason=state_invalid` |
+| `TestTeamLifecycle` | `tests/teams_test.go` | every teams rule and code on the way from create to start: `401`, `not_in_team`, name trimming, `already_in_team`, `team_full`, `team_not_found`, `invalid_team_id`, `leader_cannot_ready`, `invalid_body`, `not_leader`, `not_all_ready`, `team_not_full`, rejoin resets ready, `team_locked` for start/leave/ready/join in game; members carry no email |
+| `TestLeaderLeaving` | `tests/teams_test.go` | leadership passes to the longest-standing member; the new leader can't ready; the last one out deletes the team |
+| `TestTeamNameValidation` | `tests/teams_test.go` | empty, spaces, `teams.name_max_length` + 1 characters (33) and a newline are `400`; `teams.name_max_length` × `é` and punctuation are `201` |
+| `TestConcurrentJoinsRespectTeamSize` | `tests/teams_test.go` | 2 × (`teams.size` − 1) = 10 concurrent joins into a team of 1: exactly `teams.size − 1` succeed, the rest `team_full` |
+| `TestConcurrentStartAndLeave` | `tests/teams_test.go` | 10 rounds of start racing a leave: either started with `teams.size` (6) and `team_locked`, or left with `teams.size` − 1 and `team_not_full` |
+| `TestUnroutedRequestsUseEnvelope` | `tests/teams_test.go` | `GET /api/nope` with and without a token → `404 not_found`; `DELETE /api/teams` → `405 method_not_allowed` |
+| `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), `member_already_scanned`, `pattern_completed`; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `scan_added` and locking the member; state after; reselect; clear |
+| `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, and `scan_window_ms`, `scan_grace_ms`, `max_pattern_points` equal to `config.toml`'s |
+| `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack, the square completed and its countdown reset |
+| `TestSimLastScanAtDeadlineWithinGrace` | `tests/simulation_test.go` | the last player at 300 ms each way (0.6 s round trip ≤ the 1 s simulated grace) sends 20 ms before their own countdown ends: `pattern_completed` |
+| `TestSimLatencyBeyondGraceLosesBottomScan` | `tests/simulation_test.go` | the same at 700 ms each way (1.4 s > 1 s): the bottom scan is stale on arrival, `scan_added` |
+| `TestSimGateClosesThenReselectOpens` | `tests/simulation_test.go` | once a countdown runs out the client sends nothing (0 requests); a reselect resets every client's countdown and the square can be scanned |
+| `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
+| `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
+| `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401`; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
+| `TestStreamIncludesTeamState` | `tests/events_test.go` | `team_state` follows `team` on connect; `GET /api/teams/me/state` works, and is `404 not_in_team` without a team |
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 
-**The simulation tests** (`simulation_test.go`) model each player as a phone: its own request and response delays, its own event stream (each event delivered after the response delay, in order), and `scanGate`, a Go copy of the frontend's countdown (`frontend/src/lib/game/scanGate.ts`): start on the first non-empty stack seen, reset on an empty one, send nothing after `game.scan_window`. They shrink `game.scan_window` to 2 s (`simWindow`) and `game.scan_grace` to 1 s (`simGrace`) through `e.cfg.Settings` and `restart`, so each runs in seconds. The bound they check, response delay + request delay ≤ grace, is derived in `internal/teamstate/README.md` ("The client countdown and latency"). They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
+**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, its own event stream (each event delivered after the response delay, in order), and `scanGate`, a Go copy of the frontend's countdown (`frontend/src/lib/game/scanGate.ts`): start on the first non-empty stack seen, reset on an empty one, send nothing after `game.scan_window`. They shrink `game.scan_window` to 2 s (`simWindow`) and `game.scan_grace` to 1 s (`simGrace`) through `e.cfg.Settings` and `restart`, so each runs in seconds. The bound they check, response delay + request delay ≤ grace, is derived in `internal/teamstate/README.md` ("The client countdown and latency"). They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
 
 **Not covered here:** `/healthz` returning `503`, the heartbeat (tests wait at most 3 s; covered in `platform/live`), a slow stream being dropped over HTTP (covered in `platform/live`), `Hub.Close` on shutdown, the `Allow` header's value, and `main.go` itself (subcommands, lock ordering, lost-lock shutdown, sweep loop, timeouts).

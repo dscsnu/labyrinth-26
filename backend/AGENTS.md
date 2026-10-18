@@ -1,7 +1,7 @@
 # AGENTS.md: how to work on the backend
 
 Rules for anyone, human or agent, adding or changing backend code. Follow them exactly; they're what keeps this codebase uniform. When unsure:
-- **Code shape:** copy `internal/teams` (or `internal/teamstate` for game rules).
+- **Code shape:** copy `internal/teams` (or `internal/teamstate` for game rules, `internal/atlas` for read-only content).
 - **Documentation depth:** copy `internal/teamstate/README.md`.
 
 Before you finish any change, run the checklist in [§14](#14-before-calling-a-change-done).
@@ -33,9 +33,10 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 3. **Play:**
    - The team **selects a shape type** (square, triangle, …). Each type has many precomputed valid patterns: sets of 1–6 waypoints.
    - Members **scan waypoints**, each point by a **different member**, within **1 m + 5 s** of each other.
-   - A scan that's already in, from a member who already scanned, or that doesn't fit any pattern of the type is **rejected**.
+   - A scan of a waypoint that's already in, or from a member who already scanned, is **rejected**.
+   - A scan that doesn't fit any pattern of the type is **accepted but marked wrong**, without telling the player: it takes that member's and that waypoint's slots and **poisons** the selection. A wrong scan never goes stale, so the attempt can't complete until the team selects again.
    - When the scans are exactly one valid pattern, it **completes**. Every new selection and every completion **purges** the scans.
-   - **The client counts down** `game.scan_window` from the first scan it sees (its own `200`, or a teammate's via `team_state`) and sends nothing after it; the server's `game.scan_grace` covers the round trip of a scan sent just before the end. The rule is `frontend/src/lib/game/scanGate.ts`, mirrored by the simulation tests in `internal/server/simulation_test.go`; the bound is derived in `internal/teamstate/README.md`.
+   - **The client counts down** `game.scan_window` from the first scan it sees (its own `200`, or a teammate's via `team_state`) and sends nothing after it; the server's `game.scan_grace` covers the round trip of a scan sent just before the end. The rule is `frontend/src/lib/game/scanGate.ts`, mirrored by the simulation tests in `internal/server/tests/simulation_test.go`; the bound is derived in `internal/teamstate/README.md`.
 4. Progress (patterns and shapes completed, waypoints visited) is the team's score.
 
 **Scale and constraints:**
@@ -52,16 +53,17 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 | shape | `Pattern` | one valid set of 4-digit waypoint IDs of a type |
 | point | `Waypoint` | a QR location, 4-digit ID |
 | buffer | `Stack` | a team's accepted scans toward the selected type |
+| spell, powerup (the `feat/damage-lookup` PR) | `Spell` | what completing a pattern casts: the team's reward, one per pattern |
 
 ## 2. Architecture at a glance
 ```
 browser ──▶ SvelteKit server (frontend/) ──Bearer JWT──▶ Go backend (backend/) ──▶ Postgres
-   ▲                                                      │  memory: teams, team state
+   ▲                                                      │  memory: atlas, teams, team state
    └──────────────── SSE (/api/teams/me/events) ◀─────────┘
 ```
 - **Go 1.26**, standard `net/http` with method patterns. **pgx/v5**. No ORM, no Supabase, no web framework.
 - **Auth:** Google OAuth with PKCE → one-time login code → the SvelteKit server swaps it for an **Ed25519 JWT** (`EdDSA`). The frontend verifies tokens locally with the public key.
-- **Memory first:** hot data (teams, team state) is held in memory, read lock-free, and written through to Postgres on every change.
+- **Memory first:** hot data (teams, team state) is held in memory, read lock-free, and written through to Postgres on every change. Static content (the atlas) is loaded once and never written.
 - **One instance per database**, enforced by an advisory lock that is watched while serving.
 
 **Repo layout:**
@@ -73,7 +75,7 @@ backend/
   cmd/docaudit/             checks every declaration has a doc comment (§11)
   cmd/loadtest/             10k-player load test against a bench database
   internal/
-    auth/ user/ teams/ teamstate/      use cases (§3)
+    atlas/ auth/ user/ teams/ teamstate/   use cases (§3)
     server/                 wires use cases together; cross-cutting routes
     platform/               shared plumbing, no business rules:
       config/ httpx/ identity/ live/ postgres/
@@ -90,7 +92,8 @@ Every feature belongs to exactly one **use case**: one package under `internal/`
 | `auth` | Google sign-in, login codes, JWTs, the auth middleware | Postgres only |
 | `user` | user profiles and roles | Postgres only |
 | `teams` | teams, membership, ready, start | memory, written through |
-| `teamstate` | selection, scan stack, completions, game content | memory, written through |
+| `teamstate` | selection, scan stack, completions | memory, written through |
+| `atlas` | static content: waypoints, shapes, patterns, spells | memory, read-only, loaded once |
 
 **Files**, the same in every use case:
 ```
@@ -102,10 +105,12 @@ internal/<usecase>/
   db.go       all SQL for this use case, and nothing else
   README.md   the full documentation (§12)
   store.go    ONLY if state is in memory: layout, Load, persist, reconcile, publish
-  *_test.go
+  tests/      the use case's tests (§13): doc.go + *_test.go, package tests
 ```
+- **No test files beside the code.** A use case's directory holds only code and its README; every test lives in its `tests/` subpackage (§13). The same goes for `platform/` packages and `server/`.
 - **The four main files always exist** (`api.go`, `read.go`, `write.go`, `db.go`), even when one is small.
-- **Supporting files** are fine when each holds one clear thing and the README lists it: `google.go` (auth), `content.go` (teamstate).
+- **A read-only use case** (static content, no runtime writes, no routes; `atlas`) is the one exception: it has **no `api.go` or `write.go`**, and its README says so in their sections. It still has `doc.go`, `read.go`, `db.go`, `store.go` (the layout and `Load`) and `README.md`.
+- **Supporting files** are fine when each holds one clear thing and the README lists it: `google.go` (auth), `sets.go` and `geometry.go` (atlas).
 - **Where code goes:**
   - SQL only in `db.go`.
   - HTTP only in `api.go`.
@@ -115,14 +120,15 @@ internal/<usecase>/
 ## 4. Dependencies
 - **A use case may import:**
   - `internal/platform/...`
-  - another use case's **read API**, through a small interface it declares itself (teamstate's `Teams`)
+  - another use case's **read API**, through a small interface it declares itself (teamstate's `Teams`, and its `Atlas`, which `*atlas.Atlas` satisfies). Plain types in that API may be used directly (teamstate's `State` holds `atlas.WaypointSet`; it reads `teams.Team`)
 - **A use case never imports** another's `db.go` types or writes. If a write in one must update another's memory, `server.Build` passes a callback (auth's `onSignIn` → `teams.RefreshProfile`).
 - **No import cycles.** Shared pieces move into `platform/` (that's why `platform/identity` sits between auth and everything else).
 - **`platform/` never imports a use case.**
-- **`internal/server/server.go` is the only place** that constructs use cases and registers routes, in dependency order.
+- **`internal/server/server.go` is the only place** that constructs use cases and registers routes, in dependency order. `server.Build` loads the atlas first (every game use case reads it), then teams, then teamstate.
 
 ## 5. Where state lives
 - **Postgres only** (`auth`, `user`): for data that's rarely read or written. `read.go` and `write.go` call `db.go` directly. Say so in the README, and why.
+- **In memory, read-only** (`atlas`): for static content read on every request and never written at runtime. `Load` builds it once from Postgres and validates it; it's **immutable** once `Load` returns, so reads take **no locks**, and there's no entry/snapshot machinery, write-through or reconcile. Anything derived (indexes, lookup maps, computed values like spells) is rebuilt by `Load` on every start and listed in its README's Memory ↔ Postgres table. Content changes need a restart.
 - **In memory, written through** (`teams`, `teamstate`): for data read or written constantly during the event. Then:
   1. **`store.go` holds the layout:**
      - an index map behind a `sync.RWMutex`
@@ -160,7 +166,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - `type API struct`, `NewAPI(...)`, and `Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler)`. Use method patterns: `"POST /api/teams/join"`.
 - **Who's calling** comes from `identity.UserID(r)`. Never trust an ID from the body for "who am I".
 - **Bodies:** `httpx.DecodeJSON` (rejects unknown fields). The server caps every body at `server.max_body_bytes`. Use pointer fields for required booleans.
-- **OpenAPI:** every route, request body, response schema and error code is in `internal/server/openapi.yaml`. Add or change it in the same change as the route. List a response's error codes in its `description` as ``Codes: `a`, `b` ``: `openapi_test.go` fails if a registered route or a sent code/status pair is missing from the spec, or the spec has one the code doesn't. It can't check schemas field by field, so keep them in step with the Go types yourself.
+- **OpenAPI:** every route, request body, response schema and error code is in `internal/server/openapi.yaml`. Add or change it in the same change as the route. List a response's error codes in its `description` as ``Codes: `a`, `b` ``: `internal/server/tests/openapi_test.go` fails if a registered route or a sent code/status pair is missing from the spec, or the spec has one the code doesn't. It can't check schemas field by field, so keep them in step with the Go types yourself.
 - **Responses** always use the envelope via `httpx.OK`, `httpx.JSON`, `httpx.Error` or `httpx.ErrorCode`: `{"success", "code"?, "message"?, "payload"?}`. Unknown routes and wrong methods already get `404 not_found` and `405 method_not_allowed` envelopes from `server`.
 - **Errors:**
   - Rule errors are `var ErrX = errors.New("…")` in `write.go` or `read.go`.
@@ -181,7 +187,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **Migrations** are `internal/platform/postgres/migrations/NNNN_name.sql`, numbered after the last one, embedded in the binary.
   - **Never edit an applied migration.** Each one's SHA-256 is recorded, and the backend refuses to start if a file changed (`ErrMigrationEdited`). Add a new migration instead, even for a wrong comment (`COMMENT ON` fixes it in the database; see `0005`).
   - Use fixed IDs for anything printed or referenced outside the database (waypoint IDs, team codes).
-  - Static content (waypoints, shapes, patterns) is read at startup; edits need a restart.
+  - Static content (waypoints, shapes, patterns) is read at startup by `atlas`; edits need a restart.
 
 ## 9. Live events
 - **Events are full snapshots,** never diffs. A reconnecting client needs nothing replayed.
@@ -196,7 +202,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **To add a value:**
   1. Add the key to `config.toml`, with a comment saying what it does and its allowed range.
   2. Add the field (`toml` tag and doc comment) to the matching struct in `internal/platform/config/settings.go`, and a range check in `validate`.
-  3. Add it to `validTOML` in `settings_test.go`, and a `TestLoadSettingsRejects` case if it can be invalid.
+  3. Add it to `validTOML` in `internal/platform/config/tests/settings_test.go`, and a `TestLoadSettingsRejects` case if it can be invalid.
   4. Pass it into the use case through its `Rules` (or constructor) in `internal/server/server.go`. **Use cases never read the file.**
   5. In tests, read values with `configtest.Settings(t)`, never by repeating the number. If a test only makes sense for some values, skip with a named minimum (`minTestTeam`).
   6. In docs, write the value with its key: **1 m** (`game.scan_window`).
@@ -226,7 +232,7 @@ Follow Google's Go style for doc comments.
 - **Check:** `go run ./cmd/docaudit` must print `docaudit: ok`.
 
 ## 12. README per use case
-Each use case's `README.md` documents it **completely enough to rebuild it without reading the code**. `internal/teamstate/README.md` sets the depth. Sections, in this order (skip only ones that truly don't apply, e.g. no write-through for a Postgres-only use case):
+Each use case's `README.md` documents it **completely enough to rebuild it without reading the code**. `internal/teamstate/README.md` sets the depth. Sections, in this order (skip only ones that truly don't apply, e.g. no write-through for a Postgres-only use case; a read-only use case keeps the write-through, API and concurrency headings with one line saying why they don't apply):
 
 1. **Title and one line** on what the use case owns; a note that config values appear with their key.
 2. **Concepts:** a table defining every term the rules use, including client vocabulary.
@@ -245,27 +251,30 @@ Each use case's `README.md` documents it **completely enough to rebuild it witho
 15. **Not decided yet:** open questions and known gaps (security gaps marked ⚠).
 16. **Tests:** a table of every test and what it covers.
 
-**Extra sections** specific to a use case go after the data model sections (after 7), in the Contents like the rest: teamstate's "How waypoints and patterns are stored" and "The client countdown and latency".
+**Extra sections** specific to a use case go after the data model sections (after 7), in the Contents like the rest: atlas's "How waypoints and patterns are stored" and "Spells", teamstate's "The client countdown and latency".
 
 **Style:** short sentences, tables over paragraphs, real values over placeholders.
 
 **Keep docs true:** update the README in the same change as the code, along with `backend/README.md` (endpoints, configuration), `internal/server/openapi.yaml` (routes and codes) and `internal/platform/README.md` or `internal/server/README.md` when you touch those. A bug found and not fixed goes under "Not decided yet" until it is.
 
 ## 13. Tests
+- **Where tests live:** `internal/<package>/tests/`, a separate package named `tests`, holding a `doc.go` (package comment: whose tests these are) and the `*_test.go` files (Go only runs tests from files with that suffix). Run one package's with `go test ./internal/<package>/...`.
+- **Tests are black-box:** they import the package and use only its exported API, so they test exactly what other packages rely on, and refactoring internals doesn't break them.
+- **Exporting a seam for a test** is allowed only when it's a sensible API in its own right, documented like any other: `atlas.New(Source, Rules)` (build an atlas from given content, which `Load` also uses), `teamstate.Rules.Clock` (inject the clock; nil means the real one), `teamstate.Rules.Limit()`, `teamstate.NewStack`, `teams.Store.All()`, `auth.Issuer` / `auth.AccessAudience` (the frontend must match them). Never export a field or a "ForTesting" function just to reach inside. If a behaviour can only be reached through internals, test it end to end instead (auth's state-vs-access token tests live in `internal/server/tests`).
 - **Test every edge case.** Every rule, error code and boundary in the README's case tables gets a test: exactly at a limit and just past it, retries, concurrent duplicates, the smallest and largest content (1-point and 6-point patterns), and config values from `configtest.Settings`.
-- **Store tests** live in the use case package against real Postgres via `pgtest`, each package in its own schema:
+- **Store tests** run against real Postgres via `pgtest`, each package in its own schema:
   ```go
   db := pgtest.Open(t, pgtest.URL(t, "<usecase>_test"))
   ```
-  Time-dependent rules use a fake clock (`Store.now`), never `time.Sleep`.
-- **End-to-end HTTP tests** live in `internal/server/*_test.go`: `setup(t)`, `newPlayer`, `signIn`, `call`, `expect`, `openStream`, `restart`.
+  Time-dependent rules use a fake clock passed in through `Rules.Clock`, never `time.Sleep`.
+- **End-to-end HTTP tests** live in `internal/server/tests/`: `setup(t)`, `newPlayer`, `signIn`, `call`, `expect`, `openStream`, `restart`.
 - **In-memory stores always get:**
   - a restart test (reloaded memory equals memory, compared as JSON)
   - a reads-work-with-the-database-closed test
   - a reconcile test (Postgres edited by hand, the next write fails and memory corrects)
   - a race test for every invariant concurrency could break (`TestConcurrentJoinsRespectTeamSize`, `TestConcurrentRescansAddOneScan`)
 - **Hot reads get a benchmark,** and a result sink so the compiler can't discard the work.
-- **Postgres-only use cases** still get store tests for their SQL (`internal/user/store_test.go`, `internal/auth/codes_test.go`).
+- **Postgres-only use cases** still get store tests for their SQL (`internal/user/tests/store_test.go`, `internal/auth/tests/codes_test.go`).
 
 ## 14. Before calling a change done
 Run from `backend/`:
@@ -293,7 +302,7 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 ## 16. Adding a use case, step by step
 1. Decide its state (§5) and write the README's Concepts, flow, data model and rules tables **first**: they're the spec.
 2. Add a migration (§8) if it needs tables.
-3. Create the package with `doc.go`, `api.go`, `read.go`, `write.go`, `db.go` (and `store.go` if in memory), each declaration documented (§11).
+3. Create the package with `doc.go`, `api.go`, `read.go`, `write.go`, `db.go` (and `store.go` if in memory; no `api.go` or `write.go` if read-only, §3), each declaration documented (§11).
 4. Put every tunable in `config.toml` and pass it in through `Rules` (§10).
 5. Wire it in `server.Build`, in dependency order, and register its routes (§2, §4).
    Document every route in `internal/server/openapi.yaml` (§7).

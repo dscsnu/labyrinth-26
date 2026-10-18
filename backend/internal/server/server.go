@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"labyrinth/internal/atlas"
 	"labyrinth/internal/auth"
 	"labyrinth/internal/platform/config"
 	"labyrinth/internal/platform/httpx"
@@ -24,6 +25,7 @@ import (
 type App struct {
 	Handler    http.Handler
 	Hub        *live.Hub
+	Atlas      *atlas.Atlas
 	Tokens     *auth.Tokens
 	LoginCodes *auth.LoginCodes
 	Teams      *teams.Store
@@ -45,6 +47,12 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	codes := auth.NewLoginCodes(db, set.Auth.LoginCodeTTL.Duration)
 	g := auth.NewGoogle(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.PublicURL.String()+"/auth/google/callback", google)
 
+	// The atlas is static content every game use case reads, so it loads first.
+	theAtlas, err := atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: set.Game.MaxPatternPoints})
+	if err != nil {
+		return nil, err
+	}
+
 	teamStore, err := teams.Load(ctx, db, hub, log, teams.Rules{
 		Size:          set.Teams.Size,
 		NameMaxLength: set.Teams.NameMaxLength,
@@ -58,7 +66,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	authAPI := auth.NewAPI(cfg, g, tokens, codes, users, func(u user.User) {
 		teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL)
 	}, log)
-	stateStore, err := teamstate.Load(ctx, db, teamStore, hub, log, teamstate.Rules{
+	stateStore, err := teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{
 		ScanWindow:       set.Game.ScanWindow.Duration,
 		ScanGrace:        set.Game.ScanGrace.Duration,
 		MaxPatternPoints: set.Game.MaxPatternPoints,
@@ -68,7 +76,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		return nil, err
 	}
 
-	app := &App{Hub: hub, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore, db: db,
+	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore, db: db,
 		heartbeat: set.Live.Heartbeat.Duration}
 
 	mux := http.NewServeMux()

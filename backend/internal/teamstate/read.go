@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/atlas"
 	"labyrinth/internal/platform/config"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/teams"
@@ -15,11 +16,11 @@ import (
 // modified once stored; writers build a new one.
 type State struct {
 	// Waypoints is every waypoint the team has ever had a scan accepted at.
-	Waypoints WaypointSet
+	Waypoints atlas.WaypointSet
 	// Patterns is every pattern the team has completed.
-	Patterns PatternSet
+	Patterns atlas.PatternSet
 	// Shapes is every shape the team has completed at least one pattern of.
-	Shapes ShapeSet
+	Shapes atlas.ShapeSet
 	// Selection is the shape the team is attempting, if any.
 	Selection Selection
 	// Stack is the team's accepted scans since it selected its shape: what
@@ -32,7 +33,7 @@ type Selection struct {
 	// Active reports whether a shape is selected; the other fields are zero
 	// when it isn't.
 	Active bool
-	// Shape is the selected shape's index in Content.Shapes.
+	// Shape is the selected shape's index in the atlas.
 	Shape int
 	// By is the member who selected it.
 	By uuid.UUID
@@ -42,7 +43,7 @@ type Selection struct {
 
 // StackScan is one accepted scan in a team's stack.
 type StackScan struct {
-	// Waypoint is the waypoint's index in Content.Waypoints.
+	// Waypoint is the waypoint's index in the atlas.
 	Waypoint int
 	// UserID is the member who scanned it.
 	UserID uuid.UUID
@@ -78,8 +79,8 @@ type Stack struct {
 	Cap int
 }
 
-// newStack returns an empty stack of the given capacity.
-func newStack(capacity int) Stack { return Stack{Cap: capacity} }
+// NewStack returns an empty stack of the given capacity.
+func NewStack(capacity int) Stack { return Stack{Cap: capacity} }
 
 // Len returns how many scans the stack holds, stale ones included.
 func (s Stack) Len() int { return s.n }
@@ -190,25 +191,26 @@ type GameShape struct {
 // Game returns the shapes and timing rules for GET /api/game/shapes.
 func (s *Store) Game() Game { return s.game }
 
-// newGame builds the Game from the content and rules.
-func newGame(c *Content, r Rules) Game {
+// newGame builds the Game from the atlas and rules.
+func newGame(a Atlas, r Rules) Game {
 	g := Game{
-		Shapes:           make([]GameShape, len(c.Shapes)),
+		Shapes:           make([]GameShape, a.ShapeCount()),
 		ScanWindowMS:     r.ScanWindow.Milliseconds(),
 		ScanGraceMS:      r.ScanGrace.Milliseconds(),
 		MaxPatternPoints: r.MaxPatternPoints,
 	}
-	for i, sh := range c.Shapes {
+	for i := range a.ShapeCount() {
+		sh := a.Shape(i)
 		sizes := map[int]bool{}
-		for _, p := range c.shapePatterns[i] {
-			sizes[c.Patterns[p].Waypoints.Len()] = true
+		for _, p := range a.ShapePatterns(i) {
+			sizes[a.Pattern(p).Waypoints.Len()] = true
 		}
 		points := make([]int, 0, len(sizes))
 		for n := range sizes {
 			points = append(points, n)
 		}
 		slices.Sort(points)
-		g.Shapes[i] = GameShape{ID: sh.ID, Name: sh.Name, Patterns: len(c.shapePatterns[i]), Points: points}
+		g.Shapes[i] = GameShape{ID: sh.ID, Name: sh.Name, Patterns: len(a.ShapePatterns(i)), Points: points}
 	}
 	return g
 }
@@ -216,11 +218,8 @@ func newGame(c *Content, r Rules) Game {
 // ErrNotInTeam is the same error the teams use case returns.
 var ErrNotInTeam = teams.ErrNotInTeam
 
-// All reads come from memory. Content is immutable and needs no lock; a
+// All reads come from memory. The atlas is immutable and needs no lock; a
 // team's state is a lock-free load of its snapshot.
-
-// Content returns the static game content.
-func (s *Store) Content() *Content { return s.content }
 
 // ForTeam returns a team's state; a team that hasn't done anything yet has
 // an empty State.
@@ -263,21 +262,21 @@ func (s *Store) Snapshot(userID uuid.UUID) (live.Event, bool) {
 // Stale correct scans are left out; wrong scans (which never go stale) are
 // included, with no flag distinguishing them.
 func (s *Store) view(teamID string, st State) View {
-	c := s.content
+	c := s.atlas
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{}, Stack: []StackScanView{}}
 	for _, p := range st.Patterns.Indexes() {
-		v.Patterns = append(v.Patterns, c.WaypointIDs(c.Patterns[p].Waypoints))
+		v.Patterns = append(v.Patterns, c.WaypointIDs(c.Pattern(p).Waypoints))
 	}
 	for _, i := range st.Shapes.Indexes() {
-		v.Shapes = append(v.Shapes, c.Shapes[i].ID)
+		v.Shapes = append(v.Shapes, c.Shape(i).ID)
 	}
 	if sel := st.Selection; sel.Active {
-		v.Selection = &SelectionView{Shape: c.Shapes[sel.Shape].ID, SelectedBy: sel.By, SelectedAt: sel.At.UTC()}
+		v.Selection = &SelectionView{Shape: c.Shape(sel.Shape).ID, SelectedBy: sel.By, SelectedAt: sel.At.UTC()}
 	}
-	for _, sc := range st.Stack.Live(s.now(), s.rules.limit()) {
+	for _, sc := range st.Stack.Live(s.now(), s.rules.Limit()) {
 		v.Stack = append(v.Stack, StackScanView{
-			WaypointID: c.Waypoints[sc.Waypoint].ID, UserID: sc.UserID,
-			ScannedAt: sc.At.UTC(), ExpiresAt: sc.At.Add(s.rules.limit()).UTC(),
+			WaypointID: c.Waypoint(sc.Waypoint).ID, UserID: sc.UserID,
+			ScannedAt: sc.At.UTC(), ExpiresAt: sc.At.Add(s.rules.Limit()).UTC(),
 		})
 	}
 	return v

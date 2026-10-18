@@ -123,7 +123,7 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 ### Concurrency
 `Config` and `Settings` are built once in `main` and only read afterwards. Nothing in `config` holds state.
 
-### Tests (`settings_test.go`)
+### Tests (`config/tests/settings_test.go`)
 | Test | Covers |
 |---|---|
 | `TestRepositoryConfigLoads` | The committed `backend/config.toml` is valid |
@@ -195,7 +195,7 @@ So a client never sees a truncated body or a `200` with a broken payload.
 
 Each caller maps any error to its own response: `400 invalid_body` in teams, teamstate and `POST /auth/token`.
 
-### Tests (`respond_test.go`)
+### Tests (`httpx/tests/respond_test.go`)
 | Test | Covers |
 |---|---|
 | `TestJSONEncodeFailureIs500` | A payload with a channel gives `500` and exactly the `internal error` body |
@@ -313,7 +313,7 @@ A user in no team gets `event: no_team␤data: {}␤␤` instead of the first tw
 - **Per-stream order** is the order `Send` was called for that user. Use cases publish while holding the entry lock, so each team's events go out in write order.
 - `Serve` runs in the request's goroutine and is the only reader of `sub.C`.
 
-### Tests (`hub_test.go`, `stream_test.go`)
+### Tests (`live/tests/hub_test.go`, `live/tests/stream_test.go`)
 | Test | Covers |
 |---|---|
 | `TestHubDropsSlowSubscriberOnly` | Two streams for one user; `live.subscriber_buffer` + 1 = 17 sends; the slow one gets exactly **16** (`live.subscriber_buffer`, read with `configtest`) then closes; the fast one keeps receiving; `Count` is 1 |
@@ -321,7 +321,7 @@ A user in no team gets `event: no_team␤data: {}␤␤` instead of the first tw
 | `TestHubSendsOnlyToThatUser` | An event for one user doesn't reach another |
 | `TestHeartbeatOnlyWhenIdle` | With a 150 ms heartbeat: events every 30 ms for 3 heartbeats give no pings; then idle, a ping arrives within 2.5 heartbeats |
 
-`Serve`'s format and disconnect are tested over HTTP in `internal/server/events_test.go`.
+`Serve`'s format and disconnect are tested over HTTP in `internal/server/tests/events_test.go`.
 
 ## postgres
 ### `database.go`
@@ -415,7 +415,7 @@ InstanceLock
 | The lock's connection dies while serving (Postgres restart, `pg_terminate_backend`) | At the next check (every **5 s**, `storage.instance_lock_check`; up to 10 s if that check's query hangs until its 5 s timeout), `Lost()` closes; the backend shuts down and exits 1 with `ErrInstanceLockLost` |
 | Two backends on **different databases** (or different schemas of one database) | Advisory locks are per database: different databases don't conflict; different schemas of one database **do** |
 
-### Tests (`lock_test.go`, schema `postgres_test`)
+### Tests (`postgres/tests/lock_test.go`, schema `postgres_test`)
 | Test | Covers |
 |---|---|
 | `TestOnlyOneInstance` | A second pool can't take the lock; `Release` twice is safe; after it the second can |
@@ -423,7 +423,7 @@ InstanceLock
 | `TestEditedMigrationIsRefused` | A NULL checksum is backfilled with a 64-character hash; a changed checksum gives `ErrMigrationEdited` |
 | `TestMigrationsAreIdempotent` | Migrating an up-to-date schema is a no-op |
 
-Not tested: a failing migration and `SeedDev2025` (exercised by teamstate's and server's tests).
+Not tested: a failing migration and `SeedDev2025` (exercised by atlas's `TestDevSeedLoads`, teamstate's and server's tests).
 
 ## postgres/pgtest
 - **`URL(t, schema)`**:
@@ -439,6 +439,7 @@ Schemas in use:
 | Package | Schema |
 |---|---|
 | `platform/postgres` | `postgres_test` |
+| `atlas` | `atlas_test` |
 | `auth` | `auth_test` |
 | `user` | `user_test` |
 | `teams` | `teams_test` |

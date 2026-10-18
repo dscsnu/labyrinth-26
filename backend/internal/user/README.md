@@ -296,7 +296,7 @@ No locks and no memory: Postgres settles every race.
 - **`last_login_at` is written but never read.**
 
 ## Tests
-`store_test.go` (real Postgres, schema `user_test`):
+`tests/store_test.go` (real Postgres, schema `user_test`):
 
 | Test | Covers |
 |---|---|
@@ -310,10 +310,10 @@ End to end in `internal/server` (real Postgres):
 
 | Test | Covers |
 |---|---|
-| `auth_test.go` `TestFullLoginFlow` | first sign-in creates a `PLAYER`; `/api/me` returns name and role; a role change made with SQL shows on `/api/me` without a new token; signing in again keeps the same `id` and role and refreshes `name` |
-| `auth_test.go` `TestTokenAndAuthErrors` | `SignInWithGoogle` called directly; `/api/me` with no token → `401 missing_token`, with a garbage token → `401 invalid_token`; `POST /api/me` → `405` |
-| `auth_test.go` `TestEmailInUse` | A sign-in whose email another account has → `reason=email_in_use` |
-| `auth_test.go` `TestSignInRefreshesTeamProfile` | A second sign-in with a new name and no picture: the team shows the new name and keeps the avatar |
-| `teams_test.go` `newPlayer` helper | every team and team-state test creates its users through `SignInWithGoogle` |
+| `internal/server/tests/auth_test.go` `TestFullLoginFlow` | first sign-in creates a `PLAYER`; `/api/me` returns name and role; a role change made with SQL shows on `/api/me` without a new token; signing in again keeps the same `id` and role and refreshes `name` |
+| `internal/server/tests/auth_test.go` `TestTokenAndAuthErrors` | `SignInWithGoogle` called directly; `/api/me` with no token → `401 missing_token`, with a garbage token → `401 invalid_token`; `POST /api/me` → `405` |
+| `internal/server/tests/auth_test.go` `TestEmailInUse` | A sign-in whose email another account has → `reason=email_in_use` |
+| `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile` | A second sign-in with a new name and no picture: the team shows the new name and keeps the avatar |
+| `internal/server/tests/teams_test.go` `newPlayer` helper | every team and team-state test creates its users through `SignInWithGoogle` |
 
 Not covered by any test yet: `401 user_not_found` over HTTP, and a database error on `/api/me`.

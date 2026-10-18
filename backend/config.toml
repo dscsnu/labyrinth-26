@@ -6,7 +6,7 @@
 # change. Durations use Go syntax: "30s", "2m", "12h".
 #
 # Not here, because they're fixed type sizes in the code: at most 64
-# waypoints, 64 shapes and 2048 patterns (see internal/teamstate/README.md).
+# waypoints, 64 shapes and 2048 patterns (see internal/atlas/README.md).
 
 [teams]
 # Players per team: the leader starts only with exactly this many, and no
@@ -24,8 +24,10 @@ code_attempts = 10
 # down this long from the first scan they see. Allowed: more than 0.
 scan_window = "1m"
 # Extra tolerance on scan_window for slow phones and networks: scans spanning
-# up to scan_window + scan_grace still count, and a scan goes stale (dropped
-# from the stack) once it is more than scan_window + scan_grace old. Clients
+# up to scan_window + scan_grace still count, and a correct scan goes stale
+# (dropped from the stack) once it is more than scan_window + scan_grace old.
+# A wrong scan (one that didn't fit the selected shape) never goes stale; it
+# stays until the team selects again. Clients
 # don't count it down: it covers the round trip of a scan sent just before
 # their countdown ends. Allowed: 0 or more (the key must still be present).
 scan_grace = "5s"

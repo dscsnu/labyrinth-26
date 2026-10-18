@@ -10,69 +10,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// db is the team state use case's SQL. The content tables (waypoint, shape,
-// pattern, pattern_waypoint) are read once at startup. The per-team tables
-// (team_scan, team_pattern, team_selection) are read at startup and by
-// reconcile, and written through by write.go, one transaction per operation.
+// db is the team state use case's SQL: the per-team tables (team_scan,
+// team_pattern, team_selection), read at startup and by reconcile, and
+// written through by write.go, one transaction per operation. The content
+// tables belong to the atlas use case.
 type db struct {
 	pool *pgxpool.Pool
-}
-
-// patternRow is one pattern as stored: its key, shape and waypoint IDs.
-type patternRow struct {
-	id        int
-	shapeID   string
-	waypoints []string
-}
-
-// contentRows is everything in the content tables.
-type contentRows struct {
-	waypoints []Waypoint
-	shapes    []Shape
-	patterns  []patternRow
-}
-
-// selectContent reads every waypoint, shape and pattern.
-func (d db) selectContent(ctx context.Context) (contentRows, error) {
-	var c contentRows
-
-	rows, err := d.pool.Query(ctx, "SELECT id, name, latitude, longitude FROM waypoint ORDER BY id")
-	if err != nil {
-		return c, err
-	}
-	if c.waypoints, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (Waypoint, error) {
-		var w Waypoint
-		return w, r.Scan(&w.ID, &w.Name, &w.Latitude, &w.Longitude)
-	}); err != nil {
-		return c, err
-	}
-
-	rows, err = d.pool.Query(ctx, "SELECT id, name FROM shape ORDER BY id")
-	if err != nil {
-		return c, err
-	}
-	if c.shapes, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (Shape, error) {
-		var s Shape
-		return s, r.Scan(&s.ID, &s.Name)
-	}); err != nil {
-		return c, err
-	}
-
-	rows, err = d.pool.Query(ctx, `
-		SELECT p.id, p.shape_id, COALESCE(array_agg(pw.waypoint_id ORDER BY pw.waypoint_id)
-		                                  FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}')
-		FROM pattern p
-		LEFT JOIN pattern_waypoint pw ON pw.pattern_id = p.id
-		GROUP BY p.id
-		ORDER BY p.id`)
-	if err != nil {
-		return c, err
-	}
-	c.patterns, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (patternRow, error) {
-		var p patternRow
-		return p, r.Scan(&p.id, &p.shapeID, &p.waypoints)
-	})
-	return c, err
 }
 
 // teamRows is one team's stored state, by IDs.

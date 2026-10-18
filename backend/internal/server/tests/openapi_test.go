@@ -1,4 +1,4 @@
-package server_test
+package tests
 
 import (
 	"io/fs"
@@ -42,7 +42,7 @@ var statusByName = map[string]int{
 // loadSpec reads and parses openapi.yaml, returning its raw text too.
 func loadSpec(t *testing.T) (specDoc, string) {
 	t.Helper()
-	raw, err := os.ReadFile("openapi.yaml")
+	raw, err := os.ReadFile(filepath.Join("..", "openapi.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func loadSpec(t *testing.T) (specDoc, string) {
 func sourceFiles(t *testing.T) map[string]string {
 	t.Helper()
 	files := map[string]string{}
-	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(filepath.Join("..", ".."), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return err
 		}

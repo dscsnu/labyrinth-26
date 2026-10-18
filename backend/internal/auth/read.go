@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	// issuer is the iss claim on every token this backend signs.
-	issuer = "labyrinth-backend"
-	// accessAudience is the aud claim of access tokens.
-	accessAudience = "labyrinth-api"
+	// Issuer is the iss claim on every token this backend signs. Public: the
+	// SvelteKit server checks it when verifying access tokens.
+	Issuer = "labyrinth-backend"
+	// AccessAudience is the aud claim of access tokens. Public, like Issuer.
+	AccessAudience = "labyrinth-api"
 	// stateAudience is the aud claim of OAuth state cookies, so neither kind of
 	// token is accepted as the other.
 	stateAudience = "labyrinth-oauth-state"
@@ -53,14 +54,14 @@ func (c AccessClaims) UserID() (uuid.UUID, error) {
 	return uuid.Parse(c.Subject)
 }
 
-// VerifyAccess checks an access token's signature, algorithm, issuer,
+// VerifyAccess checks an access token's signature, algorithm, Issuer,
 // audience and expiry, and returns its claims.
 func (t *Tokens) VerifyAccess(raw string) (AccessClaims, error) {
 	var claims AccessClaims
 	_, err := jwt.ParseWithClaims(raw, &claims, t.keyFunc,
 		jwt.WithValidMethods([]string{signingMethod.Alg()}),
-		jwt.WithIssuer(issuer),
-		jwt.WithAudience(accessAudience),
+		jwt.WithIssuer(Issuer),
+		jwt.WithAudience(AccessAudience),
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
@@ -87,7 +88,7 @@ func (t *Tokens) verifyState(raw string) (oauthState, error) {
 	var s oauthState
 	_, err := jwt.ParseWithClaims(raw, &s, t.keyFunc,
 		jwt.WithValidMethods([]string{signingMethod.Alg()}),
-		jwt.WithIssuer(issuer),
+		jwt.WithIssuer(Issuer),
 		jwt.WithAudience(stateAudience),
 		jwt.WithExpirationRequired(),
 	)

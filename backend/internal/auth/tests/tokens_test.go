@@ -1,4 +1,4 @@
-package auth
+package tests
 
 import (
 	"crypto/ed25519"
@@ -8,6 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"labyrinth/internal/auth"
 	"labyrinth/internal/user"
 )
 
@@ -42,7 +43,7 @@ func TestSafeNext(t *testing.T) {
 		"/ok\r\nSet-Cookie:":  "/",
 	}
 	for in, want := range cases {
-		if got := SafeNext(in); got != want {
+		if got := auth.SafeNext(in); got != want {
 			t.Errorf("SafeNext(%q) = %q, want %q", in, got, want)
 		}
 	}
@@ -51,7 +52,7 @@ func TestSafeNext(t *testing.T) {
 // TestAccessTokenRoundTrip checks that an issued token verifies with the same
 // claims.
 func TestAccessTokenRoundTrip(t *testing.T) {
-	tok := NewTokens(newKey(t), time.Hour)
+	tok := auth.NewTokens(newKey(t), time.Hour)
 	u := testUser()
 
 	raw, exp, err := tok.IssueAccess(u)
@@ -72,32 +73,34 @@ func TestAccessTokenRoundTrip(t *testing.T) {
 	}
 }
 
-// TestAccessTokenRejections checks forged, expired, unsigned and
-// cross-purpose tokens are all rejected.
+// TestAccessTokenRejections checks that forged, expired and unsigned tokens
+// are rejected. State and access tokens being refused in each other's place is
+// tested end to end in internal/server/tests
+// (TestStateAndAccessTokensNotInterchangeable).
 func TestAccessTokenRejections(t *testing.T) {
 	key := newKey(t)
-	tok := NewTokens(key, time.Hour)
+	tok := auth.NewTokens(key, time.Hour)
 	u := testUser()
 	good, _, _ := tok.IssueAccess(u)
 
 	t.Run("wrong key", func(t *testing.T) {
-		other := NewTokens(newKey(t), time.Hour)
+		other := auth.NewTokens(newKey(t), time.Hour)
 		if _, err := other.VerifyAccess(good); err == nil {
 			t.Fatal("accepted token signed with another key")
 		}
 	})
 
 	t.Run("expired", func(t *testing.T) {
-		expired, _, _ := NewTokens(key, -time.Minute).IssueAccess(u)
+		expired, _, _ := auth.NewTokens(key, -time.Minute).IssueAccess(u)
 		if _, err := tok.VerifyAccess(expired); err == nil {
 			t.Fatal("accepted expired token")
 		}
 	})
 
 	t.Run("alg none", func(t *testing.T) {
-		unsigned := jwt.NewWithClaims(jwt.SigningMethodNone, AccessClaims{
+		unsigned := jwt.NewWithClaims(jwt.SigningMethodNone, auth.AccessClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
-				Issuer: issuer, Audience: jwt.ClaimStrings{accessAudience},
+				Issuer: auth.Issuer, Audience: jwt.ClaimStrings{auth.AccessAudience},
 				Subject: u.ID.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 			},
 		})
@@ -108,29 +111,16 @@ func TestAccessTokenRejections(t *testing.T) {
 	})
 
 	t.Run("HS256 with public key as secret", func(t *testing.T) {
-		forged := jwt.NewWithClaims(jwt.SigningMethodHS256, AccessClaims{
+		forged := jwt.NewWithClaims(jwt.SigningMethodHS256, auth.AccessClaims{
 			Role: user.RoleAdmin,
 			RegisteredClaims: jwt.RegisteredClaims{
-				Issuer: issuer, Audience: jwt.ClaimStrings{accessAudience},
+				Issuer: auth.Issuer, Audience: jwt.ClaimStrings{auth.AccessAudience},
 				Subject: u.ID.String(), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 			},
 		})
 		raw, _ := forged.SignedString([]byte(key.Public().(ed25519.PublicKey)))
 		if _, err := tok.VerifyAccess(raw); err == nil {
 			t.Fatal("accepted HS256 token keyed with the public key")
-		}
-	})
-
-	t.Run("state token used as access token", func(t *testing.T) {
-		state, _ := tok.issueState(oauthState{State: "s", Next: "/"}, time.Minute)
-		if _, err := tok.VerifyAccess(state); err == nil {
-			t.Fatal("accepted oauth state token as access token")
-		}
-	})
-
-	t.Run("access token used as state", func(t *testing.T) {
-		if _, err := tok.verifyState(good); err == nil {
-			t.Fatal("accepted access token as oauth state")
 		}
 	})
 }

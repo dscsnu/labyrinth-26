@@ -1,6 +1,6 @@
-package teams
+package tests
 
-// Store-level tests against a real Postgres (TEST_DATABASE_URL), in schema
+// teams.Store-level tests against a real Postgres (TEST_DATABASE_URL), in schema
 // teams_test. HTTP behaviour is covered end to end in internal/server.
 
 import (
@@ -18,11 +18,12 @@ import (
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/postgres/pgtest"
+	"labyrinth/internal/teams"
 	"labyrinth/internal/user"
 )
 
-// must returns a Team or panics on error, failing the test.
-var must = pgtest.Must[Team]
+// must returns a teams.Team or panics on error, failing the test.
+var must = pgtest.Must[teams.Team]
 
 // minRestartTeam is the smallest teams.size TestSurvivesRestart works with:
 // its lobby team has a leader and two joiners. With a smaller size in
@@ -50,28 +51,43 @@ func newUsers(t testing.TB, db *postgres.DB, n int) []uuid.UUID {
 	return ids
 }
 
-// load builds a Store from db with a fresh hub.
-func load(t testing.TB, db *postgres.DB) *Store {
+// load builds a teams.Store from db with a fresh hub.
+func load(t testing.TB, db *postgres.DB) *teams.Store {
+	t.Helper()
+	s, _ := loadWithHub(t, db)
+	return s
+}
+
+// loadWithHub is load, also returning the hub the store publishes to.
+func loadWithHub(t testing.TB, db *postgres.DB) (*teams.Store, *live.Hub) {
 	t.Helper()
 	set := configtest.Settings(t)
-	return pgtest.Must(Load(context.Background(), db, live.NewHub(set.Live.SubscriberBuffer), pgtest.Quiet, Rules{
+	hub := live.NewHub(set.Live.SubscriberBuffer)
+	return pgtest.Must(teams.Load(context.Background(), db, hub, pgtest.Quiet, teams.Rules{
 		Size:          set.Teams.Size,
 		NameMaxLength: set.Teams.NameMaxLength,
 		WriteTimeout:  set.Storage.WriteTimeout.Duration,
 		CodeAttempts:  set.Teams.CodeAttempts,
-	}))
+	})), hub
 }
 
-// snapshot serialises everything in s's memory, for comparing across restarts.
-func snapshot(t *testing.T, s *Store) string {
+// snapshot serialises everything s holds, for comparing across restarts:
+// every team (All), and for every member, the team ForUser finds (the
+// user → team index).
+func snapshot(t *testing.T, s *teams.Store) string {
 	t.Helper()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	all := map[string]Team{}
-	for id, e := range s.teams {
-		all[id] = *e.cur.Load()
+	all := s.All()
+	userTeam := map[string]string{}
+	for _, team := range all {
+		for _, m := range team.Members {
+			found, err := s.ForUser(m.ID)
+			if err != nil {
+				t.Fatalf("member %s of %s: %v", m.ID, team.ID, err)
+			}
+			userTeam[m.ID.String()] = found.ID
+		}
 	}
-	b, err := json.Marshal(map[string]any{"teams": all, "userTeam": s.userTeam})
+	b, err := json.Marshal(map[string]any{"teams": all, "userTeam": userTeam})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +188,7 @@ func TestFailedWriteReconciles(t *testing.T) {
 	if len(got.Members) != 2 {
 		t.Fatalf("memory not reconciled: %d members, want 2", len(got.Members))
 	}
-	if _, err := s.ForUser(users[1]); !errors.Is(err, ErrNotInTeam) {
+	if _, err := s.ForUser(users[1]); !errors.Is(err, teams.ErrNotInTeam) {
 		t.Fatalf("removed member still indexed: %v", err)
 	}
 	must(s.SetReady(ctx, users[2], true))
@@ -212,9 +228,9 @@ func BenchmarkForUser(b *testing.B) {
 func TestRefreshProfile(t *testing.T) {
 	db := pgtest.Open(t, pgtest.URL(t, "teams_test"))
 	ids := newUsers(t, db, 2)
-	s := load(t, db)
+	s, hub := loadWithHub(t, db)
 	team := must(s.Create(context.Background(), ids[0], "Profiles"))
-	sub := s.hub.Subscribe(ids[0])
+	sub := hub.Subscribe(ids[0])
 	defer sub.Close()
 
 	avatar := "https://x/new.png"
