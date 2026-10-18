@@ -30,9 +30,10 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Pattern** | A set of **1 to 6** (`game.max_pattern_points`) waypoints that forms a shape on the map. Identified **by that set**, e.g. `["1001","1002","1007","1008"]`, in any order. Its database `id` is only an internal key. |
 | **Shape** | What a pattern looks like: `square`, `triangle`, `collinear`, `tree`, `lightning` in the 2025 seed. A shape has many patterns. Completing any one completes the shape. |
 | **Selection** | The shape a team is currently attempting. At most one per team. |
-| **Stack** | The team's accepted scans since its selection, oldest at the **bottom**, newest on **top**. It only ever holds **one scan per point of a pattern of the selected shape, each by a different member**, so at most **6** (`game.max_pattern_points`). |
-| **Limit** | **65 s**: the scan window **1 m** (`game.scan_window`) plus the grace **5 s** (`game.scan_grace`). The most a pattern's scans may span, bottom to top, and the age at which a scan goes stale. |
-| **Live / stale scan** | A scan in the stack is **live** while it is at most the limit old (`now − scanned_at ≤ 65 s`), and **stale** after. Stale scans don't count and are dropped from the bottom at the next accepted scan. |
+| **Stack** | The team's accepted scans since its selection, oldest at the **bottom**, newest on **top**. It only ever holds **one scan per waypoint and one per member**, so at most **6** (`game.max_pattern_points`). |
+| **Limit** | **65 s**: the scan window **1 m** (`game.scan_window`) plus the grace **5 s** (`game.scan_grace`). The most a pattern's scans may span, bottom to top, and the age at which a *correct* scan goes stale. |
+| **Live / stale scan** | A *correct* scan in the stack is **live** while it is at most the limit old (`now − scanned_at ≤ 65 s`), and **stale** after. Stale correct scans don't count and are dropped from the bottom at the next accepted scan. |
+| **Wrong scan** | A scan whose waypoint, with the correct scans already in the stack, isn't part of any pattern of the selected shape. It's still pushed (never rejected), occupies its member's one scan and its waypoint slot, poisons the selection (it can no longer complete), and **never goes stale**: it stays until the selection is purged. The client is never told which scans are wrong. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection. |
 | **Countdown** | The client's timer: **1 m** (`game.scan_window`) from the moment that phone first sees a non-empty stack. After it the phone sends no scans. The grace is never shown; it absorbs network delay (see [The client countdown and latency](#the-client-countdown-and-latency)). |
 | **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts and sizes, plus the window, grace and stack capacity in milliseconds and points. Static while the backend runs. |
@@ -42,14 +43,13 @@ Every number below that comes from `config.toml` is shown with its current value
 2. **Scan.** Members scan waypoints: `POST /api/teams/me/state/scans {"waypoint_id":"1001"}`. Checked against the stack's live scans, a scan is **rejected with an error and not pushed** if:
    - its **waypoint is already in the stack**, whoever scanned it, the same member included: `409 waypoint_already_scanned`
    - its **member already has a scan in the stack**: `409 member_already_scanned`
-   - the stack plus this waypoint **isn't part of any pattern of the selected shape**: `409 not_in_pattern`
 
-   Otherwise stale scans are dropped from the bottom and the scan is pushed on top.
-3. **Complete.** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, and **the stack and the selection are purged**. The team selects again for its next attempt.
-4. **Stale scans drop on their own.** A scan more than 65 s old stops counting, which frees its waypoint and its member: only that point is rescanned, the rest of the pattern isn't lost. Because every live scan is at most 65 s old and the newest is now, the stack always spans at most the limit, bottom to top.
+   Otherwise stale correct scans are dropped from the bottom and the scan is pushed on top. A scan whose waypoint doesn't fit the selected shape is pushed anyway, marked **wrong** (see [Wrong scan](#concepts)).
+3. **Complete.** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, and **the stack and the selection are purged**. The team selects again for its next attempt. A wrong scan poisons the set, so a selection with one can never complete.
+4. **Stale correct scans drop on their own.** A correct scan more than 65 s old stops counting, which frees its waypoint and its member: only that point is rescanned, the rest of the pattern isn't lost. Wrong scans never drop. Because every live correct scan is at most 65 s old and the newest is now, the correct stack always spans at most the limit, bottom to top.
 5. **Give up.** `DELETE /api/teams/me/state/selection` clears the selection and the stack.
 
-**"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is accepted if it's in *any* pattern of the shape. Each later scan must keep the stack inside at least one pattern of the shape that contains everything already scanned. If the first scan was a wrong guess, reselect to purge it, or wait 65 s for it to go stale.
+**"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is correct if it's in *any* pattern of the shape. Each later scan must keep the correct stack inside at least one pattern of the shape that contains everything already scanned. A scan that doesn't is wrong and is final: reselect to purge it (it never goes stale on its own).
 
 **Why the shape is selected first.** With the 2025 data any three waypoints form a triangle or a collinear pattern, so a team scanning a square passes through a "triangle" after its third scan. Only the selected shape can complete, which is what makes 4-waypoint shapes possible.
 
@@ -78,7 +78,7 @@ Every number below that comes from `config.toml` is shown with its current value
   - `Len()` counts scans, stale ones included.
   - `At(i)` is the i-th from the bottom.
   - `Push(sc)` returns the stack with `sc` on top. Scan never pushes onto a full stack (its scans always fit one pattern); if it did, the bottom would be dropped.
-  - `Live(now, limit)` returns the scans at most `limit` old, bottom to top.
+  - `Live(now, limit)` returns the correct scans at most `limit` old plus every wrong scan, bottom to top.
 - **`newGame(content, rules)`** builds the `Game` once, in `Load`: for each shape in index order, its ID and name, how many patterns it has (`len(shapePatterns[i])`), and the distinct sizes of those patterns, ascending; plus `ScanWindowMS`, `ScanGraceMS` (`Duration.Milliseconds()`, so sub-millisecond parts are dropped) and `MaxPatternPoints` from `Rules`.
 - **Reads**, all from memory:
   - `Game()`: the prebuilt `Game`; no lock, it never changes
@@ -86,18 +86,18 @@ Every number below that comes from `config.toml` is shown with its current value
   - `ForTeam(teamID)` → `State`
   - `ForUser(userID)` → `View`
   - `Snapshot(userID)`: the live event for a new stream
-- **`view`** converts indexes and bits to IDs, times to UTC, and leaves stale scans out of `stack`.
+- **`view`** converts indexes and bits to IDs, times to UTC, and leaves stale correct scans out of `stack` (wrong scans are included, with no flag distinguishing them).
 
 ### `write.go`: writes, each written through
 - **`Select`**, **`ClearSelection`** and **`Scan`** each follow the [write-through](#the-write-through) steps, numbered in the code.
-- **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Content.FitsShape(shape, stack ∪ {w})` false → `ErrNotInPattern`. Completion is `Content.PatternFor(stack ∪ {w})` (one map lookup) being a pattern of the selected shape.
+- **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Content.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (still pushed, marked `Wrong`). Completion is `Content.PatternFor(stack ∪ {w})` (one map lookup) being a pattern of the selected shape; a wrong scan can't complete because it's in the set.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME`.
 - **Declared here:** the errors, the `Outcome…` constants, and `ScanResult`.
 
 ### `db.go`: SQL
 - **`selectContent`** reads waypoints, shapes, and patterns with their waypoint lists (`array_agg`).
-- **`selectTeams(ctx, teamID, stackSize)`** reads every team's stored state, or one team's (`teamID != ""`), into `teamRows`: distinct visited waypoints, completed patterns, selection, and the stack. Used by `Load` and `reconcile`. The stack query is a `JOIN LATERAL`: for each selection, the team's newest `stackSize` `team_scan` rows with `id > after_scan_id`, returned oldest first.
-- **`insertScan`**: one `team_scan` row (a scan that doesn't complete anything).
+- **`selectTeams(ctx, teamID, stackSize)`** reads every team's stored state, or one team's (`teamID != ""`), into `teamRows`: distinct visited waypoints, completed patterns, selection, and the stack. Used by `Load` and `reconcile`. The stack query is a `JOIN LATERAL`: for each selection, the team's newest `stackSize` `team_scan` rows with `id > after_scan_id`, returned oldest first, with the `wrong` flag so wrong scans rebuild as never-stale.
+- **`insertScan`**: one `team_scan` row, with the `wrong` flag (a scan that doesn't complete anything).
 - **`insertCompletingScan`**: one transaction: `team_scan` row, `team_pattern` row (`ON CONFLICT DO NOTHING`), delete `team_selection`.
 - **`upsertSelection`**: upserts `team_selection` with `after_scan_id` = the team's latest `team_scan.id` (0 if none). That's the purge: earlier scans are no longer after it.
 - **`deleteSelection`**: deletes `team_selection`, and fails unless exactly one row went (memory had a selection, so Postgres must too).
@@ -108,7 +108,7 @@ Every number below that comes from `config.toml` is shown with its current value
 - **Lookups:**
   - `WaypointIndex`, `ShapeIndex`, `SetOf`
   - `PatternFor(set)`: exact match
-  - `FitsShape(shape, set)`: is `set` inside some pattern of `shape`? One AND-compare per pattern of the shape, stopping at the first match (at most 156, the seed's triangles). The empty set fits nothing. See [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)
+  - `FitsShape(shape, set)`: is `set` inside some pattern of `shape`? One AND-compare per pattern of the shape, stopping at the first match (at most 156, the seed's triangles). The empty set fits nothing. Used to label a scan wrong, not to reject it. See [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)
   - `WaypointIDs(set)`: a set back to sorted IDs (views, `ScanResult.Pattern`)
 - **Bitsets:** `WaypointSet`, `ShapeSet` and `PatternSet`, with their `Has`, `With`, `Contains`, `Len` and `Indexes` methods.
 
@@ -138,7 +138,7 @@ entry
 
 State                                (never modified once stored)
   Waypoints  WaypointSet  uint64     visited waypoints, bit i = waypoint index i
-  Patterns   PatternSet   [8]uint64  completed patterns, bit i = pattern index i
+  Patterns   PatternSet   [32]uint64 completed patterns, bit i = pattern index i
   Shapes     ShapeSet     uint64     completed shapes, bit i = shape index i
   Selection  Selection
     Active   bool                    false → no selection; other fields zero
@@ -158,10 +158,12 @@ StackScan
   Waypoint int                       index into Content.Waypoints
   UserID   uuid.UUID                 who scanned
   At       time.Time                 when
+  Wrong    bool                      the scan didn't fit the selected shape;
+                                     never ages out; not exposed in View
 ```
-- **Size:** a `State` is a fixed 928 bytes (`Stack` 792, `Selection` 56), so a new snapshot is a plain struct copy with no heap allocation for its contents. 10,000 teams' states are about 9 MB.
+- **Size:** a `State` is a fixed 1248 bytes (`Stack` 920, `Selection` 56), so a new snapshot is a plain struct copy with no heap allocation for its contents. 10,000 teams' states are about 12 MB.
 - **Why a circular buffer:** dropping stale scans from the bottom never moves the rest. `At(i)` is `scans[(bottom+i) % Cap]`.
-- **Stale scans** stay in `Stack` until the next accepted scan rebuilds it from the live ones (or a selection or completion purges it). Every reader uses `Live`, so they're never seen.
+- **Stale correct scans** stay in `Stack` until the next accepted scan rebuilds it from the live ones (or a selection or completion purges it). Every reader uses `Live`, so they're never seen. Wrong scans never leave until a purge.
 - **The array is 16 long** although only **6** (`game.max_pattern_points`) are used, because Go array sizes must be constants and `game.max_pattern_points` is read at startup. 16 is the most `teams.size` allows, and a pattern can't have more points than members.
 
 ## Data model: Postgres
@@ -178,13 +180,13 @@ Per team, written through:
 
 | Table | Migration | Columns | Constraints and what they back |
 |---|---|---|---|
-| `team_scan` | `0003` | `id` BIGINT identity, `team_id`, `waypoint_id`, `user_id`, `scanned_at` | One row per **accepted** scan (rejected scans are never written): the audit trail, and the source of the stack. `0005` records this as the table's `COMMENT`, correcting 0003's SQL comment ("every scan, including repeats"). One index, `team_scan_team_id_idx` on `(team_id, id DESC)` (`0004`), serves the stack query and every other query by team; `0005` dropped 0003's redundant `team_scan_team_idx` on `(team_id)`. |
+| `team_scan` | `0003`, `0006` | `id` BIGINT identity, `team_id`, `waypoint_id`, `user_id`, `scanned_at`, `wrong` | One row per **accepted** scan (rejected scans are never written): the audit trail, and the source of the stack. `wrong` (`0006`) marks a scan that didn't fit the selected shape, so a restart reproduces it as never-stale. `0005` records the table's `COMMENT`, correcting 0003's SQL comment ("every scan, including repeats"). One index, `team_scan_team_id_idx` on `(team_id, id DESC)` (`0004`), serves the stack query and every other query by team; `0005` dropped 0003's redundant `team_scan_team_idx` on `(team_id)`. |
 | `team_pattern` | `0003` | `team_id`, `pattern_id`, `completed_at` | PK `(team_id, pattern_id)`: a pattern counts once |
 | `team_selection` | `0004` | `team_id`, `shape_id`, `selected_by`, `selected_at`, `after_scan_id` BIGINT | PK `team_id`: one selection per team. `after_scan_id` is the team's latest `team_scan.id` when the shape was selected: the stack is the scans after it |
 
 Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`.
 
-**The stack isn't a table.** It's derived: the newest **6** (`game.max_pattern_points`) `team_scan` rows with `id > after_scan_id`. Selecting moves `after_scan_id` to the latest scan (purge); completing or clearing deletes the selection (no selection, no stack). Stale rows come back from the query but are filtered by time, exactly as in memory, so a restart reproduces the live stack exactly.
+**The stack isn't a table.** It's derived: the newest **6** (`game.max_pattern_points`) `team_scan` rows with `id > after_scan_id`. Selecting moves `after_scan_id` to the latest scan (purge); completing or clearing deletes the selection (no selection, no stack). Stale correct rows come back from the query but are filtered by time, exactly as in memory; wrong rows are kept, exactly as in memory. So a restart reproduces the live stack exactly.
 
 ## Memory ↔ Postgres
 | Postgres | Rebuilt in memory (by `Load`, or `reconcile` for one team) |
@@ -193,10 +195,10 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`.
 | `DISTINCT waypoint_id FROM team_scan` | `State.Waypoints` |
 | `team_pattern` | `State.Patterns`, and `State.Shapes` from each pattern's shape |
 | `team_selection` | `State.Selection` |
-| newest **6** (`game.max_pattern_points`) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first) |
+| newest **6** (`game.max_pattern_points`) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag) |
 | (none: built from `Content` and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
 
-Why the stacks agree: memory pushes every accepted scan and only drops stale scans, which are always the oldest. The live scans fit one pattern, so there are at most **6** (`game.max_pattern_points`) of them, and they're the newest rows since the selection: exactly what the query returns, after the same time filter.
+Why the stacks agree: memory pushes every accepted scan and only drops stale *correct* scans, which are always the oldest. The live correct scans fit one pattern, so there are at most **6** (`game.max_pattern_points`) of them, and they're the newest rows since the selection — exactly what the query returns, after the same time filter. Wrong scans are never dropped, in memory or after a restart.
 
 ## How waypoints and patterns are stored
 
@@ -216,7 +218,7 @@ Bit *i* means item *i*:
 |---|---|---|
 | `WaypointSet` | `uint64` | up to 64 waypoints |
 | `ShapeSet` | `uint64` | up to 64 shapes |
-| `PatternSet` | `[8]uint64` | up to 512 patterns |
+| `PatternSet` | `[32]uint64` | up to 2048 patterns |
 
 Example: the square `1001, 1002, 1007, 1008` is indexes 0, 1, 6, 7, so its `WaypointSet` is `0b11000011` = **195**. Any scan order sets the same bits.
 
@@ -239,7 +241,7 @@ Example: the square `1001, 1002, 1007, 1008` is indexes 0, 1, 6, 7, so its `Wayp
 | Stack *is* a pattern? | `patternBySet[set]` (exact) |
 
 ### Does a set still fit the shape?
-Every scan asks `FitsShape(shape, stack ∪ {w})`: is there a pattern of the selected shape that contains every waypoint so far?
+Every scan asks `FitsShape(shape, stack ∪ {w})`: is there a pattern of the selected shape that contains every waypoint so far? A `false` doesn't reject the scan — it marks it **wrong** and poisons the selection.
 
 1. The empty set fits nothing (returns `false` at once). A scan's set always has at least the new waypoint, so this only matters to direct callers.
 2. For each pattern index `p` in `shapePatterns[shape]`: if `Patterns[p].Waypoints & set == set` (`Contains`), return `true`.
@@ -275,7 +277,7 @@ The window comes from `GET /api/game/shapes`; the grace is never shown or counte
 - The last scan is sent before the countdown ends, so the server stamps it before *T* + *W* + *d*<sub>down</sub> + *d*<sub>up</sub>.
 - The server accepts it with the bottom still live if the span is at most *W* + *G*.
 
-So **a phone is safe whenever *d*<sub>down</sub> + *d*<sub>up</sub> ≤ *G***: the response (or event) delay plus the request delay fits in the grace, **5 s** (`game.scan_grace`). Beyond that, the bottom scan is already stale when the late scan lands: the server drops it and answers `scan_added`, not `pattern_completed` (walkthrough 2's behaviour), and the team rescans that point or selects again.
+So **a phone is safe whenever *d*<sub>down</sub> + *d*<sub>up</sub> ≤ *G***: the response (or event) delay plus the request delay fits in the grace, **5 s** (`game.scan_grace`). Beyond that, the bottom scan is already stale when the late scan lands: the server drops it and answers `scan_added`, not `pattern_completed` (walkthrough 3's behaviour), and the team rescans that point or selects again.
 
 - **Why not count down to `expires_at`.** That needs the phone's clock to agree with the server's. Counting from when the phone itself saw the stack uses only its own monotonic clock (`performance.now()`).
 - **A stale bottom drops but the countdown doesn't reset.** The stack is still non-empty, so the countdown keeps running from the first scan seen. The new bottom is later, so the phone is only more conservative.
@@ -319,12 +321,25 @@ Team `482913`, members A–F, 2025 seed (square = `1001 1002 1007 1008` = indexe
 | 00:05 | B: scan `1002` | `{1001,1002}` = 3 is inside the square 195 | `1001/A 1002/B@05` | `team_scan` +1 | `scan_added` |
 | 00:06 | A: scan `1007` | **A already has a scan in the stack** | unchanged | unchanged | `409 member_already_scanned` |
 | 00:07 | C: scan `1001` | **1001 is already in the stack** | unchanged | unchanged | `409 waypoint_already_scanned` |
-| 00:08 | C: scan `1003` | the only squares with `1001` and `1002` are `1001 1002 1007 1008` and `1001 1002 1010 1011`; neither has `1003` | unchanged | unchanged | `409 not_in_pattern` |
 | 00:10 | C: scan `1007` | set 67 fits the square; 67 is also a **triangle** (shape 4 ≠ 2), so no completion | `… 1007/C@10` | `team_scan` +1 | `scan_added` |
 | 00:12 | D: scan `1008` | set 195 = square, shape 2 = selection | **purged**; selection cleared | `team_scan` +1, `team_pattern` +1, `team_selection` deleted | `pattern_completed`, `pattern ["1001","1002","1007","1008"]` |
 | 00:13 | D: scan `1008` (a retry) | no selection | unchanged | unchanged | `409 no_shape_selected` |
 
-### 2. One slow member doesn't lose the pattern
+### 2. A wrong scan poisons the selection
+| Time | Request | Check | Stack after (wrong in *italics*) | Response |
+|---|---|---|---|---|
+| 00:00 | F: select `square` | | empty | `200` |
+| 00:01 | A: `1001` | inside a square | `1001/A@01` | `scan_added` |
+| 00:02 | B: `1002` | inside a square with 1001 | `1001/A 1002/B@02` | `scan_added` |
+| 00:03 | C: `1003` | no square has 1001, 1002 *and* 1003 | `1001/A 1002/B *1003/C@03*` | `scan_added` (wrong) |
+| 00:04 | C: `1007` | **C already has a scan** (the wrong one counts) | unchanged | `409 member_already_scanned` |
+| 00:05 | D: `1008` | 1003 poisons the set: no square contains it | `… *1003/C* 1008/D@05` | `scan_added` (also wrong; no completion) |
+| 00:06 | F: select `square` | reselect always purges | empty (1003 gone) | `200` |
+| 00:07–10 | A,B,C,D: `1001 1002 1007 1008` | exact square | **purged** | `pattern_completed` |
+
+The wrong `1003` never goes stale: without the reselect at 00:06 the team stays stuck until it selects again (or clears).
+
+### 3. One slow member doesn't lose the pattern
 | Time | Request | Stack after (live) | Response |
 |---|---|---|---|
 | 00:00 | F: select `square` | empty | `200` |
@@ -336,10 +351,10 @@ Team `482913`, members A–F, 2025 seed (square = `1001 1002 1007 1008` = indexe
 
 Only A rescanned. Had A's rescan come at 01:16, B's scan (66 s old) would have gone stale too, and B would rescan in turn.
 
-### 3. Reselecting purges
+### 4. Reselecting purges
 F selects `square`; A, B, C scan `1001 1002 1007`. F selects `square` again: the stack is purged (`after_scan_id` moves past those three rows). D scans `1008`: `scan_added`, stack `1008/D` only. A may scan `1001` at once (their earlier scan is gone).
 
-### 4. Grace boundaries
+### 5. Grace boundaries
 Bottom scan at 00:00, everything else in order, top scan at:
 
 | Top at | Span | Result |
@@ -390,8 +405,8 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 }
 ```
 - `selection` is `null` when nothing is selected.
-- `stack` is the live scans, bottom (oldest) first; `[]` when empty. Stale scans are left out.
-- `expires_at` is `scanned_at` + 65 s (window + grace): when that scan goes stale on the server. The app's countdown doesn't use it (see [The client countdown and latency](#the-client-countdown-and-latency)).
+- `stack` is the live scans, bottom (oldest) first; `[]` when empty. Stale correct scans are left out; wrong scans are included (with no flag telling them apart).
+- `expires_at` is `scanned_at` + 65 s (window + grace): when a correct scan goes stale on the server. The app's countdown doesn't use it (see [The client countdown and latency](#the-client-countdown-and-latency)).
 
 **`Game`** (`GET /api/game/shapes`), with the 2025 seed and config.toml as shipped:
 ```json
@@ -422,7 +437,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
  "state": { …View… }}
 ```
 `outcome` is one of:
-- `scan_added`: the scan was pushed; no pattern yet.
+- `scan_added`: the scan was pushed; no pattern yet. This includes **wrong** scans, which are indistinguishable from correct ones in the response.
 - `pattern_completed`: `pattern` is set; `already_completed` is true if the team had completed this pattern before. The stack and selection are purged.
 
 **Errors** use the envelope, e.g. `409 {"success": false, "code": "member_already_scanned", "message": "you already scanned a waypoint; a teammate must scan the next one"}`.
@@ -440,7 +455,7 @@ The backend refuses to start if any of these hold:
 |---|
 | `config.toml` is invalid (see `internal/platform/config`), e.g. a missing key, or `max_pattern_points` > `teams.size` |
 | A waypoint ID isn't exactly 4 digits |
-| More than 64 waypoints, 64 shapes or 512 patterns |
+| More than 64 waypoints, 64 shapes or 2048 patterns |
 | A pattern names an unknown waypoint or shape, has no waypoints, or has more than 6 (`game.max_pattern_points`) |
 | Two patterns have the same set of waypoints |
 | A pattern is contained in a larger pattern of the same shape |
@@ -469,7 +484,7 @@ Checked in this order:
 | Otherwise | `200`: selection and stack removed; visited waypoints and completions kept; event |
 
 ### Scan: `POST /api/teams/me/state/scans`
-Checked in this order. "In the stack" means live (at most 65 s old). Every rejection changes nothing, isn't logged and sends no event.
+Checked in this order. "In the stack" means live: a correct scan at most 65 s old, or a wrong scan (which never goes stale). Every rejection changes nothing, isn't logged and sends no event.
 
 | Case | Result |
 |---|---|
@@ -478,11 +493,12 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
 | Caller not in a team | `404 not_in_team` |
 | Team not `IN_GAME` | `409 not_in_game` |
 | No shape selected (including right after a completion) | `409 no_shape_selected` |
-| Waypoint already in the stack, by anyone (a retry included) | `409 waypoint_already_scanned` |
-| Caller already has a scan in the stack, at another waypoint | `409 member_already_scanned` |
-| No pattern of the selected shape contains the stack plus this waypoint (a waypoint in no pattern of the shape, or one that doesn't go with what's been scanned) | `409 not_in_pattern` |
-| An earlier scan of this waypoint, or by this member, is **stale** | Allowed: it no longer counts |
-| Stale scans at the bottom | Dropped, then the scan is pushed |
+| Waypoint already in the stack, by anyone (a retry included, a wrong scan included) | `409 waypoint_already_scanned` |
+| Caller already has a scan in the stack, at another waypoint (wrong scans included) | `409 member_already_scanned` |
+| The waypoint, with the correct scans in the stack, isn't part of any pattern of the selected shape | Not rejected: the scan is pushed, marked **wrong**, and poisons the selection (no later scan can complete it) |
+| A wrong scan, however old it is | Never goes stale; it stays until the selection is purged |
+| An earlier *correct* scan of this waypoint, or by this member, is **stale** | Allowed: it no longer counts |
+| Stale correct scans at the bottom | Dropped, then the scan is pushed |
 | Stack plus this scan is exactly a pattern of the **selected** shape | `pattern_completed`: pattern and shape marked; **stack and selection purged** |
 | ... that pattern was already completed | `pattern_completed` with `already_completed: true`; progress unchanged |
 | Stack plus this scan is a pattern of **another** shape | Not completed → `scan_added` |
@@ -490,7 +506,7 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
 | 1-point pattern | Completes on its only scan |
 | 6-point pattern | Completes on the sixth scan |
 | Span exactly 65 s | Completes. 65 s + 1 µs: the bottom is stale and dropped |
-| Any accepted scan | Logged in `team_scan`; waypoint added to visited `waypoints` |
+| Any accepted scan (wrong included) | Logged in `team_scan` (with `wrong`); waypoint added to visited `waypoints` |
 | Postgres write fails | `500`; state reloaded from Postgres; nothing applied |
 
 ### Game rules: `GET /api/game/shapes`
@@ -505,7 +521,7 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
 |---|---|
 | Caller not in a team | `404 not_in_team` |
 | Team in the lobby or with no activity | `200`, empty lists, `selection` null |
-| All stack scans stale | `stack: []` |
+| All stack scans stale | `stack: []` (wrong scans never go stale, so a wrong scan keeps the stack non-empty) |
 
 ## Concurrency and locking
 - **Writes to one team are serialised** on its `entry.mu`. Different teams run in parallel.
@@ -536,11 +552,10 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
 | 16 slots in a `Stack` | `config.MaxTeamSize` | Fixed array size; raise with the team-size cap |
 | 64 waypoints | `WaypointSet uint64`, `maxWaypoints` | Make it `[2]uint64` (arrays are still valid map keys, so `patternBySet` keeps working), update the bit methods, test across the word boundary |
 | 64 shapes | `ShapeSet uint64`, `maxShapes` | Same approach |
-| 512 patterns | `PatternSet [8]uint64`, `maxPatterns` | Make the array longer |
+| 2048 patterns | `PatternSet [32]uint64`, `maxPatterns` | Make the array longer |
 
 ## Not decided yet
 - **⚠ QR verification.** `POST …/scans` accepts the raw 4-digit waypoint ID, so a player can claim a scan without being there. This must be replaced before the event (rotating or signed QR codes, verified server-side).
-- **`not_in_pattern` reveals which waypoints are valid.** A team can probe waypoints by ID to learn which ones fit the shape. With QR verification in place, probing needs physical presence.
 - **Whether the leader alone should select.** Currently any member can.
 
 ## Tests
@@ -550,10 +565,10 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
   |---|---|
   | `TestPatternLookupIgnoresScanOrder` | a pattern is found from its waypoints in any order; partial, extra and empty sets match nothing; an unknown waypoint is an error |
   | `TestPatternIndexes` | waypoint and shape indexes in ID order; each shape's patterns; patterns by Postgres key; `WaypointIDs` sorts |
-  | `TestContentValidation` | each startup refusal, by its error: ID not 4 digits (`A1`, `10001`), unknown waypoint, unknown shape, empty pattern, two patterns with the same waypoints, a pattern over `game.max_pattern_points`, a pattern nested in a larger one of its shape, more than 64 waypoints, 64 shapes, 512 patterns |
-  | `TestBitsets` | `PatternSet` across 64-bit words (bits 0, 63, 64, 70, 511); `WaypointSet` `With`, `Has`, `Len`, `Contains` |
+  | `TestContentValidation` | each startup refusal, by its error: ID not 4 digits (`A1`, `10001`), unknown waypoint, unknown shape, empty pattern, two patterns with the same waypoints, a pattern over `game.max_pattern_points`, a pattern nested in a larger one of its shape, more than 64 waypoints, 64 shapes, 2048 patterns |
+  | `TestBitsets` | `PatternSet` across 64-bit words (bits 0, 63, 64, 70, 2047); `WaypointSet` `With`, `Has`, `Len`, `Contains` |
   | `TestMixedSizesAllowedWhenNotNested` | a shape may mix 2- and 3-point patterns when none is inside another |
-  | `TestStack` | bottom-to-top order, overflow dropping the bottom, `Push` leaving the original alone, `Live` at exactly the limit |
+  | `TestStack` | bottom-to-top order, overflow dropping the bottom, `Push` leaving the original alone, `Live` at exactly the limit, and a wrong scan staying live however old it is |
   | `TestFitsShape` | one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
 
 - `store_test.go` (real Postgres, config.toml's rules, fake clock). Times are written relative to the window (`tick`, a 60th of `game.scan_window`) or to the limit (`rules.limit()`), so each scenario means the same under any config. The tests use up to 6 distinct members (the 6-point pattern needs all of them), so they need `teams.size` ≥ 6 (`minTestTeam`); with a smaller size in `config.toml` they **skip** rather than fail:
@@ -564,13 +579,15 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
   | `TestWritesRequireGame` | input validation and lobby refusals for every write |
   | `TestScanNeedsSelection` | scanning before selecting changes nothing |
   | `TestSquareNeedsDistinctMembers` | walkthrough 1: member and waypoint rejections change nothing, the triangle that doesn't count, completion, `expires_at`, no selection after |
-  | `TestEverySelectionPurges` | walkthrough 3; reselect and select-another both purge |
+  | `TestEverySelectionPurges` | walkthrough 4; reselect and select-another both purge |
   | `TestRescanIsRejected` | the same member's retry and another member's scan of a stacked waypoint: rejected, not logged, no event |
   | `TestConcurrentRescansAddOneScan` | 8 simultaneous copies → one pushed, seven `waypoint_already_scanned` |
-  | `TestLateRepeatDoesNotRejectThePattern` | walkthrough 2 |
-  | `TestGraceTolerance` | walkthrough 4: inside the window, inside the grace, exactly the limit, 1 µs over |
+  | `TestLateRepeatDoesNotRejectThePattern` | walkthrough 3 |
+  | `TestGraceTolerance` | walkthrough 5: inside the window, inside the grace, exactly the limit, 1 µs over |
   | `TestStaleScanFreesItsWaypointAndMember` | after going stale, another member can scan the waypoint and the member can scan again |
-  | `TestOutsideScanIsRejected` | a waypoint in no square on an empty stack (it inserts waypoint `1012`, in no pattern); every waypoint that doesn't fit `1001 1002` (seed `1003 1004 1005 1006 1009`, and `1012`); then completion |
+  | `TestWrongScanLocksMember` | a waypoint in no square is pushed and marked wrong; the member can't scan again, and the waypoint slot is taken |
+  | `TestWrongScanPoisonsSelection` | a wrong scan blocks completion until a reselect purges it |
+  | `TestWrongScanNeverAgesOut` | a wrong scan stays in the stack past the limit while a correct one goes stale; a restart reproduces its `wrong` flag |
   | `TestCompletionPurges` | stack and selection purged; rescans need a new selection |
   | `TestSinglePointPattern` | a 1-point pattern |
   | `TestSixPointPatternAtCapacity` | a 6-point pattern completes on the sixth scan |
@@ -582,6 +599,6 @@ Checked in this order. "In the stack" means live (at most 65 s old). Every rejec
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
   | `BenchmarkScanLookups` | `FitsShape`, `PatternFor` and `WaypointIndex`+`Has` on the `content_test.go` fixture (not the seed), results kept in package-level sinks. On an i7-12650H: about 1 ns, 2 ns and 6 ns |
-- `internal/server/teamstate_test.go`: `TestSelectAndScanRoutes`, every route and error code over HTTP, including `waypoint_already_scanned`, `member_already_scanned`, `not_in_pattern` and the body size limit; `TestGameShapes`, `GET /api/game/shapes` without a token (`401 missing_token`) and with one: the seed's 5 shapes, `square` with 18 patterns of 4 points, and the window, grace and capacity from `config.toml`.
+- `internal/server/teamstate_test.go`: `TestSelectAndScanRoutes`, every route and error code over HTTP, including `waypoint_already_scanned`, `member_already_scanned`, a wrong scan being accepted and locking the member, and the body size limit; `TestGameShapes`, `GET /api/game/shapes` without a token (`401 missing_token`) and with one: the seed's 5 shapes, `square` with 18 patterns of 4 points, and the window, grace and capacity from `config.toml`.
 - `internal/server/simulation_test.go`: the countdown under latency (see [The client countdown and latency](#the-client-countdown-and-latency)).
 - `internal/server/events_test.go`: `team_state` on connect.

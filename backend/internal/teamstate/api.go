@@ -44,7 +44,6 @@ var errorCodes = []struct {
 	{ErrNoShapeSelected, http.StatusConflict, "no_shape_selected"},
 	{ErrWaypointAlreadyScanned, http.StatusConflict, "waypoint_already_scanned"},
 	{ErrMemberAlreadyScanned, http.StatusConflict, "member_already_scanned"},
-	{ErrNotInPattern, http.StatusConflict, "not_in_pattern"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or

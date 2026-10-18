@@ -326,11 +326,13 @@ paths:
       tags: [game]
       summary: Scan a waypoint
       description: |
-        Checked against the stack's live scans (at most `game.scan_window` + `game.scan_grace`, 65 s, old).
-        Rejected **without being pushed** if the waypoint is already in the stack (`waypoint_already_scanned`,
-        a retry included), the member already has a scan in it (`member_already_scanned`), or no pattern of the
-        selected type contains the stack plus this waypoint (`not_in_pattern`). Once the stack is exactly a
-        pattern of the selected type, it completes and the stack and selection are purged.
+        Checked against the stack's live scans (correct scans at most `game.scan_window` + `game.scan_grace`, 65 s,
+        old; wrong scans never age out). Rejected **without being pushed** if the waypoint is already in the stack
+        (`waypoint_already_scanned`, a retry included) or the member already has a scan in it
+        (`member_already_scanned`). A scan whose waypoint isn't part of the selected type's patterns is still
+        pushed: it occupies the member's one scan and its waypoint slot, and the selection can no longer complete
+        (reselect to purge it). Once the stack is exactly a pattern of the selected type, it completes and the
+        stack and selection are purged.
 
         ⚠ Takes the raw waypoint ID; to be replaced by QR verification.
       requestBody:
@@ -358,7 +360,7 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
         "409":
           $ref: "#/components/responses/Error"
-          description: "Codes: `not_in_game`, `no_shape_selected`, `waypoint_already_scanned`, `member_already_scanned`, `not_in_pattern`"
+          description: "Codes: `not_in_game`, `no_shape_selected`, `waypoint_already_scanned`, `member_already_scanned`"
 
   /api/teams/me/events:
     get:

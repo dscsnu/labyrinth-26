@@ -95,6 +95,7 @@ type scanRow struct {
 	waypointID string
 	userID     uuid.UUID
 	scannedAt  time.Time
+	wrong      bool
 }
 
 // selectTeams reads the stored state of every team, or of one team when
@@ -150,12 +151,13 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 	}
 
 	// The stack: for each team with a selection, its newest stackSize scans
-	// after the selection was made, returned oldest first.
+	// after the selection was made, returned oldest first. The wrong flag is
+	// read too, so wrong scans can be rebuilt as never-stale.
 	rows, err = d.pool.Query(ctx, `
-		SELECT sel.team_id, r.waypoint_id, r.user_id, r.scanned_at
+		SELECT sel.team_id, r.waypoint_id, r.user_id, r.scanned_at, r.wrong
 		FROM team_selection sel
 		JOIN LATERAL (
-			SELECT ts.id, ts.waypoint_id, ts.user_id, ts.scanned_at
+			SELECT ts.id, ts.waypoint_id, ts.user_id, ts.scanned_at, ts.wrong
 			FROM team_scan ts
 			WHERE ts.team_id = sel.team_id AND ts.id > sel.after_scan_id
 			ORDER BY ts.id DESC
@@ -167,7 +169,7 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 		return nil, err
 	}
 	var scan scanRow
-	_, err = pgx.ForEachRow(rows, []any{&id, &scan.waypointID, &scan.userID, &scan.scannedAt}, func() error {
+	_, err = pgx.ForEachRow(rows, []any{&id, &scan.waypointID, &scan.userID, &scan.scannedAt, &scan.wrong}, func() error {
 		t := get(id)
 		t.stack = append(t.stack, scan)
 		return nil
@@ -176,23 +178,25 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 }
 
 // insertScan logs one accepted scan in team_scan, which is both the audit
-// trail and the source of the stack after a restart.
-func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time) error {
+// trail and the source of the stack after a restart. wrong marks a scan that
+// didn't fit the selected shape.
+func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, wrong bool) error {
 	_, err := d.pool.Exec(ctx,
-		"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at) VALUES ($1, $2, $3, $4)",
-		teamID, waypointID, userID, at)
+		"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, $5)",
+		teamID, waypointID, userID, at, wrong)
 	return err
 }
 
 // insertCompletingScan logs a scan that completed a pattern, in one
 // transaction: the team_scan row, the team_pattern row (no-op if the pattern
 // was completed before), and deleting the selection, which also empties the
-// stack.
-func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int) error {
+// stack. wrong is always false here (a wrong scan can't complete), but it's
+// passed through for one uniform call.
+func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, wrong bool) error {
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at) VALUES ($1, $2, $3, $4)",
-			teamID, waypointID, userID, at); err != nil {
+			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, $5)",
+			teamID, waypointID, userID, at, wrong); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
