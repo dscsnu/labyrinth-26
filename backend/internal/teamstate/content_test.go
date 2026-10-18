@@ -196,7 +196,8 @@ func TestMixedSizesAllowedWhenNotNested(t *testing.T) {
 }
 
 // TestStack checks the stack: bottom-to-top order, dropping the bottom when
-// full, Push leaving the original unchanged, and Live leaving out stale scans.
+// full, Push leaving the original unchanged, Live leaving out stale scans, and
+// a wrong scan never going stale.
 func TestStack(t *testing.T) {
 	base := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	waypoints := func(scans []StackScan) []int {
@@ -237,6 +238,12 @@ func TestStack(t *testing.T) {
 	}
 	if got := s.Live(base.Add(time.Hour), time.Second); len(got) != 0 {
 		t.Fatalf("everything should be stale: %v", got)
+	}
+
+	// A wrong scan stays live however old it is.
+	wrong := newStack(3).Push(StackScan{Waypoint: 7, At: base, Wrong: true})
+	if got := waypoints(wrong.Live(base.Add(time.Hour), time.Second)); !slices.Equal(got, []int{7}) {
+		t.Fatalf("wrong scan should stay live: %v", got)
 	}
 }
 

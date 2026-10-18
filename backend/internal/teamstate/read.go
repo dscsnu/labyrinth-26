@@ -48,13 +48,20 @@ type StackScan struct {
 	UserID uuid.UUID
 	// At is when it was scanned.
 	At time.Time
+	// Wrong means the scan didn't fit the selected shape's patterns when it
+	// was made. It still occupies the member's one scan and its waypoint slot,
+	// poisons the selection (the set can never equal a pattern), and never
+	// ages out of the stack. It is internal: View never exposes it.
+	Wrong bool
 }
 
 // Stack is a team's accepted scans since it selected its shape, oldest at the
-// bottom and newest on top: one scan per waypoint and per member, all within
-// one pattern of the selected shape, so never more than Cap (config.toml
-// game.max_pattern_points). Scans older than the scan limit (window + grace)
-// are stale: Live leaves them out, and Scan drops them before pushing.
+// bottom and newest on top: one scan per waypoint and per member, so never
+// more than Cap (config.toml game.max_pattern_points). Correct scans older
+// than the scan limit (window + grace) are stale: Live leaves them out, and
+// Scan drops them before pushing. A wrong scan (one that didn't fit the
+// selected shape) never goes stale and never leaves the stack until the
+// selection is purged.
 //
 // It's a value: Push returns a new Stack and leaves the receiver unchanged,
 // so snapshots stay immutable. Storage is a circular buffer, so pushing and
@@ -95,12 +102,15 @@ func (s Stack) Push(sc StackScan) Stack {
 	return s
 }
 
-// Live returns the scans no older than limit at now, bottom to top. Scans are
-// pushed in time order, so the live scans are always the top of the stack.
+// Live returns the scans no older than limit at now, bottom to top, plus any
+// wrong scan (wrong scans never age out: they stay until the selection is
+// purged). Correct scans are pushed in time order, so their live scans are
+// always the top of the stack; a wrong scan may be older than the ones around
+// it.
 func (s Stack) Live(now time.Time, limit time.Duration) []StackScan {
 	var out []StackScan
 	for i := range s.n {
-		if sc := s.At(i); now.Sub(sc.At) <= limit {
+		if sc := s.At(i); sc.Wrong || now.Sub(sc.At) <= limit {
 			out = append(out, sc)
 		}
 	}
@@ -250,7 +260,8 @@ func (s *Store) Snapshot(userID uuid.UUID) (live.Event, bool) {
 }
 
 // view turns a State into IDs and timestamps for the API and live events.
-// Stale stack scans are left out.
+// Stale correct scans are left out; wrong scans (which never go stale) are
+// included, with no flag distinguishing them.
 func (s *Store) view(teamID string, st State) View {
 	c := s.content
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{}, Stack: []StackScanView{}}

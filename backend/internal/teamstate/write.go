@@ -26,18 +26,20 @@ import (
 // under the lock, labelled "2. validate" again.
 //
 // The game flow. A member selects a shape, which always purges the team's
-// scan stack. Each scan is checked against the stack's live scans (stale ones,
-// older than window + grace, are ignored and dropped), and is rejected
-// without being pushed if:
+// scan stack. Each scan is checked against the stack's live scans (stale
+// correct ones, older than window + grace, are ignored and dropped; wrong
+// scans never are), and is rejected without being pushed if:
 //
 //   - its waypoint is already in the stack (by anyone, the scanner included)
 //   - its member already has a scan in the stack
-//   - the stack plus this waypoint isn't part of any pattern of the shape
 //
-// So the stack only ever holds one scan per point of a pattern still in
-// reach, each by a different member. Once it is exactly a pattern of the
-// selected shape, the pattern completes and the stack and selection are
-// purged.
+// So the stack only ever holds one scan per point and per member. Every scan
+// is final: a member cannot scan a second time to overwrite their scan, even
+// if it didn't fit. A scan whose waypoint doesn't fit the selected shape
+// (with the correct scans already in the stack) is still pushed, but marked
+// wrong; it poisons the selection, so the team must reselect to purge it.
+// Once the stack's waypoints are exactly a pattern of the selected shape, the
+// pattern completes and the stack and selection are purged.
 
 var (
 	// ErrNotInGame means the team hasn't started (or has finished).
@@ -51,11 +53,8 @@ var (
 	// ErrWaypointAlreadyScanned means this waypoint is already in the stack.
 	ErrWaypointAlreadyScanned = errors.New("this waypoint is already scanned")
 	// ErrMemberAlreadyScanned means this member already has a scan in the
-	// stack; a teammate must scan the next waypoint.
+	// stack, correct or wrong; a teammate must scan the next waypoint.
 	ErrMemberAlreadyScanned = errors.New("you already scanned a waypoint; a teammate must scan the next one")
-	// ErrNotInPattern means the waypoint, with the ones already scanned, isn't
-	// part of any pattern of the selected shape.
-	ErrNotInPattern = errors.New("this waypoint isn't part of the pattern")
 )
 
 // Scan outcomes, reported in ScanResult.Outcome.
@@ -174,7 +173,8 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 
 // Scan records that userID scanned waypointID (4 digits) toward the team's
 // selected shape, and completes the pattern once the stack is exactly one.
-// See the rules above. A rejected scan returns an error and changes nothing.
+// See the rules above. A rejected scan returns an error and changes nothing;
+// a wrong scan is still pushed, marked wrong, and poisons the selection.
 func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (ScanResult, error) {
 	// 2. validate, before 1. lock: content and team need no lock
 	w, ok := s.content.WaypointIndex(waypointID)
@@ -208,23 +208,25 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 		set = set.With(sc.Waypoint)
 	}
 	set = set.With(w)
-	if !s.content.FitsShape(cur.Selection.Shape, set) {
-		return ScanResult{}, ErrNotInPattern
-	}
+	// A scan that doesn't fit isn't rejected: it's pushed anyway, marked
+	// wrong, and its member and waypoint slots stay occupied.
+	wrong := !s.content.FitsShape(cur.Selection.Shape, set)
 
-	// 3. build: drop stale scans (keep the live ones), push this one. Every
-	// live scan is at most the limit old and this one is now, so bottom to
-	// top spans at most the limit.
+	// 3. build: drop stale scans (keep the live ones, wrong scans included),
+	// push this one. Every live correct scan is at most the limit old and this
+	// one is now, so correct bottom-to-top spans at most the limit.
 	stack := newStack(s.rules.MaxPatternPoints)
 	for _, sc := range live {
 		stack = stack.Push(sc)
 	}
-	stack = stack.Push(StackScan{Waypoint: w, UserID: userID, At: now})
+	stack = stack.Push(StackScan{Waypoint: w, UserID: userID, At: now, Wrong: wrong})
 
 	next := *cur
 	next.Waypoints = cur.Waypoints.With(w)
 	next.Stack = stack
 	res := ScanResult{Outcome: OutcomeScanAdded}
+	// A wrong scan can't complete: it's in the set, so the set is never a
+	// pattern of the selected shape.
 	completed, isComplete := s.content.PatternFor(set)
 	isComplete = isComplete && s.content.Patterns[completed].Shape == cur.Selection.Shape
 	if isComplete {
@@ -240,9 +242,9 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		if isComplete {
-			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.content.Patterns[completed].dbID)
+			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.content.Patterns[completed].dbID, wrong)
 		}
-		return s.db.insertScan(ctx, t.ID, waypointID, userID, now)
+		return s.db.insertScan(ctx, t.ID, waypointID, userID, now, wrong)
 	}); err != nil {
 		return ScanResult{}, s.reconcile(e, t.ID, err)
 	}

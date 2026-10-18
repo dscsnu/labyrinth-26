@@ -6,7 +6,7 @@
 # change. Durations use Go syntax: "30s", "2m", "12h".
 #
 # Not here, because they're fixed type sizes in the code: at most 64
-# waypoints, 64 shapes and 512 patterns (see internal/teamstate/README.md).
+# waypoints, 64 shapes and 2048 patterns (see internal/teamstate/README.md).
 
 [teams]
 # Players per team: the leader starts only with exactly this many, and no

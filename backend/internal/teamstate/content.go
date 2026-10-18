@@ -28,7 +28,7 @@ const (
 	// maxShapes is the most shapes a ShapeSet holds.
 	maxShapes = 64
 	// maxPatterns is the most patterns a PatternSet holds.
-	maxPatterns = 512
+	maxPatterns = 2048
 )
 
 // waypointIDPattern matches a waypoint ID: exactly 4 digits.
@@ -250,6 +250,9 @@ func (c *Content) PatternFor(set WaypointSet) (int, bool) {
 // FitsShape reports whether some pattern of shape contains every waypoint in
 // set: whether set can still grow into a pattern of that shape. The empty set
 // fits no shape.
+//
+// Scan uses it to label a scan wrong rather than to reject it: a scan whose
+// waypoints don't fit is pushed anyway, and poisons the selection.
 //
 // It's one AND-compare per pattern of the shape (pattern & set == set),
 // stopping at the first match. Measured once on the 2025 seed (156 patterns in

@@ -21,13 +21,13 @@ func (e *env) startedTeam(prefix string) []player {
 
 // TestSelectAndScanRoutes walks the team state routes over HTTP with every
 // error code: selecting, the body size limit, scanning a square with distinct
-// members, rejected rescans and outside scans, and clearing.
+// members, rejected rescans and wrong scans, and clearing.
 func TestSelectAndScanRoutes(t *testing.T) {
 	e := setup(t)
 	if err := e.db.SeedDev2025(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// 1012 is in no pattern, so it's outside every square.
+	// 1012 is in no pattern, so it's wrong for every shape.
 	if _, err := e.db.Pool().Exec(context.Background(),
 		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
@@ -68,7 +68,6 @@ func TestSelectAndScanRoutes(t *testing.T) {
 	expect(t, "rescan", scan(ps[0], "1001"), http.StatusConflict, "waypoint_already_scanned")
 	expect(t, "same waypoint", scan(ps[1], "1001"), http.StatusConflict, "waypoint_already_scanned")
 	expect(t, "same member", scan(ps[0], "1002"), http.StatusConflict, "member_already_scanned")
-	expect(t, "outside the pattern", scan(ps[1], "1012"), http.StatusConflict, "not_in_pattern")
 	expect(t, "scan 2", scan(ps[1], "1002"), http.StatusOK, "")
 	expect(t, "scan 3", scan(ps[2], "1007"), http.StatusOK, "")
 	r = scan(ps[3], "1008")
@@ -89,6 +88,16 @@ func TestSelectAndScanRoutes(t *testing.T) {
 	if r.payload["selection"] != nil || len(r.payload["stack"].([]any)) != 0 {
 		t.Fatalf("after clear: %v", r.payload)
 	}
+
+	// A wrong scan is accepted (not rejected): it's pushed and locks the
+	// member, and it poisons the selection.
+	expect(t, "reselect", sel(ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
+	r = scan(ps[0], "1012")
+	expect(t, "wrong scan accepted", r, http.StatusOK, "")
+	if r.payload["outcome"] != "scan_added" {
+		t.Fatalf("wrong scan: %v", r.payload)
+	}
+	expect(t, "wrong member locked", scan(ps[0], "1001"), http.StatusConflict, "member_already_scanned")
 }
 
 // TestGameShapes checks GET /api/game/shapes: it needs a token, lists the

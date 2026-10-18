@@ -467,49 +467,86 @@ func TestStaleScanFreesItsWaypointAndMember(t *testing.T) {
 	expectOutcome(t, "complete", f.scanAt(t, limit+f.tick(3), 3, "1008"), OutcomePatternCompleted)
 }
 
-// TestOutsideScanIsRejected checks that a waypoint that can't be part of any
-// pattern of the selected shape, given the stack, is rejected and not pushed;
-// and that a waypoint in no pattern of the shape at all is rejected on an
-// empty stack.
-func TestOutsideScanIsRejected(t *testing.T) {
+// TestWrongScanLocksMember checks that a waypoint that can't be part of any
+// pattern of the selected shape, given the stack, is still pushed (marked
+// wrong), and that it occupies the member's one scan and its waypoint slot.
+func TestWrongScanLocksMember(t *testing.T) {
 	f := started(t, fixtureOptions{sql: `
 		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
-	c := f.state.Content()
-	sq, _ := c.ShapeIndex("square")
 	f.selectAt(t, 0, 0, "square")
 
-	if err := f.scanErrAt(f.tick(1), 0, "1012"); !errors.Is(err, ErrNotInPattern) {
-		t.Fatalf("waypoint in no square, empty stack: %v", err)
+	res := f.scanAt(t, f.tick(1), 0, "1012") // in no square
+	expectOutcome(t, "wrong waypoint", res, OutcomeScanAdded)
+	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1012"}) {
+		t.Fatalf("stack %v", got)
 	}
-	f.scanAt(t, f.tick(2), 0, "1001")
-	f.scanAt(t, f.tick(3), 1, "1002")
+	if st := f.state.ForTeam(f.teamID); !st.Stack.At(0).Wrong {
+		t.Fatal("wrong scan not marked wrong")
+	}
 
-	stack, _ := c.SetOf([]string{"1001", "1002"})
-	var outside, inside []string
-	for _, wp := range c.Waypoints {
-		i, _ := c.WaypointIndex(wp.ID)
-		if stack.Has(i) {
-			continue
+	// The member is locked: they can't scan again to overwrite it.
+	if err := f.scanErrAt(f.tick(2), 0, "1001"); !errors.Is(err, ErrMemberAlreadyScanned) {
+		t.Fatalf("member rescanned after a wrong scan: %v", err)
+	}
+	// The waypoint slot is taken too.
+	if err := f.scanErrAt(f.tick(3), 1, "1012"); !errors.Is(err, ErrWaypointAlreadyScanned) {
+		t.Fatalf("another member rescanned the wrong waypoint: %v", err)
+	}
+}
+
+// TestWrongScanPoisonsSelection checks that once a wrong scan is in the stack,
+// no later scan can complete the selection, and that reselecting purges it.
+func TestWrongScanPoisonsSelection(t *testing.T) {
+	f := started(t, fixtureOptions{sql: `
+		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
+	f.selectAt(t, 0, 0, "square")
+	f.scanAt(t, f.tick(1), 0, "1001")
+	f.scanAt(t, f.tick(2), 1, "1002")
+	// 1003 is in no square with 1001 and 1002: wrong, and it poisons the set.
+	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, "1003"), OutcomeScanAdded)
+
+	// The remaining correct waypoints still can't complete it.
+	f.scanAt(t, f.tick(4), 3, "1007")
+	expectOutcome(t, "cannot complete a poisoned selection", f.scanAt(t, f.tick(5), 4, "1008"), OutcomeScanAdded)
+
+	// Reselecting purges the wrong scan; the square then completes.
+	f.selectAt(t, f.tick(6), 0, "square")
+	res := ScanResult{}
+	for i, w := range square {
+		res = f.scanAt(t, f.tick(7)+f.tick(float64(i)), i, w)
+	}
+	expectOutcome(t, "completes after reselect", res, OutcomePatternCompleted)
+}
+
+// TestWrongScanNeverAgesOut checks that a wrong scan stays in the stack past
+// the scan limit, while a correct scan of the same age goes stale.
+func TestWrongScanNeverAgesOut(t *testing.T) {
+	f := started(t, fixtureOptions{sql: `
+		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
+	f.selectAt(t, 0, 0, "square")
+	f.scanAt(t, 0, 0, "1001")
+	f.scanAt(t, f.tick(1), 1, "1012") // wrong
+
+	limit := f.rules.limit()
+	res := f.scanAt(t, limit+f.tick(10), 2, "1007")
+	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1012", "1007"}) {
+		t.Fatalf("stack %v: the wrong 1012 should stay, the stale 1001 should drop", got)
+	}
+
+	// A restart reproduces the wrong scan and its never-stale flag.
+	wp, _ := f.state.Content().WaypointIndex("1012")
+	restarted := pgtest.Must(Load(context.Background(), pgtest.Open(t, f.dbURL), f.teams, f.hub, pgtest.Quiet, f.rules))
+	restarted.now = f.clock.now
+	st := restarted.ForTeam(f.teamID)
+	wrong := false
+	for i := range st.Stack.Len() {
+		if sc := st.Stack.At(i); sc.Waypoint == wp {
+			wrong = sc.Wrong
 		}
-		if c.FitsShape(sq, stack.With(i)) {
-			inside = append(inside, wp.ID)
-		} else {
-			outside = append(outside, wp.ID)
-		}
 	}
-	if len(outside) == 0 || !slices.Contains(inside, "1007") {
-		t.Fatalf("seed has no outside waypoint for 1001+1002 (outside %v, inside %v)", outside, inside)
+	if !wrong {
+		t.Fatal("wrong flag lost across restart")
 	}
-	for _, wp := range outside {
-		if err := f.scanErrAt(f.tick(4), 2, wp); !errors.Is(err, ErrNotInPattern) {
-			t.Fatalf("outside waypoint %s: %v", wp, err)
-		}
-	}
-	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1001", "1002"}) || f.loggedScans(t) != 2 {
-		t.Fatalf("rejected scans changed the stack: %v", got)
-	}
-	f.scanAt(t, f.tick(5), 2, "1007")
-	expectOutcome(t, "complete after rejections", f.scanAt(t, f.tick(6), 3, "1008"), OutcomePatternCompleted)
 }
 
 // TestCompletionPurges checks that completing purges the stack and the

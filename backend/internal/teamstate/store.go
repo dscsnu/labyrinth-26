@@ -149,7 +149,7 @@ func (s *Store) stateOf(rows *teamRows) (State, error) {
 		if !ok {
 			return st, fmt.Errorf("stack scan: unknown waypoint %q", sc.waypointID)
 		}
-		st.Stack = st.Stack.Push(StackScan{Waypoint: w, UserID: sc.userID, At: sc.scannedAt.UTC()})
+		st.Stack = st.Stack.Push(StackScan{Waypoint: w, UserID: sc.userID, At: sc.scannedAt.UTC(), Wrong: sc.wrong})
 	}
 	return st, nil
 }
