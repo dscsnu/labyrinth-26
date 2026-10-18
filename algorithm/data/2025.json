@@ -1,0 +1,3519 @@
+{
+  "waypoints": [
+    {
+      "id": "1001",
+      "name": "Tower 6 FruitShop (T6)",
+      "latitude": 28.52836141567019,
+      "longitude": 77.57777379378554
+    },
+    {
+      "id": "1002",
+      "name": "Research Block (R)",
+      "latitude": 28.527471246410833,
+      "longitude": 77.57890336254033
+    },
+    {
+      "id": "1003",
+      "name": "A Block (A)",
+      "latitude": 28.52692140098942,
+      "longitude": 77.57706407672785
+    },
+    {
+      "id": "1004",
+      "name": "CnD Atrium (CnD)",
+      "latitude": 28.525519393291614,
+      "longitude": 77.57653461322104
+    },
+    {
+      "id": "1005",
+      "name": "G Block (G)",
+      "latitude": 28.52799850829152,
+      "longitude": 77.5749038301257
+    },
+    {
+      "id": "1006",
+      "name": "Shopping Arcade (Arc)",
+      "latitude": 28.52723498480195,
+      "longitude": 77.57292972432113
+    },
+    {
+      "id": "1007",
+      "name": "UAC (SARC)",
+      "latitude": 28.523582249548888,
+      "longitude": 77.57437275274097
+    },
+    {
+      "id": "1008",
+      "name": "Cluster 1 (C1)",
+      "latitude": 28.52440905859402,
+      "longitude": 77.57308311017349
+    },
+    {
+      "id": "1009",
+      "name": "Dibang Cycle Shop (Dib)",
+      "latitude": 28.525235547619324,
+      "longitude": 77.57072373132858
+    },
+    {
+      "id": "1010",
+      "name": "Dining Hall 3 (DH3)",
+      "latitude": 28.52316003957018,
+      "longitude": 77.5696713403205
+    },
+    {
+      "id": "1011",
+      "name": "Indoor Sports Complex (ISC)",
+      "latitude": 28.521496152454514,
+      "longitude": 77.5712575598366
+    }
+  ],
+  "shapes": [
+    {
+      "id": "collinear",
+      "name": "Collinear"
+    },
+    {
+      "id": "lightning",
+      "name": "Lightning"
+    },
+    {
+      "id": "square",
+      "name": "Square"
+    },
+    {
+      "id": "tree",
+      "name": "Tree"
+    },
+    {
+      "id": "triangle",
+      "name": "Triangle"
+    }
+  ],
+  "patterns": [
+    {
+      "id": 1,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1004"
+      ]
+    },
+    {
+      "id": 2,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1009"
+      ]
+    },
+    {
+      "id": 3,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1007"
+      ]
+    },
+    {
+      "id": 4,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1011"
+      ]
+    },
+    {
+      "id": 5,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 6,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1002",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 7,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 8,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1004",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 9,
+      "shape_id": "collinear",
+      "waypoints": [
+        "1005",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 10,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1005"
+      ]
+    },
+    {
+      "id": 11,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1004",
+        "1006"
+      ]
+    },
+    {
+      "id": 12,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 13,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 14,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 15,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 16,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 17,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 18,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 19,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1005",
+        "1009"
+      ]
+    },
+    {
+      "id": 20,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 21,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 22,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 23,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 24,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 25,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 26,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 27,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 28,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 29,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 30,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 31,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1001",
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 32,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1004",
+        "1008"
+      ]
+    },
+    {
+      "id": 33,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 34,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 35,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1005",
+        "1009"
+      ]
+    },
+    {
+      "id": 36,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 37,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 38,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 39,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 40,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 41,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 42,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 43,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 44,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 45,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 46,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 47,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 48,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 49,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 50,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 51,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 52,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 53,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 54,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 55,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 56,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 57,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 58,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 59,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 60,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 61,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 62,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 63,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 64,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 65,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 66,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 67,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 68,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 69,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 70,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 71,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 72,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 73,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 74,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 75,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 76,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1004",
+        "1009",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 77,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 78,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 79,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 80,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 81,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 82,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1005",
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 83,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 84,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1006",
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 85,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1006",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 86,
+      "shape_id": "lightning",
+      "waypoints": [
+        "1007",
+        "1009",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 87,
+      "shape_id": "square",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 88,
+      "shape_id": "square",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 89,
+      "shape_id": "square",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 90,
+      "shape_id": "square",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 91,
+      "shape_id": "square",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 92,
+      "shape_id": "square",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 93,
+      "shape_id": "square",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 94,
+      "shape_id": "square",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 95,
+      "shape_id": "square",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 96,
+      "shape_id": "square",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 97,
+      "shape_id": "square",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 98,
+      "shape_id": "square",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 99,
+      "shape_id": "square",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 100,
+      "shape_id": "square",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 101,
+      "shape_id": "square",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 102,
+      "shape_id": "square",
+      "waypoints": [
+        "1006",
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 103,
+      "shape_id": "square",
+      "waypoints": [
+        "1007",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 104,
+      "shape_id": "square",
+      "waypoints": [
+        "1008",
+        "1009",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 105,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1004"
+      ]
+    },
+    {
+      "id": 106,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1007"
+      ]
+    },
+    {
+      "id": 107,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1008"
+      ]
+    },
+    {
+      "id": 108,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1009"
+      ]
+    },
+    {
+      "id": 109,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1010"
+      ]
+    },
+    {
+      "id": 110,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003",
+        "1011"
+      ]
+    },
+    {
+      "id": 111,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1004",
+        "1007"
+      ]
+    },
+    {
+      "id": 112,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1004",
+        "1011"
+      ]
+    },
+    {
+      "id": 113,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 114,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 115,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 116,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1004",
+        "1005"
+      ]
+    },
+    {
+      "id": 117,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1004",
+        "1006"
+      ]
+    },
+    {
+      "id": 118,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 119,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 120,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 121,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 122,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 123,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 124,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 125,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 126,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 127,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 128,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 129,
+      "shape_id": "tree",
+      "waypoints": [
+        "1001",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 130,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1004",
+        "1005"
+      ]
+    },
+    {
+      "id": 131,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1004",
+        "1006"
+      ]
+    },
+    {
+      "id": 132,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1004",
+        "1011"
+      ]
+    },
+    {
+      "id": 133,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 134,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 135,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 136,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 137,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 138,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 139,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 140,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 141,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 142,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 143,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 144,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 145,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 146,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 147,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 148,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 149,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 150,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 151,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 152,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 153,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 154,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 155,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 156,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 157,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 158,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 159,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 160,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 161,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 162,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 163,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 164,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 165,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 166,
+      "shape_id": "tree",
+      "waypoints": [
+        "1002",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 167,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 168,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 169,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 170,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 171,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 172,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 173,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 174,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 175,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 176,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 177,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 178,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 179,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 180,
+      "shape_id": "tree",
+      "waypoints": [
+        "1003",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 181,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 182,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 183,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 184,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 185,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 186,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 187,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 188,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 189,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 190,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 191,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 192,
+      "shape_id": "tree",
+      "waypoints": [
+        "1004",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 193,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 194,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 195,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 196,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 197,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 198,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 199,
+      "shape_id": "tree",
+      "waypoints": [
+        "1005",
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 200,
+      "shape_id": "tree",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 201,
+      "shape_id": "tree",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 202,
+      "shape_id": "tree",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 203,
+      "shape_id": "tree",
+      "waypoints": [
+        "1007",
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 204,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1003"
+      ]
+    },
+    {
+      "id": 205,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1004"
+      ]
+    },
+    {
+      "id": 206,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1005"
+      ]
+    },
+    {
+      "id": 207,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1006"
+      ]
+    },
+    {
+      "id": 208,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1007"
+      ]
+    },
+    {
+      "id": 209,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1008"
+      ]
+    },
+    {
+      "id": 210,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1009"
+      ]
+    },
+    {
+      "id": 211,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1010"
+      ]
+    },
+    {
+      "id": 212,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1002",
+        "1011"
+      ]
+    },
+    {
+      "id": 213,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1005"
+      ]
+    },
+    {
+      "id": 214,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1006"
+      ]
+    },
+    {
+      "id": 215,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1007"
+      ]
+    },
+    {
+      "id": 216,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1008"
+      ]
+    },
+    {
+      "id": 217,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1009"
+      ]
+    },
+    {
+      "id": 218,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1010"
+      ]
+    },
+    {
+      "id": 219,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1003",
+        "1011"
+      ]
+    },
+    {
+      "id": 220,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1005"
+      ]
+    },
+    {
+      "id": 221,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1006"
+      ]
+    },
+    {
+      "id": 222,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1007"
+      ]
+    },
+    {
+      "id": 223,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1008"
+      ]
+    },
+    {
+      "id": 224,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1009"
+      ]
+    },
+    {
+      "id": 225,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1010"
+      ]
+    },
+    {
+      "id": 226,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1004",
+        "1011"
+      ]
+    },
+    {
+      "id": 227,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 228,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 229,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 230,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1009"
+      ]
+    },
+    {
+      "id": 231,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 232,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 233,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 234,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 235,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 236,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 237,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 238,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 239,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 240,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 241,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 242,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 243,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 244,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 245,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 246,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 247,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1001",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 248,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1004"
+      ]
+    },
+    {
+      "id": 249,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1005"
+      ]
+    },
+    {
+      "id": 250,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1006"
+      ]
+    },
+    {
+      "id": 251,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1007"
+      ]
+    },
+    {
+      "id": 252,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1008"
+      ]
+    },
+    {
+      "id": 253,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1010"
+      ]
+    },
+    {
+      "id": 254,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1003",
+        "1011"
+      ]
+    },
+    {
+      "id": 255,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1005"
+      ]
+    },
+    {
+      "id": 256,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1006"
+      ]
+    },
+    {
+      "id": 257,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1008"
+      ]
+    },
+    {
+      "id": 258,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1009"
+      ]
+    },
+    {
+      "id": 259,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1004",
+        "1010"
+      ]
+    },
+    {
+      "id": 260,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 261,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 262,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 263,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1009"
+      ]
+    },
+    {
+      "id": 264,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 265,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 266,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 267,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 268,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 269,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 270,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 271,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 272,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 273,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 274,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 275,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 276,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 277,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 278,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1002",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 279,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1005"
+      ]
+    },
+    {
+      "id": 280,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1006"
+      ]
+    },
+    {
+      "id": 281,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1007"
+      ]
+    },
+    {
+      "id": 282,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1008"
+      ]
+    },
+    {
+      "id": 283,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1009"
+      ]
+    },
+    {
+      "id": 284,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1010"
+      ]
+    },
+    {
+      "id": 285,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1004",
+        "1011"
+      ]
+    },
+    {
+      "id": 286,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 287,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 288,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 289,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1009"
+      ]
+    },
+    {
+      "id": 290,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 291,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 292,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 293,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 294,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 295,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 296,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 297,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 298,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 299,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 300,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 301,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 302,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 303,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 304,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 305,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 306,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1003",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 307,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1006"
+      ]
+    },
+    {
+      "id": 308,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1007"
+      ]
+    },
+    {
+      "id": 309,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1008"
+      ]
+    },
+    {
+      "id": 310,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1009"
+      ]
+    },
+    {
+      "id": 311,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1010"
+      ]
+    },
+    {
+      "id": 312,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1005",
+        "1011"
+      ]
+    },
+    {
+      "id": 313,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 314,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 315,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 316,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 317,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 318,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 319,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 320,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 321,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 322,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 323,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 324,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 325,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1004",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 326,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1007"
+      ]
+    },
+    {
+      "id": 327,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1008"
+      ]
+    },
+    {
+      "id": 328,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1009"
+      ]
+    },
+    {
+      "id": 329,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1010"
+      ]
+    },
+    {
+      "id": 330,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1006",
+        "1011"
+      ]
+    },
+    {
+      "id": 331,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 332,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 333,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 334,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 335,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 336,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 337,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 338,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 339,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1005",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 340,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1008"
+      ]
+    },
+    {
+      "id": 341,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1009"
+      ]
+    },
+    {
+      "id": 342,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1010"
+      ]
+    },
+    {
+      "id": 343,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1007",
+        "1011"
+      ]
+    },
+    {
+      "id": 344,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 345,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 346,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 347,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 348,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 349,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1006",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 350,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1007",
+        "1008",
+        "1009"
+      ]
+    },
+    {
+      "id": 351,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1007",
+        "1008",
+        "1010"
+      ]
+    },
+    {
+      "id": 352,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1007",
+        "1008",
+        "1011"
+      ]
+    },
+    {
+      "id": 353,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1007",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 354,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1007",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 355,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1007",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 356,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1008",
+        "1009",
+        "1010"
+      ]
+    },
+    {
+      "id": 357,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1008",
+        "1009",
+        "1011"
+      ]
+    },
+    {
+      "id": 358,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1008",
+        "1010",
+        "1011"
+      ]
+    },
+    {
+      "id": 359,
+      "shape_id": "triangle",
+      "waypoints": [
+        "1009",
+        "1010",
+        "1011"
+      ]
+    }
+  ]
+}
