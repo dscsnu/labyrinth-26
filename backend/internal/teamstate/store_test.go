@@ -573,6 +573,25 @@ func TestCompletionPurges(t *testing.T) {
 	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "1008"), OutcomeScanAdded)
 }
 
+// TestOutOfOrderScanning checks that a pattern completes whatever order the
+// waypoints are scanned in. A pattern is an unordered set of waypoints (a
+// WaypointSet bitmask): scanning 1001 then 1007 and scanning 1007 then 1001
+// set the same bits, so the same pattern is found.
+func TestOutOfOrderScanning(t *testing.T) {
+	f := started(t)
+	f.selectAt(t, 0, 0, "square")
+
+	order := []string{"1008", "1007", "1002", "1001"} // square, scrambled
+	res := ScanResult{}
+	for i, w := range order {
+		res = f.scanAt(t, f.tick(float64(i)), i, w)
+	}
+	expectOutcome(t, "completes out of order", res, OutcomePatternCompleted)
+	if !slices.Equal(res.Pattern, square) { // Pattern is returned sorted
+		t.Fatalf("pattern %v", res.Pattern)
+	}
+}
+
 // TestSinglePointPattern checks that a 1-waypoint pattern completes on its
 // only scan.
 func TestSinglePointPattern(t *testing.T) {

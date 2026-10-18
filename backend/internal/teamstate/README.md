@@ -589,6 +589,7 @@ Checked in this order. "In the stack" means live: a correct scan at most 65 s ol
   | `TestWrongScanPoisonsSelection` | a wrong scan blocks completion until a reselect purges it |
   | `TestWrongScanNeverAgesOut` | a wrong scan stays in the stack past the limit while a correct one goes stale; a restart reproduces its `wrong` flag |
   | `TestCompletionPurges` | stack and selection purged; rescans need a new selection |
+  | `TestOutOfOrderScanning` | a square completes when scanned in reverse order (a pattern is an unordered set) |
   | `TestSinglePointPattern` | a 1-point pattern |
   | `TestSixPointPatternAtCapacity` | a 6-point pattern completes on the sixth scan |
   | `TestCompletingAgain` | `already_completed`, progress counted once |
