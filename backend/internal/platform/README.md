@@ -70,9 +70,9 @@ Both are read **once at startup**. A change needs a restart.
 - **`Settings`** has one struct per table: `Teams`, `Game`, `Auth`, `Live`, `Server`, `Storage`, each field with a `toml` tag.
 - **`Duration`** wraps `time.Duration`; its `UnmarshalText` uses `time.ParseDuration`, so durations are strings like `"30s"`, `"2m"`, `"12h"`. A bare number fails (`time: missing unit in duration "60"`).
 - **`LoadSettings(path)`**:
-  1. `toml.DecodeFile(path, &s)`. A syntax error, a wrong type (`size = "6"`) or a bad duration is returned **alone**, as `read <path>: toml: line N (last key "game.scan_window"): …`. Validation doesn't run.
+  1. `toml.DecodeFile(path, &s)`. A syntax error, a wrong type (`size = "6"`) or a bad duration is returned **alone**, as `read <path>: toml: line N (last key "live.heartbeat"): …`. Validation doesn't run.
   2. **Unknown keys:** every key in `md.Undecoded()` becomes `unknown key <key>`. An unknown table `[extra]` with `x = 1` gives both `unknown key extra` and `unknown key extra.x`.
-  3. **Missing keys:** `settingKeys()` lists every `[table, key]` from the struct's `toml` tags (by reflection); each one `md.IsDefined` says is absent becomes `missing key <table>.<key>`. This catches keys whose zero value is valid, like `game.scan_grace`.
+  3. **Missing keys:** `settingKeys()` lists every `[table, key]` from the struct's `toml` tags (by reflection); each one `md.IsDefined` says is absent becomes `missing key <table>.<key>`. This catches keys whose zero value is valid, like `spell.per_100m`.
   4. **`validate()`:** every out-of-range value (a missing key also shows up here, as zero, unless zero is valid).
   5. All of 2–4 are joined as `<path>: <error>\n<error>…`.
 - **`SettingsPath()`**: `$CONFIG_FILE`, else `config.toml`.
@@ -83,12 +83,10 @@ Both are read **once at startup**. A change needs a restart.
 ### Every `config.toml` key
 | Key | Go type | Shipped value | Validation (error text) | Means |
 |---|---|---|---|---|
-| `teams.size` | `int` | `6` | 1–16 (`teams.size must be 1-16`) | Players per team: exactly this many to start, no more can join |
+| `teams.size` | `int` | `6` | 1–16 (`teams.size must be 1-16`) | Most players per team: no more can join; any number from 1 can start |
 | `teams.name_max_length` | `int` | `32` | 1–32 (`… must be 1-32 (the database's limit)`) | Longest team name, in characters |
 | `teams.code_attempts` | `int` | `10` | ≥ 1 | Random 6-digit team codes to try per creation |
-| `game.scan_window` | `Duration` | `"1m"` | > 0 | Span a pattern's scans must fit in, bottom to top |
-| `game.scan_grace` | `Duration` | `"5s"` | ≥ 0 | Tolerance added to the window; also how long a scan stays live beyond it |
-| `game.max_pattern_points` | `int` | `6` | 1–`teams.size` (`… each point needs a different member`) | Most waypoints per pattern; capacity of each team's stack |
+| `game.max_pattern_points` | `int` | `6` | 1–15 (`game.max_pattern_points must be 1-15`; `config.MaxPatternPoints`, the size of the stack's fixed array) | Most waypoints per pattern; a team's stack holds this many plus one wrong scan. Not tied to `teams.size`: one member may scan several points |
 | `auth.token_ttl` | `Duration` | `"12h"` | > 0 | Access token lifetime; a role change applies at the next sign-in |
 | `auth.login_code_ttl` | `Duration` | `"2m"` | > 0 | Time to redeem a sign-in's one-time code |
 | `auth.oauth_state_ttl` | `Duration` | `"10m"` | ≥ 1 s (`auth.oauth_state_ttl must be at least 1s`): the state cookie's `Max-Age` is whole seconds | Time a user may spend on Google's screen |
@@ -116,8 +114,8 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | Syntax error, wrong type, bad duration | That one decode error, nothing else from the file |
 | Unknown key or table | `unknown key …` for each, plus any validation errors |
 | A key missing | `missing key <table>.<key>`, plus `<key> must be …` if zero is out of range |
-| `max_pattern_points` 7 with `size` 6 | `game.max_pattern_points must be 1-teams.size: …` |
-| `scan_grace` line removed | `missing key game.scan_grace` (zero would be valid, so only the missing-key check catches it) |
+| `max_pattern_points = 16` | `game.max_pattern_points must be 1-15` |
+| `per_100m` line removed | `missing key spell.per_100m` (zero would be valid, so only the missing-key check catches it) |
 | `oauth_state_ttl = "500ms"` | `auth.oauth_state_ttl must be at least 1s` |
 | `read_timeout = "1s"` with `read_header_timeout = "10s"` | `server.read_timeout must be at least server.read_header_timeout` |
 | Several env and file problems | All of them, one per line, in one error |
@@ -131,10 +129,10 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | Test | Covers |
 |---|---|
 | `TestRepositoryConfigLoads` | The committed `backend/config.toml` is valid |
-| `TestLoadSettings` | A complete `validTOML` decodes `size`, `scan_window`, `scan_grace`, `max_pattern_points`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
-| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration, negative grace, missing `scan_grace` (`missing key game.scan_grace`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 7 pattern points with 6 members, zero window; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
+| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `per_point`, `per_100m`, `walkability`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
+| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero `per_point`, negative `per_100m`, walkability under 1.0; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
 
-Not tested: `Load()` and the environment variables, and the key functions. A missing `scan_grace` is a case in `TestLoadSettingsRejects`.
+Not tested: `Load()` and the environment variables, and the key functions. A missing `per_100m` is a case in `TestLoadSettingsRejects`.
 
 ## config/configtest
 - **`Settings(t)`** loads `backend/config.toml` and fails the test if it's invalid.
@@ -418,7 +416,7 @@ The migrations:
 | `0003_content_progress.sql` | content: `waypoint`, `shape`, `pattern`, `pattern_waypoint`; progress: `team_scan`, `team_pattern` |
 | `0004_selection_stack.sql` | `team_selection`; index `team_scan_team_id_idx` on `team_scan (team_id, id DESC)` |
 | `0005_scan_cleanup.sql` | Drops `team_scan_team_idx` (`team_id`, from 0003), redundant with 0004's index. Adds `COMMENT ON TABLE team_scan` correcting 0003's SQL comment ("every scan, including repeats"): one row per **accepted** scan; rejected scans are never written. Never edit 0003 to fix it: its checksum would change |
-| `0006_wrong_scans.sql` | Adds `team_scan.wrong BOOLEAN NOT NULL DEFAULT false`: a scan that didn't fit the selected shape, so a restart rebuilds it as never-stale |
+| `0006_wrong_scans.sql` | Adds `team_scan.wrong BOOLEAN NOT NULL DEFAULT false`: a scan that didn't fit the selected shape, so a restart rebuilds a poisoned attempt as poisoned |
 | `0007_team_cast.sql` | `team_cast` (`id` identity PK, `team_id` → `team` `ON DELETE CASCADE`, `pattern_id` → `pattern`, `cast_by` → `userprofile`, `cast_at`, `already_completed`): every cast, repeats included; the newest row per team is `last_cast` after a restart. Index `team_cast_team_id_idx` on `(team_id, id DESC)` |
 
 Each use case's README documents its tables and constraints.

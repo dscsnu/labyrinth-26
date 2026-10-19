@@ -11,9 +11,14 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// MaxTeamSize is the largest teams.size config.toml may set. It bounds the
-// fixed-size arrays that hold a team's scan stack.
+// MaxTeamSize is the largest teams.size config.toml may set.
 const MaxTeamSize = 16
+
+// MaxPatternPoints is the largest game.max_pattern_points config.toml may
+// set. It bounds the fixed-size array that holds a team's scan stack (a
+// pattern's points plus one wrong scan), so it's a Go type size, not a
+// tunable.
+const MaxPatternPoints = 15
 
 // maxNameLength is the database's limit on team names (migration 0002).
 const maxNameLength = 32
@@ -59,12 +64,7 @@ type TeamSettings struct {
 
 // GameSettings is config.toml's [game] table.
 type GameSettings struct {
-	// ScanWindow is the span a pattern's scans must fit in, bottom to top.
-	ScanWindow Duration `toml:"scan_window"`
-	// ScanGrace is extra tolerance on ScanWindow.
-	ScanGrace Duration `toml:"scan_grace"`
-	// MaxPatternPoints is the most waypoints in a pattern, and the capacity of
-	// each team's scan stack.
+	// MaxPatternPoints is the most waypoints in a pattern.
 	MaxPatternPoints int `toml:"max_pattern_points"`
 }
 
@@ -157,7 +157,7 @@ func LoadSettings(path string) (Settings, error) {
 
 // settingKeys lists every key Settings expects, as [table, key] from the
 // toml tags, so a missing key is an error even when zero would be valid
-// (e.g. game.scan_grace).
+// (e.g. spell.per_100m).
 func settingKeys() [][]string {
 	var keys [][]string
 	top := reflect.TypeOf(Settings{})
@@ -183,10 +183,8 @@ func (s Settings) validate() []error {
 	check(s.Teams.NameMaxLength >= 1 && s.Teams.NameMaxLength <= maxNameLength,
 		"teams.name_max_length must be 1-%d (the database's limit)", maxNameLength)
 	check(s.Teams.CodeAttempts >= 1, "teams.code_attempts must be at least 1")
-	check(s.Game.ScanWindow.Duration > 0, "game.scan_window must be positive")
-	check(s.Game.ScanGrace.Duration >= 0, "game.scan_grace must not be negative")
-	check(s.Game.MaxPatternPoints >= 1 && s.Game.MaxPatternPoints <= s.Teams.Size,
-		"game.max_pattern_points must be 1-teams.size: each point needs a different member")
+	check(s.Game.MaxPatternPoints >= 1 && s.Game.MaxPatternPoints <= MaxPatternPoints,
+		"game.max_pattern_points must be 1-%d", MaxPatternPoints)
 	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")
 	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
 	check(s.Spell.Walkability >= 1.0, "spell.walkability must be at least 1.0")

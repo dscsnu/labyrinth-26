@@ -255,26 +255,22 @@ paths:
     post:
       tags: [teams]
       summary: Start the game (leader only)
-      description: Needs exactly `teams.size` (6) members, every non-leader ready. `LOBBY` → `IN_GAME`; the roster is then frozen. Every member's event stream gets the `IN_GAME` `team`, then the team's empty `team_state`.
+      description: Any size from 1 to `teams.size` (6) may start, once every non-leader is ready. `LOBBY` → `IN_GAME`; the roster is then frozen. Every member's event stream gets the `IN_GAME` `team`, then the team's empty `team_state`.
       responses:
         "200": { $ref: "#/components/responses/Team" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
-        "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`, `team_not_full`, `not_all_ready`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`, `not_all_ready`" }
 
   /api/game/shapes:
     get:
       tags: [game]
-      summary: Pattern types to pick, and the timing rules
-      description: |
-        The shapes ("types" on the client) a team can select, and the countdown rules. The client counts down
-        to the stack's bottom `scanned_at` + `scan_window_ms`, on the server's clock as estimated from the
-        stream's `hello`, and sends nothing after; the server allows `scan_window_ms + scan_grace_ms`, so the
-        grace absorbs network latency.
+      summary: Pattern types to pick
+      description: The shapes ("types" on the client) a team can select. There's no time limit, so no timing rules.
       responses:
         "200":
-          description: Shapes and rules.
+          description: Shapes.
           content:
             application/json:
               schema:
@@ -293,11 +289,34 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
 
+  /api/teams/me/casts:
+    get:
+      tags: [game]
+      summary: Your team's cast log
+      description: >-
+        Every pattern your team has completed, repeats included (`already_completed`), newest first. Read from
+        memory (the `team_cast` table, loaded at startup). Not pushed on the stream: `team_state.last_cast`
+        carries each new cast, so a client loads this once and prepends each new `last_cast` it sees.
+      responses:
+        "200":
+          description: The cast log, newest first; empty before the first cast.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: array
+                        items: { $ref: "#/components/schemas/Cast" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
+
   /api/teams/me/state/selection:
     put:
       tags: [game]
       summary: Select a pattern type
-      description: Any member may select. **Always purges the team's scan stack**, reselecting the same type included.
+      description: Any member may select. **Always purges the team's scan stack**, reselecting the same type included, so reselecting is how a team restarts a poisoned attempt.
       requestBody:
         required: true
         content:
@@ -329,13 +348,13 @@ paths:
       tags: [game]
       summary: Scan a waypoint
       description: |
-        Checked against the stack's live scans (correct scans at most `game.scan_window` + `game.scan_grace`, 65 s,
-        old; wrong scans never age out). Rejected **without being pushed** if the waypoint is already in the stack
-        (`waypoint_already_scanned`, a retry included) or the member already has a scan in it
-        (`member_already_scanned`). A scan whose waypoint isn't part of the selected type's patterns is still
-        pushed: it occupies the member's one scan and its waypoint slot, and the selection can no longer complete
-        (reselect to purge it). Once the stack is exactly a pattern of the selected type, it completes (a cast):
-        the stack and selection are purged and `last_cast` is set.
+        No time limit, and any member may scan any number of the pattern's waypoints. Rejected **without being
+        pushed** if no type is selected (`no_shape_selected`), the attempt is poisoned (`selection_poisoned`:
+        reselect to restart), or the waypoint is already in the stack (`waypoint_already_scanned`, a retry
+        included). A scan whose waypoint, with the stack, can't be part of any pattern of the selected type is
+        pushed **marked `wrong`**, with outcome `wrong_scan`: the attempt is poisoned (`poisoned: true`) until
+        someone reselects. Once the stack is exactly a pattern of the selected type, it completes (a cast,
+        logged in `team_cast`): the stack and selection are purged and `last_cast` is set.
 
         ⚠ Takes the raw waypoint ID; to be replaced by QR verification.
       requestBody:
@@ -363,7 +382,7 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
         "409":
           $ref: "#/components/responses/Error"
-          description: "Codes: `not_in_game`, `no_shape_selected`, `waypoint_already_scanned`, `member_already_scanned`"
+          description: "Codes: `not_in_game`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`"
 
   /api/events:
     get:
@@ -386,10 +405,9 @@ paths:
         current members, or to every stream.
 
         `team_state` is published to every member when the leader starts (the empty state, right after the
-        `IN_GAME` `team`), after every accepted selection, clear, scan and cast, and also
-        **by the server when a correct scan goes stale** (`game.scan_window` + `game.scan_grace`, 65 s, after
-        `scanned_at`), with nobody acting: the stack shrinks on every screen without a request. It carries
-        `last_cast`, the team's newest cast. Rejections and no-ops publish nothing. The full reference (every
+        `IN_GAME` `team`), and after every accepted selection, clear, scan (wrong ones included) and cast.
+        Nothing changes with time alone. It carries `last_cast`, the team's newest cast (the full log is
+        `GET /api/teams/me/casts`). Rejections and no-ops publish nothing. The full reference (every
         trigger, ordering, heartbeat, reconnection, and what clients must do) is
         `backend/internal/server/README.md`, "The event stream".
 
@@ -413,7 +431,7 @@ paths:
         data: {"id":"482913","name":"Scanners",…}
 
         event: team_state
-        data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[]}
+        data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[],"poisoned":false}
 
         : ping
         ```
@@ -475,10 +493,9 @@ components:
       type: object
       description: |
         The first event on every stream, and the canonical clock for clients. On each one, so on every
-        connect, a client re-measures its offset: server_time minus its own monotonic clock. Client
-        countdowns are deadlines in server time computed from state timestamps (the scan countdown is the
-        stack's bottom `scanned_at` + `scan_window_ms`). The server owns time and publishes time-driven
-        changes itself; clients never decide state from time. Carries nothing else.
+        connect, a client re-measures its offset: server_time minus its own monotonic clock. Anything a
+        client shows relative to now ("scanned 2 min ago", a future countdown) uses it, so every phone agrees.
+        The game has no time limit; clients never decide state from time. Carries nothing else.
       required: [server_time]
       properties:
         server_time: { type: string, format: date-time, description: The server's clock when the stream opened, UTC. }
@@ -542,14 +559,12 @@ components:
 
     Game:
       type: object
-      required: [shapes, scan_window_ms, scan_grace_ms, max_pattern_points]
+      required: [shapes, max_pattern_points]
       properties:
         shapes:
           type: array
           items: { $ref: "#/components/schemas/GameShape" }
-        scan_window_ms: { type: integer, description: "game.scan_window: the client's countdown.", example: 60000 }
-        scan_grace_ms: { type: integer, description: "game.scan_grace: server-side latency tolerance.", example: 5000 }
-        max_pattern_points: { type: integer, example: 6 }
+        max_pattern_points: { type: integer, description: "game.max_pattern_points: the most waypoints in any pattern.", example: 6 }
     GameShape:
       type: object
       required: [id, name, patterns, points, damage]
@@ -568,7 +583,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
@@ -590,16 +605,20 @@ components:
         last_cast:
           description: >-
             The team's most recent cast (completed pattern), or null if it has none (casts before migration 0007
-            aren't logged). Kept until the next cast: a new selection or a clear doesn't remove it.
+            aren't logged). Kept until the next cast: a new selection or a clear doesn't remove it. The full log
+            is `GET /api/teams/me/casts`.
           oneOf:
             - type: "null"
             - $ref: "#/components/schemas/Cast"
         stack:
           type: array
           description: >-
-            Live scans toward the selected type, bottom (oldest) first. Stale correct scans are left out; wrong scans
-            (ones that didn't fit the type) never go stale and are included, with nothing marking them as wrong.
+            The attempt's scans, bottom (oldest) first, until it casts or the team selects again. At most one is
+            `wrong`, and it's always the top.
           items: { $ref: "#/components/schemas/StackScan" }
+        poisoned:
+          type: boolean
+          description: A scan in the stack is wrong; scans are refused (`selection_poisoned`) until a reselect.
     Cast:
       type: object
       required: [pattern, shape, cast_by, cast_at, already_completed, damage]
@@ -612,18 +631,21 @@ components:
         damage: { type: integer, description: What the cast spell deals., example: 107 }
     StackScan:
       type: object
-      required: [waypoint_id, user_id, scanned_at, expires_at]
+      required: [waypoint_id, user_id, scanned_at, wrong]
       properties:
         waypoint_id: { type: string, example: "1001" }
         user_id: { type: string, format: uuid }
         scanned_at: { type: string, format: date-time }
-        expires_at: { type: string, format: date-time, description: "scanned_at + game.scan_window + game.scan_grace: when a correct scan goes stale. Just after it, the server publishes a team_state without the scan. A wrong scan stays in the stack past it, until the team selects again." }
+        wrong: { type: boolean, description: "The waypoint, with the scans below it, can't be part of any pattern of the selected type: it poisons the attempt." }
 
     ScanResult:
       type: object
       required: [outcome, state]
       properties:
-        outcome: { type: string, enum: [scan_added, pattern_completed] }
+        outcome:
+          type: string
+          enum: [scan_added, wrong_scan, pattern_completed]
+          description: "`wrong_scan`: pushed, but it doesn't match any pattern of the selected type; tell the player and offer a restart."
         pattern: { type: array, items: { type: string }, description: Set on pattern_completed., example: ["1001", "1002", "1007", "1008"] }
         already_completed: { type: boolean, description: The pattern had been completed before, so progress didn't grow. }
         state: { $ref: "#/components/schemas/TeamState" }

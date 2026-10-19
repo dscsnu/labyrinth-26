@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,7 +22,8 @@ func (e *env) startedTeam(prefix string) []player {
 
 // TestSelectAndScanRoutes walks the team state routes over HTTP with every
 // error code: selecting, the body size limit, scanning a square with distinct
-// members, rejected rescans and wrong scans, and clearing.
+// members, one member scanning several waypoints, rejected rescans, a reported
+// wrong scan poisoning the attempt until a reselect, and clearing.
 func TestSelectAndScanRoutes(t *testing.T) {
 	e := setup(t)
 	if err := e.db.SeedDev2025(context.Background()); err != nil {
@@ -67,8 +69,7 @@ func TestSelectAndScanRoutes(t *testing.T) {
 	}
 	expect(t, "rescan", scan(ps[0], "1001"), http.StatusConflict, "waypoint_already_scanned")
 	expect(t, "same waypoint", scan(ps[1], "1001"), http.StatusConflict, "waypoint_already_scanned")
-	expect(t, "same member", scan(ps[0], "1002"), http.StatusConflict, "member_already_scanned")
-	expect(t, "scan 2", scan(ps[1], "1002"), http.StatusOK, "")
+	expect(t, "same member, another waypoint", scan(ps[0], "1002"), http.StatusOK, "")
 	expect(t, "scan 3", scan(ps[2], "1007"), http.StatusOK, "")
 	r = scan(ps[3], "1008")
 	expect(t, "scan 4", r, http.StatusOK, "")
@@ -89,20 +90,62 @@ func TestSelectAndScanRoutes(t *testing.T) {
 		t.Fatalf("after clear: %v", r.payload)
 	}
 
-	// A wrong scan is accepted (not rejected): it's pushed and locks the
-	// member, and it poisons the selection.
+	// A wrong scan is pushed and reported (wrong_scan, marked wrong, the
+	// attempt poisoned); every later scan is refused until a reselect.
 	expect(t, "reselect", sel(ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
 	r = scan(ps[0], "1012")
-	expect(t, "wrong scan accepted", r, http.StatusOK, "")
-	if r.payload["outcome"] != "scan_added" {
+	expect(t, "wrong scan", r, http.StatusOK, "")
+	st := r.payload["state"].(map[string]any)
+	if r.payload["outcome"] != "wrong_scan" || st["poisoned"] != true || st["stack"].([]any)[0].(map[string]any)["wrong"] != true {
 		t.Fatalf("wrong scan: %v", r.payload)
 	}
-	expect(t, "wrong member locked", scan(ps[0], "1001"), http.StatusConflict, "member_already_scanned")
+	expect(t, "poisoned attempt", scan(ps[1], "1001"), http.StatusConflict, "selection_poisoned")
+	expect(t, "reselect clears it", sel(ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
+	expect(t, "scan after reselect", scan(ps[1], "1001"), http.StatusOK, "")
+}
+
+// TestCastLogRoute checks GET /api/teams/me/casts: 404 without a team, an
+// empty list before any cast, then every cast newest first, repeats marked.
+func TestCastLogRoute(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	expect(t, "no team", e.call("GET", "/api/teams/me/casts", e.newPlayer("x"), nil), http.StatusNotFound, "not_in_team")
+
+	ps := e.startedTeam("c")
+	casts := func() []any {
+		req, _ := http.NewRequest("GET", e.backend.URL+"/api/teams/me/casts", nil)
+		req.Header.Set("Authorization", "Bearer "+ps[0].token)
+		res := e.do(req)
+		var env struct {
+			Payload []any `json:"payload"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&env); err != nil || res.StatusCode != http.StatusOK {
+			t.Fatalf("casts: %d %v", res.StatusCode, err)
+		}
+		return env.Payload
+	}
+	if got := casts(); len(got) != 0 {
+		t.Fatalf("before any cast: %v", got)
+	}
+	for range 2 {
+		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
+		for _, w := range []string{"1001", "1002", "1007", "1008"} {
+			expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"waypoint_id": w}), http.StatusOK, "")
+		}
+	}
+	got := casts()
+	if len(got) != 2 || got[0].(map[string]any)["already_completed"] != true || got[1].(map[string]any)["already_completed"] != false ||
+		got[0].(map[string]any)["shape"] != "square" || got[0].(map[string]any)["damage"].(float64) <= 0 {
+		t.Fatalf("cast log: %v", got)
+	}
 }
 
 // TestGameShapes checks GET /api/game/shapes: it needs a token, lists the
-// seed's shapes with their pattern counts and sizes, and carries the timing
-// rules from config.toml.
+// seed's shapes with their pattern counts, sizes and damage ranges, and
+// carries max_pattern_points (and no timing rules: there's no time limit).
 func TestGameShapes(t *testing.T) {
 	e := setup(t)
 	if err := e.db.SeedDev2025(context.Background()); err != nil {
@@ -114,9 +157,7 @@ func TestGameShapes(t *testing.T) {
 	r := e.call("GET", "/api/game/shapes", e.newPlayer("viewer"), nil)
 	expect(t, "shapes", r, http.StatusOK, "")
 	game := e.cfg.Settings.Game
-	if r.payload["scan_window_ms"] != float64(game.ScanWindow.Milliseconds()) ||
-		r.payload["scan_grace_ms"] != float64(game.ScanGrace.Milliseconds()) ||
-		r.payload["max_pattern_points"] != float64(game.MaxPatternPoints) {
+	if _, ok := r.payload["scan_window_ms"]; ok || r.payload["max_pattern_points"] != float64(game.MaxPatternPoints) {
 		t.Fatalf("rules: %v", r.payload)
 	}
 	shapes := r.payload["shapes"].([]any)

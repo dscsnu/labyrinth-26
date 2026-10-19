@@ -17,8 +17,6 @@ size = 6
 name_max_length = 32
 code_attempts = 10
 [game]
-scan_window = "1m"
-scan_grace = "5s"
 max_pattern_points = 6
 [spell]
 per_point = 15
@@ -71,7 +69,7 @@ func TestLoadSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Teams.Size != 6 || s.Game.ScanWindow.Duration != time.Minute || s.Game.ScanGrace.Duration != 5*time.Second || s.Game.MaxPatternPoints != 6 ||
+	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 ||
 		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
 		t.Fatalf("decoded %+v", s)
@@ -85,19 +83,17 @@ func TestLoadSettingsRejects(t *testing.T) {
 	cases := map[string]struct{ from, to, wantInErr string }{
 		"unknown key":                       {"size = 6", "size = 6\nsizee = 7", "unknown key"},
 		"missing value":                     {"heartbeat = \"25s\"\n", "", "live.heartbeat"},
-		"bad duration":                      {`"1m"`, `"a minute"`, "scan_window"},
-		"negative grace":                    {`scan_grace = "5s"`, `scan_grace = "-5s"`, "scan_grace"},
-		"missing grace (zero is valid)":     {"scan_grace = \"5s\"\n", "", "missing key game.scan_grace"},
+		"bad duration":                      {`heartbeat = "25s"`, `heartbeat = "a while"`, "heartbeat"},
+		"missing per_100m (zero is valid)":  {"per_100m = 2\n", "", "missing key spell.per_100m"},
 		"state ttl under a second":          {`oauth_state_ttl = "10m"`, `oauth_state_ttl = "500ms"`, "oauth_state_ttl"},
 		"read timeout under header timeout": {`read_timeout = "30s"`, `read_timeout = "1s"`, "read_timeout"},
 		"zero body limit":                   {"max_body_bytes = 1048576", "max_body_bytes = 0", "max_body_bytes"},
 		"team too big":                      {"size = 6", "size = 17", "teams.size"},
 		"name longer than the database":     {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
-		"more pattern points than members":  {"max_pattern_points = 6", "max_pattern_points = 7", "max_pattern_points"},
+		"pattern bigger than the stack":     {"max_pattern_points = 6", "max_pattern_points = 16", "max_pattern_points"},
 		"zero per_point":                    {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},
 		"negative per_100m":                 {"per_100m = 2", "per_100m = -1", "spell.per_100m must not be negative"},
 		"walkability under 1.0":             {"walkability = 1.5", "walkability = 0.5", "spell.walkability must be at least 1.0"},
-		"zero window":                       {`scan_window = "1m"`, `scan_window = "0s"`, "scan_window"},
 		"zero code attempts":                {"code_attempts = 10", "code_attempts = 0", "teams.code_attempts must be at least 1"},
 		"zero token ttl":                    {`token_ttl = "12h"`, `token_ttl = "0s"`, "auth.token_ttl must be positive"},
 		"zero login code ttl":               {`login_code_ttl = "2m"`, `login_code_ttl = "0s"`, "auth.login_code_ttl must be positive"},

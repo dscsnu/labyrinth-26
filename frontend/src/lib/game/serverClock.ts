@@ -2,15 +2,13 @@
  * The client's estimate of the server's clock: the one way the frontend
  * measures time against the game. Every event stream opens with
  * `hello {server_time}`; on each one, the offset between the server's clock
- * and this device's is re-measured, so every countdown and "how long ago"
- * uses server time and teammates' phones agree however wrong their own
- * clocks are.
+ * and this device's is re-measured, so every "how long ago" uses server time
+ * and teammates' phones agree however wrong their own clocks are. (The game
+ * has no time limit; time is only displayed.)
  *
  * Accuracy: hello reaches the device one network delay after the server
  * stamped it, so the estimate runs behind the server by that delay, never
- * ahead. Countdowns therefore end at most one delay late, which the server's
- * scan_grace covers (backend/internal/teamstate/README.md, "The client
- * countdown and latency").
+ * ahead.
  *
  * Until the first hello, the offset is 0 (the device's own clock).
  */

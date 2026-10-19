@@ -122,8 +122,6 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `teams.size` | 6 | `teams.Rules.Size` |
 | `teams.name_max_length` | 32 | `teams.Rules.NameMaxLength` |
 | `teams.code_attempts` | 10 | `teams.Rules.CodeAttempts` |
-| `game.scan_window` | 1 m | `teamstate.Rules.ScanWindow` |
-| `game.scan_grace` | 5 s | `teamstate.Rules.ScanGrace` |
 | `game.max_pattern_points` | 6 | `atlas.Rules.MaxPatternPoints` and `teamstate.Rules.MaxPatternPoints` |
 | `auth.token_ttl` | 12 h | `auth.NewTokens` |
 | `auth.login_code_ttl` | 2 m | `auth.NewLoginCodes` |
@@ -226,7 +224,7 @@ event: team␤
 data: {"id":"482913","name":"Scanners","leader_id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","status":"LOBBY","created_at":"2026-10-17T11:50:00Z","started_at":null,"members":[{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","name":"Asha","avatar_url":null,"is_ready":false,"joined_at":"2026-10-17T11:50:00Z"},{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02","name":"Bilal","avatar_url":"https://example.com/b.png","is_ready":true,"joined_at":"2026-10-17T11:51:30Z"}]}␤
 ␤
 event: team_state␤
-data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[]}␤
+data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[],"poisoned":false}␤
 ␤
 : ping␤
 ␤
@@ -265,7 +263,7 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
 
 **`no_team`**: always the data `{}`. The user is in no team: on connect, after leaving, or when their team was deleted.
 
-**`team_state`**, the same team after it cast the square `1001 1002 1007 1008` at 12:00:12 (Divya's scan), selected `square` again at 12:05:00 (Farah), and scanned `1001` (Asha, 12:05:10) and `1002` (Bilal, 12:05:20); limit **65 s** (`game.scan_window` + `game.scan_grace`):
+**`team_state`**, the same team after it cast the square `1001 1002 1007 1008` at 12:00:12 (Divya's scan), selected `square` again at 12:05:00 (Farah), and scanned `1001` (Asha, 12:05:10), `1002` (Asha again, 12:05:20: one member may scan any number) and `1004` (Bilal, 12:09:40), which fits no square with the other two:
 ```json
 {
   "team_id": "482913",
@@ -282,9 +280,11 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     "damage": 107
   },
   "stack": [
-    {"waypoint_id": "1001", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:10Z", "expires_at": "2026-10-17T12:06:15Z"},
-    {"waypoint_id": "1002", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "scanned_at": "2026-10-17T12:05:20Z", "expires_at": "2026-10-17T12:06:25Z"}
-  ]
+    {"waypoint_id": "1001", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:10Z", "wrong": false},
+    {"waypoint_id": "1002", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:20Z", "wrong": false},
+    {"waypoint_id": "1004", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "scanned_at": "2026-10-17T12:09:40Z", "wrong": true}
+  ],
+  "poisoned": true
 }
 ```
 | Field | Meaning |
@@ -294,9 +294,10 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
 | `patterns` | every completed pattern, each as its sorted waypoint IDs |
 | `shapes` | every shape with at least one completed pattern, in atlas index order |
 | `selection` | the shape being attempted, who selected it and when; `null` if none |
-| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, `already_completed` (the team had cast that pattern before, so progress didn't grow), and `damage` (what the cast spell deals). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`) |
-| `stack` | the live scans, bottom (oldest) first. Stale correct scans are left out; wrong scans are included with nothing marking them |
-| `stack[].expires_at` | `scanned_at` + **65 s**: when that correct scan goes stale. At that moment the server publishes a new `team_state` without it (below) |
+| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, `already_completed` (the team had cast that pattern before, so progress didn't grow), and `damage` (what the cast spell deals). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`). The full log is `GET /api/teams/me/casts`, which is never pushed: a client loads it once and prepends each new `last_cast` |
+| `stack` | the attempt's scans, bottom (oldest) first, until it casts or the team selects again. No time limit: nothing leaves it with time |
+| `stack[].wrong` | the scan's waypoint, with the scans below it, can't be part of any pattern of the selected shape. At most one, always the top |
+| `poisoned` | a scan in `stack` is `wrong`: further scans are refused with `409 selection_poisoned` until someone selects again, which purges the stack |
 
 Every field, rule and case: `internal/teamstate/README.md`, "API".
 
@@ -321,21 +322,21 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 | teamstate `PUT /api/teams/me/state/selection` (select, reselect) | `team_state` (stack purged) | members |
 | teamstate `DELETE /api/teams/me/state/selection`, something selected | `team_state` (selection `null`, stack `[]`) | members |
 | teamstate `DELETE …/selection`, nothing selected | nothing (no-op) | |
-| teamstate `POST /api/teams/me/state/scans`, `scan_added` (wrong scans included) | `team_state` | members |
+| teamstate `POST /api/teams/me/state/scans`, `scan_added` | `team_state` | members |
+| teamstate `POST …/scans`, `wrong_scan` | `team_state` (the scan marked `wrong`, `poisoned` `true`) | members |
 | teamstate `POST …/scans`, `pattern_completed` (a cast) | `team_state` (selection `null`, stack `[]`, new `last_cast`) | members |
-| teamstate expiry timer: a correct scan is now stale (`expire`) | `team_state` (stack without it) | members |
-| teamstate expiry timer, nothing stale (a write rebuilt the stack first) | nothing | |
 | teamstate write fails to persist (`reconcile`) | `team_state` reloaded from Postgres (nothing if the reload fails too) | members |
 | Any rejection (`4xx`) or `500` before persisting | nothing | |
+
+Nothing is published because time passed: there's no time limit, so every `team_state` follows a request (or a start, or a reconcile).
 
 The HTTP response to a write carries the same JSON as its event (`ScanResult.state` for a scan), but on a different connection: a client may see either first.
 
 ### Ordering
 - **One stream is FIFO.** `Hub.Send` and `Hub.Broadcast` put events on the subscription's one channel, and `Serve` writes them in that order.
 - **Game-wide events in order.** A game use case broadcasts while holding the entry lock of the state it shows, so its events reach every stream in the order they were applied. `Broadcast` takes the hub's shards one at a time, so two broadcasts from different locks may interleave differently on different streams.
-- **Per team, in order.** Each use case publishes while holding the team's entry lock (`teams`' entry, or `teamstate`'s entry for writes, `expire` and `reconcile`), so one team's `team` events arrive in the order they were applied, and so do its `team_state` events.
+- **Per team, in order.** Each use case publishes while holding the team's entry lock (`teams`' entry, or `teamstate`'s entry for writes and `reconcile`), so one team's `team` events arrive in the order they were applied, and so do its `team_state` events.
 - **No order between `team` and `team_state`,** with one exception. They're published under different locks; a `team` and a `team_state` from changes at the same moment may arrive either way round. Each is still the full truth for its part. **The exception is a start:** teams calls the start hook after publishing the `IN_GAME` `team`, still holding the team's entry lock, so on every member's stream the start's `team` comes before its `team_state` (`TestStartPublishesTeamState`).
-- **Expiry is ordered with writes.** `expire` takes the same entry lock as a scan, and re-checks the stack under it, so a stale-scan event never arrives after a later write that already dropped the scan.
 
 **Why subscribe first.** A change published between reading the snapshot and subscribing would be lost. Subscribing first means any change after the snapshot is also queued. The cost: a change that lands between subscribing and reading the snapshot is delivered **twice** (once inside the snapshot, once queued). Events are full snapshots, so a repeat is harmless.
 
@@ -356,12 +357,11 @@ A client that stops reading (a phone that lost signal without closing the connec
 
 ### Shutdown and restart
 - On shutdown, `srv.Shutdown` runs `Hub.Close`, which closes every subscription: each `Serve` returns and its response ends. New subscriptions are refused (closed at once).
-- After a restart, `Build` reloads memory, and teamstate re-arms every team's expiry timer. A stack that went stale while the backend was down is dropped at once, before anyone connects. Clients reconnect and get snapshots of the reloaded state.
+- After a restart, `Build` reloads memory (every team's stack, wrong scans included, and its whole cast log), so the state is exactly what it was. Clients reconnect and get snapshots of the reloaded state.
 
 ### Never sent
-- Anything for a **rejection** (every `4xx`) or a **no-op** (ready unchanged, clear with nothing selected, a sign-in that changes nothing, an expiry timer that finds nothing stale).
-- Whether a scan was **wrong**: `team_state` has no such flag; wrong scans look like correct ones.
-- **Stale** correct scans: left out of `stack`.
+- Anything for a **rejection** (every `4xx`) or a **no-op** (ready unchanged, clear with nothing selected, a sign-in that changes nothing).
+- The **cast log**: `team_state` carries only `last_cast`; the log is `GET /api/teams/me/casts`.
 - **Diffs**, event IDs, or one-off notifications: a "notification" (a quiz opening) is the client seeing a snapshot change.
 - Another team's state, or any member's email.
 - `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load. Static data never goes in events (AGENTS.md §9).
@@ -371,8 +371,8 @@ What a client must do to use the stream as designed. The frontend does steps 2�
 
 1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect.
 2. **Register events by name.** Keep a map from event name to its zod schema (`hello`, `team`, `no_team`, `team_state`, and each game-wide event as it's added), and keep the newest parsed snapshot of each. `no_team` clears both `team` and `team_state`. A game-wide event whose data is `null` means nothing is active.
-3. **Derive notifications from transitions.** Compare each snapshot with the one before it. Game-wide: a new `id`, or a status change. Spells, from `team_state`: `selection` set (a spell started), `stack` growing (another member scanned; `stack[].user_id` says who), `last_cast.cast_at` changing (a spell finished).
-4. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`; `/play` already does this). On every `hello`: offset = `Date.parse(server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead, and the phone's own clock error cancels out. Every countdown is a deadline in server time from a state timestamp: the scan countdown is the stack's bottom `scanned_at` + **1 m** (`game.scan_window`) (`frontend/src/lib/game/scanGate.ts`; a quiz's `closes_at` would work the same way). Countdowns never change state: the server publishes the change itself when the time comes.
+3. **Derive notifications from transitions.** Compare each snapshot with the one before it. Game-wide: a new `id`, or a status change. Spells, from `team_state`: `selection` set (a spell started), `stack` growing (another member scanned; `stack[].user_id` says who), `poisoned` turning `true` (a scan didn't fit: offer a restart), `last_cast.cast_at` changing (a spell finished; prepend it to the cast log).
+4. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`; `/play` already does this). On every `hello`: offset = `Date.parse(server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead, and the phone's own clock error cancels out. The game has no time limit; `/play` uses the clock for "scanned 2 min ago" labels. A future countdown (a quiz's `closes_at`) would be a deadline in server time from a state timestamp, and would never change state itself: the server would publish the change when the time comes.
 5. **Open `/api/events` on the frontend's origin.** In production the shared domain's reverse proxy routes it to the backend, which reads the `labyrinth_token` cookie; in dev, Vite's proxy does (`frontend/vite.config.ts`). Done: `/team` and `/play` do this.
 6. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots. The responses to writes (`ScanResult.state`) may arrive before or after the matching event; both are full snapshots.
 
@@ -391,7 +391,7 @@ Routes registered here but owned by use cases (see their READMEs):
 | `auth` | `GET /auth/google/login`, `GET /auth/google/callback`, `POST /auth/token` | none |
 | `user` | `GET /api/me` (`401 user_not_found` if the token's user was deleted) | Bearer |
 | `teams` | `GET /api/teams/me`, `POST /api/teams`, `POST /api/teams/join`, `POST /api/teams/leave`, `PUT /api/teams/me/ready`, `POST /api/teams/me/start` | Bearer |
-| `teamstate` | `GET /api/game/shapes`, `GET /api/teams/me/state`, `PUT` and `DELETE /api/teams/me/state/selection`, `POST /api/teams/me/state/scans` | Bearer |
+| `teamstate` | `GET /api/game/shapes`, `GET /api/teams/me/state`, `GET /api/teams/me/casts` (the cast log, newest first), `PUT` and `DELETE /api/teams/me/state/selection`, `POST /api/teams/me/state/scans` | Bearer |
 
 `/healthz` is the only route that touches Postgres on every call. `streams` counts every open subscription (all users, all tabs).
 
@@ -432,7 +432,7 @@ Any other path or method:
 | User in no team | `hello`, then `no_team` |
 | User in a team | `hello`, then `team`, then `team_state` |
 | A change to the user's team or state | One event per change, on every one of the user's streams (see [What publishes what](#what-publishes-what)) |
-| A correct scan in the team's stack passes **65 s** (`game.scan_window` + `game.scan_grace`) with nobody acting | `team_state` without it, at the first microsecond it's stale (`TestSimStaleScanReachesEveryone`) |
+| Time passes with nobody acting | Nothing but `: ping`: there's no time limit |
 | A rejected or no-op request | Nothing |
 | Several tabs | Each tab is its own subscription; each gets every event |
 | Client disconnects | `Serve` returns on the request context; subscription removed; `/healthz` count drops |
@@ -453,7 +453,6 @@ Any other path or method:
 - **Requests run concurrently.** All shared state is in the stores (their own locks) and the hub (**64** shards, `live.hub_shards`, each with its own mutex: a `Send` locks one, a `Broadcast` each in turn). `App` itself is read-only after `Build`.
 - **Snapshots are read lock-free** from the stores. `team` and `team_state` are read separately, so a change between the two reads can make them disagree briefly; the change's own events follow and correct it.
 - **The sweep goroutine** only touches Postgres (`auth_code`), never memory.
-- **teamstate's expiry timers** (`time.AfterFunc`, at most one per team) run in their own goroutines and take the team's entry lock like a write; see `internal/teamstate/README.md`, "Concurrency and locking".
 - **One process per database** is enforced by the instance lock, which the stores' "memory is the truth" design relies on. Its watcher goroutine checks it every **5 s** (`storage.instance_lock_check`) on the lock's own connection.
 - **The sign-in hook** runs in the callback's goroutine and takes the user's team entry lock like any team write.
 - **The start hook** runs inside `teams.Start`, holding the team's teams entry lock, and takes the team's teamstate entry lock (`PublishTeam`). So the lock order across the two use cases is teams entry → teamstate entry. teamstate never takes a teams entry lock (it reads teams through `ByID`/`ForUser`, which take only teams' index lock, briefly), so this can't deadlock.
@@ -565,21 +564,19 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSignInRefreshesTeamProfile` | `tests/auth_test.go` | a team creator signs in again with a new name and no picture: `GET /api/teams/me` shows the new name and the old avatar, with no restart |
 | `TestEmailInUse` | `tests/auth_test.go` | another account already has `player@snu.edu.in`: the callback lands on `reason=email_in_use` |
 | `TestStateAndAccessTokensNotInterchangeable` | `tests/auth_test.go` | the OAuth state cookie used as a bearer token is `401 invalid_token`; an access token used as the state cookie lands on `reason=state_invalid` |
-| `TestTeamLifecycle` | `tests/teams_test.go` | every teams rule and code on the way from create to start: `401`, `not_in_team`, name trimming, `already_in_team`, `team_full`, `team_not_found`, `invalid_team_id`, `leader_cannot_ready`, `invalid_body`, `not_leader`, `not_all_ready`, `team_not_full`, rejoin resets ready, `team_locked` for start/leave/ready/join in game; members carry no email |
+| `TestTeamLifecycle` | `tests/teams_test.go` | every teams rule and code on the way from create to start: `401`, `not_in_team`, name trimming, `already_in_team`, `team_full`, `team_not_found`, `invalid_team_id`, `leader_cannot_ready`, `invalid_body`, `not_leader`, `not_all_ready`, rejoin resets ready, `team_locked` for start/leave/ready/join in game; members carry no email |
 | `TestLeaderLeaving` | `tests/teams_test.go` | leadership passes to the longest-standing member; the new leader can't ready; the last one out deletes the team |
 | `TestTeamNameValidation` | `tests/teams_test.go` | empty, spaces, `teams.name_max_length` + 1 characters (33) and a newline are `400`; `teams.name_max_length` × `é` and punctuation are `201` |
 | `TestConcurrentJoinsRespectTeamSize` | `tests/teams_test.go` | 2 × (`teams.size` − 1) = 10 concurrent joins into a team of 1: exactly `teams.size − 1` succeed, the rest `team_full` |
-| `TestConcurrentStartAndLeave` | `tests/teams_test.go` | 10 rounds of start racing a leave: either started with `teams.size` (6) and `team_locked`, or left with `teams.size` − 1 and `team_not_full` |
+| `TestConcurrentStartAndLeave` | `tests/teams_test.go` | 10 rounds of start racing a leave: either started with `teams.size` (6) and the leave `team_locked`, or the leave won and the start then started a team of `teams.size` − 1 (any size may start) |
+| `TestStartWithAnySize` | `tests/teams_test.go` | a leader alone starts (`IN_GAME`, 1 member); a team of 3 is `409 not_all_ready` until both non-leaders are ready, then starts. Needs `teams.size` ≥ 3, else the second half skips |
 | `TestUnroutedRequestsUseEnvelope` | `tests/teams_test.go` | `GET /api/nope` with and without a token → `404 not_found`; `DELETE /api/teams` → `405 method_not_allowed` |
-| `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), `member_already_scanned`, `pattern_completed`; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `scan_added` and locking the member; state after; reselect; clear |
-| `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, and `scan_window_ms`, `scan_grace_ms`, `max_pattern_points` equal to `config.toml`'s |
-| `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack, the square completed and no countdown |
-| `TestSimLastScanAtDeadlineWithinGrace` | `tests/simulation_test.go` | the last player at 300 ms each way (0.6 s round trip ≤ the 1 s simulated grace) sends 20 ms before their own deadline (on a `hello`-corrected clock 300 ms behind the server's): `pattern_completed` |
-| `TestSimLatencyBeyondGraceLosesBottomScan` | `tests/simulation_test.go` | the same at 700 ms each way (1.4 s > 1 s): the bottom scan is stale on arrival, `scan_added` |
-| `TestSimGateClosesThenReselectOpens` | `tests/simulation_test.go` | once the deadline passes the client sends nothing (0 requests); a reselect empties the stack, ending every client's countdown, and the square can be scanned |
+| `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), one member scanning a second waypoint (`200`), `pattern_completed`; state after; reselect; clear; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `wrong_scan` with `stack[0].wrong` and `poisoned` `true`, a teammate's next scan `409 selection_poisoned`, and a reselect making scans work again |
+| `TestCastLogRoute` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/teams/me/casts` is `404 not_in_team` without a team, `[]` before any cast; after the same square twice, two casts newest first, the newer `already_completed`, shape `square`, `damage` > 0 |
+| `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, every shape's damage range valid, `max_pattern_points` equal to `config.toml`'s, and no `scan_window_ms` |
+| `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack and the square completed |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
-| `TestSimStaleScanReachesEveryone` | `tests/simulation_test.go` | real time: after one scan, with nobody acting, every player's stream gets a `team_state` with an empty stack once the scan is older than `simWindow` + `simGrace` (3 s), and no countdown runs |
-| `TestSimSkewedClocksShareTheDeadline` | `tests/simulation_test.go` | six phones with clocks off by −9, +7, 0, +4, −3 and +9 s (20 ms each way) re-measure their offset from `hello`: all compute the identical server-time deadline, and the phone 9 s fast lands its last scan 50 ms before its deadline: `pattern_completed` |
+| `TestSimWrongScanReachesEveryone` | `tests/simulation_test.go` | after `1001`, one player scans `1004` (in no square with it) while a teammate scans `1002`: the first gets `wrong_scan`, the other either `200` (it landed first) or `409 selection_poisoned`; every phone sees `poisoned`; a reselect clears it on every phone |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
 | `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
 | `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello`, its `server_time` within a second of now, then `no_team` |
@@ -589,6 +586,6 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 
-**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, its own event stream (each event delivered after the response delay, in order), an offset measured from `hello` delivered one response delay late (`simClient.offset`, a Go copy of `frontend/src/lib/game/serverClock.ts`), an optional phone clock error (`skew`), and `scanGate{window, deadline}`, a Go copy of the frontend's countdown (`frontend/src/lib/game/scanGate.ts`): deadline = the bottom scan's `scanned_at` + `game.scan_window` on the estimated server clock, none for an empty stack, send nothing after it. They shrink `game.scan_window` to 2 s (`simWindow`) and `game.scan_grace` to 1 s (`simGrace`) through `e.cfg.Settings` and `restart`, so each runs in seconds. The bound they check, response delay + request delay ≤ grace, is derived in `internal/teamstate/README.md` ("The client countdown and latency"). They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
+**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, and its own event stream (each event delivered after the response delay, in order). There's no time limit, so they test concurrency and convergence only: scans racing over uneven networks, and every phone ending on the same `team_state`. They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
 
 **Not covered here:** `/healthz` returning `503`, the heartbeat (tests wait at most 3 s; covered in `platform/live`), a slow stream being dropped over HTTP (covered in `platform/live`), `Hub.Close` on shutdown, the `Allow` header's value, and `main.go` itself (subcommands, lock ordering, lost-lock shutdown, sweep loop, timeouts).

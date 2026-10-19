@@ -9,8 +9,8 @@
 # waypoints, 64 shapes and 2048 patterns (see internal/atlas/README.md).
 
 [teams]
-# Players per team: the leader starts only with exactly this many, and no
-# more can join. Allowed: 1 to 16.
+# Most players per team: no more can join. The leader can start with any
+# number from 1 to this, once every other member is ready. Allowed: 1 to 16.
 size = 6
 # Longest team name, in characters. Allowed: 1 to 32 (the database's limit).
 name_max_length = 32
@@ -19,20 +19,10 @@ name_max_length = 32
 code_attempts = 10
 
 [game]
-# A pattern's waypoints must all be scanned within scan_window, from the
-# oldest scan in the team's stack (bottom) to the newest (top). Clients count
-# down this long from the first scan they see. Allowed: more than 0.
-scan_window = "1m"
-# Extra tolerance on scan_window for slow phones and networks: scans spanning
-# up to scan_window + scan_grace still count, and a correct scan goes stale
-# (dropped from the stack) once it is more than scan_window + scan_grace old.
-# A wrong scan (one that didn't fit the selected shape) never goes stale; it
-# stays until the team selects again. Clients
-# don't count it down: it covers the round trip of a scan sent just before
-# their countdown ends. Allowed: 0 or more (the key must still be present).
-scan_grace = "5s"
-# Most waypoints in any pattern, and so the capacity of each team's scan
-# stack. Each waypoint needs a different member. Allowed: 1 to teams.size.
+# Most waypoints in any pattern: content with a bigger one is refused at
+# startup. There's no time limit on an attempt, and one member may scan any
+# number of a pattern's points. Allowed: 1 to 15 (the scan stack is a
+# fixed-size array: a pattern's points plus one wrong scan).
 max_pattern_points = 6
 
 [spell]

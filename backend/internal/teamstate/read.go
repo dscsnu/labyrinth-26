@@ -26,17 +26,35 @@ type State struct {
 	// Stack is the team's accepted scans since it selected its shape: what
 	// completion is checked against.
 	Stack Stack
-	// LastCast is the team's most recent cast, if any. It stays until the
-	// next cast (a new selection doesn't clear it).
-	LastCast Cast
+	// Casts is every pattern the team has completed, repeats included,
+	// oldest first: the cast log (team_cast). A write never appends to the
+	// current snapshot's slice; it builds a new one (copy-on-write), so
+	// snapshots stay immutable.
+	Casts []Cast
+}
+
+// Poisoned reports whether the stack holds a wrong scan: the attempt can't
+// cast, and the team must select again.
+func (st State) Poisoned() bool {
+	for i := range st.Stack.Len() {
+		if st.Stack.At(i).Wrong {
+			return true
+		}
+	}
+	return false
+}
+
+// LastCast returns the team's most recent cast; ok is false if it has none.
+func (st State) LastCast() (c Cast, ok bool) {
+	if len(st.Casts) == 0 {
+		return Cast{}, false
+	}
+	return st.Casts[len(st.Casts)-1], true
 }
 
 // Cast is one completed pattern: the moment a team's stack became exactly a
 // pattern of its selected shape.
 type Cast struct {
-	// Active reports whether there is one; the other fields are zero when
-	// there isn't.
-	Active bool
 	// Pattern is the pattern's index in the atlas.
 	Pattern int
 	// By is the member whose scan completed it.
@@ -69,90 +87,52 @@ type StackScan struct {
 	UserID uuid.UUID
 	// At is when it was scanned.
 	At time.Time
-	// Wrong means the scan didn't fit the selected shape's patterns when it
-	// was made. It still occupies the member's one scan and its waypoint slot,
-	// poisons the selection (the set can never equal a pattern), and never
-	// ages out of the stack. It is internal: View never exposes it.
+	// Wrong means the scan didn't fit the selected shape's patterns (with the
+	// scans before it). It poisons the attempt: nothing more can be scanned
+	// until the team selects again. Shown to players (StackScanView.Wrong).
 	Wrong bool
 }
 
 // Stack is a team's accepted scans since it selected its shape, oldest at the
-// bottom and newest on top: one scan per waypoint and per member, so never
-// more than Cap (config.toml game.max_pattern_points). Correct scans older
-// than the scan limit (window + grace) are stale: Live leaves them out, and
-// Scan drops them before pushing. A wrong scan (one that didn't fit the
-// selected shape) never goes stale and never leaves the stack until the
-// selection is purged.
+// bottom and newest on top: one scan per waypoint (any member may scan any
+// number of them), all within one pattern of the shape, plus at most one
+// wrong scan on top. So it never holds more than Cap = game.max_pattern_points
+// + 1. There's no time limit: scans stay until the attempt casts or the team
+// selects again.
 //
 // It's a value: Push returns a new Stack and leaves the receiver unchanged,
-// so snapshots stay immutable. Storage is a circular buffer, so pushing and
-// dropping the bottom never move the other scans.
+// so snapshots stay immutable.
 type Stack struct {
 	// scans is the storage; only Cap slots are used. Sized for the largest
-	// allowed team, since a pattern can't have more points than members.
-	scans [config.MaxTeamSize]StackScan
-	// bottom is the slot of the oldest scan.
-	bottom int
+	// allowed pattern plus one wrong scan.
+	scans [config.MaxPatternPoints + 1]StackScan
 	// n is how many scans the stack holds, 0…Cap.
 	n int
 	// Cap is the stack's capacity.
 	Cap int
 }
 
-// NewStack returns an empty stack of the given capacity.
-func NewStack(capacity int) Stack { return Stack{Cap: capacity} }
+// NewStack returns an empty stack with room for a pattern of maxPoints
+// waypoints plus one wrong scan.
+func NewStack(maxPoints int) Stack { return Stack{Cap: maxPoints + 1} }
 
-// Len returns how many scans the stack holds, stale ones included.
+// Len returns how many scans the stack holds.
 func (s Stack) Len() int { return s.n }
 
 // At returns the i-th scan from the bottom: At(0) is the oldest, At(Len()-1)
 // the top.
-func (s Stack) At(i int) StackScan { return s.scans[(s.bottom+i)%s.Cap] }
+func (s Stack) At(i int) StackScan { return s.scans[i] }
 
 // Push returns the stack with sc on top. Scan never pushes onto a full stack
-// (the scans always fit one pattern); if it did, the bottom scan would be
-// dropped.
+// (correct scans fit one pattern, and nothing is pushed after a wrong one);
+// Push panics if it's asked to, since that would be a bug.
 func (s Stack) Push(sc StackScan) Stack {
-	if s.n < s.Cap {
-		s.scans[(s.bottom+s.n)%s.Cap] = sc
-		s.n++
-		return s
+	if s.n == s.Cap {
+		panic("teamstate: push onto a full stack")
 	}
-	s.scans[s.bottom] = sc
-	s.bottom = (s.bottom + 1) % s.Cap
+	s.scans[s.n] = sc
+	s.n++
 	return s
-}
-
-// NextExpiry returns the first instant the stack's oldest correct scan is
-// stale: its time plus limit plus one microsecond, since a scan exactly limit
-// old is still live (Live) and times have microsecond precision. ok is false
-// if the stack holds no correct scans; wrong scans never go stale.
-func (s Stack) NextExpiry(limit time.Duration) (at time.Time, ok bool) {
-	for i := range s.n {
-		sc := s.At(i)
-		if sc.Wrong {
-			continue
-		}
-		if exp := sc.At.Add(limit + time.Microsecond); !ok || exp.Before(at) {
-			at, ok = exp, true
-		}
-	}
-	return at, ok
-}
-
-// Live returns the scans no older than limit at now, bottom to top, plus any
-// wrong scan (wrong scans never age out: they stay until the selection is
-// purged). Correct scans are pushed in time order, so their live scans are
-// always the top of the stack; a wrong scan may be older than the ones around
-// it.
-func (s Stack) Live(now time.Time, limit time.Duration) []StackScan {
-	var out []StackScan
-	for i := range s.n {
-		if sc := s.At(i); sc.Wrong || now.Sub(sc.At) <= limit {
-			out = append(out, sc)
-		}
-	}
-	return out
 }
 
 // View is a team's State as the API and live events show it: IDs and
@@ -168,12 +148,15 @@ type View struct {
 	Shapes []string `json:"shapes"`
 	// Selection is the selected shape, or null.
 	Selection *SelectionView `json:"selection"`
-	// LastCast is the team's most recent cast, or null if it has none.
+	// LastCast is the team's most recent cast, or null if it has none. The
+	// full history is GET /api/teams/me/casts.
 	LastCast *CastView `json:"last_cast"`
-	// Stack is the stack's live scans (within window + grace), bottom
-	// (oldest) to top (newest): the ones that can still count toward a
-	// pattern.
+	// Stack is the attempt's scans, bottom (oldest) to top (newest), each
+	// marked wrong if it didn't fit.
 	Stack []StackScanView `json:"stack"`
+	// Poisoned reports that a scan in the stack is wrong: nothing more can be
+	// scanned until the team selects again.
+	Poisoned bool `json:"poisoned"`
 }
 
 // CastView is a Cast as JSON.
@@ -210,9 +193,9 @@ type StackScanView struct {
 	UserID uuid.UUID `json:"user_id"`
 	// ScannedAt is when it was scanned.
 	ScannedAt time.Time `json:"scanned_at"`
-	// ExpiresAt is when this scan goes stale (ScannedAt plus window plus
-	// grace); clients count down to it.
-	ExpiresAt time.Time `json:"expires_at"`
+	// Wrong reports that the scan didn't fit the selected shape (with the
+	// scans before it); it poisons the attempt.
+	Wrong bool `json:"wrong"`
 }
 
 // DamageRange is the minimum and maximum damage across a shape's patterns.
@@ -224,17 +207,11 @@ type DamageRange struct {
 }
 
 // Game is what a client needs before playing, from GET /api/game/shapes: the
-// shapes a team can select and the timing rules its countdown uses. It's the
-// same for everyone and never changes while the backend runs.
+// shapes a team can select. It's the same for everyone and never changes
+// while the backend runs.
 type Game struct {
 	// Shapes are the selectable shapes, in index order.
 	Shapes []GameShape `json:"shapes"`
-	// ScanWindowMS is config.toml game.scan_window in milliseconds: how long
-	// the client lets a team scan after its first accepted scan.
-	ScanWindowMS int64 `json:"scan_window_ms"`
-	// ScanGraceMS is game.scan_grace in milliseconds: extra server-side
-	// tolerance for network latency. Clients don't add it to their countdown.
-	ScanGraceMS int64 `json:"scan_grace_ms"`
 	// MaxPatternPoints is game.max_pattern_points.
 	MaxPatternPoints int `json:"max_pattern_points"`
 }
@@ -253,15 +230,13 @@ type GameShape struct {
 	Damage DamageRange `json:"damage"`
 }
 
-// Game returns the shapes and timing rules for GET /api/game/shapes.
+// Game returns the shapes for GET /api/game/shapes.
 func (s *Store) Game() Game { return s.game }
 
 // newGame builds the Game from the atlas and rules.
 func newGame(a Atlas, r Rules) Game {
 	g := Game{
 		Shapes:           make([]GameShape, a.ShapeCount()),
-		ScanWindowMS:     r.ScanWindow.Milliseconds(),
-		ScanGraceMS:      r.ScanGrace.Milliseconds(),
 		MaxPatternPoints: r.MaxPatternPoints,
 	}
 	for i := range a.ShapeCount() {
@@ -345,11 +320,10 @@ func (s *Store) Snapshot(userID uuid.UUID) (live.Event, bool) {
 }
 
 // view turns a State into IDs and timestamps for the API and live events.
-// Stale correct scans are left out; wrong scans (which never go stale) are
-// included, with no flag distinguishing them.
 func (s *Store) view(teamID string, st State) View {
 	c := s.atlas
-	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{}, Stack: []StackScanView{}}
+	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{},
+		Stack: []StackScanView{}, Poisoned: st.Poisoned()}
 	for _, p := range st.Patterns.Indexes() {
 		v.Patterns = append(v.Patterns, c.WaypointIDs(c.Pattern(p).Waypoints))
 	}
@@ -359,16 +333,38 @@ func (s *Store) view(teamID string, st State) View {
 	if sel := st.Selection; sel.Active {
 		v.Selection = &SelectionView{Shape: c.Shape(sel.Shape).ID, SelectedBy: sel.By, SelectedAt: sel.At.UTC()}
 	}
-	if lc := st.LastCast; lc.Active {
-		p := c.Pattern(lc.Pattern)
-		v.LastCast = &CastView{Pattern: c.WaypointIDs(p.Waypoints), Shape: c.Shape(p.Shape).ID,
-			CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage}
+	if lc, ok := st.LastCast(); ok {
+		cv := s.castView(lc)
+		v.LastCast = &cv
 	}
-	for _, sc := range st.Stack.Live(s.now(), s.rules.Limit()) {
+	for i := range st.Stack.Len() {
+		sc := st.Stack.At(i)
 		v.Stack = append(v.Stack, StackScanView{
-			WaypointID: c.Waypoint(sc.Waypoint).ID, UserID: sc.UserID,
-			ScannedAt: sc.At.UTC(), ExpiresAt: sc.At.Add(s.rules.Limit()).UTC(),
+			WaypointID: c.Waypoint(sc.Waypoint).ID, UserID: sc.UserID, ScannedAt: sc.At.UTC(), Wrong: sc.Wrong,
 		})
 	}
 	return v
+}
+
+// castView turns a Cast into JSON, with its pattern's damage from the atlas.
+func (s *Store) castView(lc Cast) CastView {
+	p := s.atlas.Pattern(lc.Pattern)
+	return CastView{Pattern: s.atlas.WaypointIDs(p.Waypoints), Shape: s.atlas.Shape(p.Shape).ID,
+		CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage}
+}
+
+// CastsForUser returns userID's team's cast log, newest first, for
+// GET /api/teams/me/casts; ErrNotInTeam if they have no team. Read from
+// memory, like every other read.
+func (s *Store) CastsForUser(userID uuid.UUID) ([]CastView, error) {
+	t, err := s.teams.ForUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	st := s.ForTeam(t.ID)
+	out := make([]CastView, 0, len(st.Casts))
+	for i := len(st.Casts) - 1; i >= 0; i-- {
+		out = append(out, s.castView(st.Casts[i]))
+	}
+	return out, nil
 }

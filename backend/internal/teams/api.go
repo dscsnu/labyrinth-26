@@ -55,7 +55,6 @@ var errorCodes = []struct {
 	{ErrTeamLocked, http.StatusConflict, "team_locked"},
 	{ErrNotLeader, http.StatusForbidden, "not_leader"},
 	{ErrLeaderReady, http.StatusConflict, "leader_cannot_ready"},
-	{ErrTeamNotFull, http.StatusConflict, "team_not_full"},
 	{ErrNotAllReady, http.StatusConflict, "not_all_ready"},
 }
 

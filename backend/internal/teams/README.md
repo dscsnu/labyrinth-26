@@ -1,6 +1,6 @@
 # teams
 
-Teams of exactly **6** (`teams.size`) players with a leader, from forming in the lobby to starting the game.
+Teams of up to **6** (`teams.size`) players with a leader, from forming in the lobby to starting the game.
 
 Every number below that comes from `config.toml` is shown with its current value and its key, e.g. **6** (`teams.size`). Change the file, not the code.
 
@@ -27,7 +27,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Team** | Up to **6** (`teams.size`) players, identified by a random 6-digit **code** (`"482913"`) that players type to join. |
 | **Leader** | The creator. Starts the game. Doesn't ready up. If the leader leaves the lobby, the longest-standing member takes over. |
 | **Status** | `LOBBY` (forming) → `IN_GAME` (started; roster frozen) → `FINISHED` (nothing sets it yet). |
-| **Ready** | A non-leader member's "I'm set" flag. The leader can start once all **5** others (`teams.size` − 1) are ready and the team has exactly **6** (`teams.size`). |
+| **Ready** | A non-leader member's "I'm set" flag. The leader can start once every other member is ready, with any number of members from 1 (the leader alone) to **6** (`teams.size`). |
 | **Join order** | Members are kept in the order they joined. It decides who becomes leader next. |
 
 ## The flow
@@ -35,7 +35,7 @@ Every number below that comes from `config.toml` is shown with its current value
 2. **Share the code.** The leader tells teammates the code (out of band: in person, chat).
 3. **Join.** Each teammate sends `POST /api/teams/join {"team_id"}` until the team has **6** (`teams.size`). Members are kept in join order.
 4. **Ready.** Each non-leader sends `PUT /api/teams/me/ready {"ready": true}`. They can un-ready, leave and rejoin while in the lobby.
-5. **Start.** The leader sends `POST /api/teams/me/start`. With exactly **6** (`teams.size`) members, all non-leaders ready, the team becomes `IN_GAME` and its roster is frozen. From here `teamstate` takes over: right after the `IN_GAME` `team` event, every member gets the team's (empty) `team_state` through `Rules.OnStart`.
+5. **Start.** The leader sends `POST /api/teams/me/start`. With any number of members (1 to **6**, `teams.size`), all non-leaders ready, the team becomes `IN_GAME` and its roster is frozen. From here `teamstate` takes over: right after the `IN_GAME` `team` event, every member gets the team's (empty) `team_state` through `Rules.OnStart`.
 6. **Live updates.** Every member's event stream (`GET /api/events`) gets the whole team after every change, and `no_team` when they leave.
 
 - **Why the leader doesn't ready up.** Starting is the leader's "ready". A separate flag would only add a state that can disagree with pressing start.
@@ -246,7 +246,6 @@ Checked in this order:
 | Caller not in a team | `404 not_in_team` |
 | Caller isn't the leader (even after the start) | `403 not_leader` |
 | Team not `LOBBY` (already started) | `409 team_locked` |
-| Not exactly **6** (`teams.size`) members | `409 team_not_full` |
 | Any non-leader not ready | `409 not_all_ready` |
 | Success | `IN_GAME`, `started_at` = Postgres `now()`; roster frozen; `team` to all members, then `Rules.OnStart(team)` (in the server: `team_state` to all members) |
 
@@ -270,7 +269,7 @@ Checked in this order:
 - **Writes to one team are serialised** on its `entry.mu`; different teams run in parallel.
 - **Lock order:** `entry.mu`, then `Store.mu`, never the reverse. `Store.mu` is held only for map reads and writes, never during I/O.
 - **2 × (`teams.size` − 1) = 10 joins to a 1-member team at once:** exactly `teams.size` − 1 = 5 succeed (`TestConcurrentJoinsRespectTeamSize`).
-- **The leader starts while a member leaves:** exactly one wins, and the team stays consistent (`TestConcurrentStartAndLeave`).
+- **The leader starts while a member leaves:** either the start wins (the leave gets `team_locked`) or the leave wins and the smaller team starts; the team is always consistent (`TestConcurrentStartAndLeave`).
 - **A user creates and joins at once:** the unique constraint on `teammember.user_id` lets only one through.
 - **`lockUsersTeam`** re-checks membership after taking the lock, and retries up to 3 times if the user moved team.
 - **The start hook runs under the team's lock.** `OnStart` is called holding `entry.mu`, after apply, so the team is already `IN_GAME` in memory (`ByID` and `ForUser` see it) and its `team` event is queued first. The hook must not call back into a write on the same team (it would deadlock); teamstate's `PublishTeam` only reads teams (`ByID`, which takes `Store.mu` briefly) and takes teamstate's own entry lock. Lock order across the two: teams `entry.mu` → teamstate entry.

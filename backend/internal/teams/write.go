@@ -44,9 +44,6 @@ var (
 	ErrNotLeader = errors.New("only the team leader can do this")
 	// ErrLeaderReady means the leader tried to ready up; starting is their ready.
 	ErrLeaderReady = errors.New("the leader starts the game instead of readying up")
-	// ErrTeamNotFull means the team doesn't have exactly Rules.Size members to
-	// start.
-	ErrTeamNotFull = errors.New("team does not have enough members")
 	// ErrNotAllReady means a non-leader member isn't ready.
 	ErrNotAllReady = errors.New("not every member is ready")
 )
@@ -289,8 +286,8 @@ func equalPtr(a, b *string) bool {
 	return a == b || (a != nil && b != nil && *a == *b)
 }
 
-// Start moves the leader's team from LOBBY to IN_GAME once it has exactly
-// Rules.Size members and every non-leader member is ready. The roster is frozen
+// Start moves the leader's team from LOBBY to IN_GAME once every non-leader
+// member is ready. Any size from 1 (the leader alone) to Rules.Size may start. The roster is frozen
 // from then on: nobody can join, leave or change ready. After publishing the
 // "team" event it calls Rules.OnStart (if set) with the started team, still
 // holding the team's lock; a rejected or failed start doesn't call it.
@@ -308,9 +305,6 @@ func (s *Store) Start(ctx context.Context, userID uuid.UUID) (Team, error) {
 	}
 	if t.Status != Lobby {
 		return Team{}, ErrTeamLocked
-	}
-	if len(t.Members) != s.rules.Size {
-		return Team{}, ErrTeamNotFull
 	}
 	for _, m := range t.Members {
 		if m.ID != t.LeaderID && !m.IsReady {

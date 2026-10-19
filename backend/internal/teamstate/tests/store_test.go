@@ -4,10 +4,8 @@ package tests
 // teamstate_test, with the 2025 dev seed, config.toml's rules and a fake
 // clock. In the seed the square T6, R, SARC, C1 is waypoints 1001, 1002, 1007,
 // 1008, and every three waypoints form a triangle or a collinear pattern.
-// Times are written with f.tick, a 60th of game.scan_window (1 s with
-// config.toml as shipped), or relative to f.rules.Limit() (window + grace,
-// 65 s as shipped), so the scenarios hold for any config. Times in comments
-// are the shipped values, after the fake clock's start.
+// Times are written with f.tick (seconds after the fake clock's start). There
+// is no time limit, so they only order and stamp events.
 
 import (
 	"context"
@@ -39,21 +37,10 @@ var square = []string{"1001", "1002", "1007", "1008"}
 // start is the fake clock's starting time.
 var start = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 
-// clock is a fake teamstate.Clock that tests advance by hand. Timers fire
-// only when at moves time past them, in order, never from inside AfterFunc
-// (the store calls AfterFunc holding a team's lock, and the timer's callback
-// takes that lock).
+// clock is a fake teamstate.Clock that tests set by hand.
 type clock struct {
-	mu     sync.Mutex
-	t      time.Time
-	timers []*fakeTimer
-}
-
-// fakeTimer is one pending AfterFunc call.
-type fakeTimer struct {
-	due     time.Time
-	f       func()
-	stopped bool
+	mu sync.Mutex
+	t  time.Time
 }
 
 // Now returns the fake time.
@@ -63,66 +50,21 @@ func (c *clock) Now() time.Time {
 	return c.t
 }
 
-// AfterFunc records f to run once the fake time reaches now + d.
-func (c *clock) AfterFunc(d time.Duration, f func()) func() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ft := &fakeTimer{due: c.t.Add(d), f: f}
-	c.timers = append(c.timers, ft)
-	return func() bool {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		was := !ft.stopped
-		ft.stopped = true
-		return was
-	}
-}
-
-// at sets the fake time to d after start, then runs every timer now due,
-// earliest first, including ones those runs schedule.
+// at sets the fake time to d after start.
 func (c *clock) at(d time.Duration) {
 	c.mu.Lock()
 	c.t = start.Add(d)
 	c.mu.Unlock()
-	for {
-		c.mu.Lock()
-		var next *fakeTimer
-		for _, ft := range c.timers {
-			if !ft.stopped && !ft.due.After(c.t) && (next == nil || ft.due.Before(next.due)) {
-				next = ft
-			}
-		}
-		if next != nil {
-			next.stopped = true
-		}
-		c.mu.Unlock()
-		if next == nil {
-			return
-		}
-		next.f()
-	}
-}
-
-// pending counts timers not yet fired or stopped.
-func (c *clock) pending() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := 0
-	for _, ft := range c.timers {
-		if !ft.stopped {
-			n++
-		}
-	}
-	return n
 }
 
 // seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
 // smaller game.max_pattern_points the seed can't load, so these tests skip.
 const seedMaxPoints = 4
 
-// minTestTeam is the team size these tests are written for: they use up to
-// six distinct members (the hexagon needs all six). With a smaller teams.size
-// in config.toml they skip rather than fail.
+// minTestTeam is the team size these tests are written for: the fixture's
+// team has six members, and scenarios address them by index up to 5 (any
+// member may scan any number of points, so this is about the fixture, not a
+// rule). With a smaller teams.size in config.toml they skip rather than fail.
 const minTestTeam = 6
 
 // fixtureEnv is a seeded database with one team, its stores and a fake clock.
@@ -198,8 +140,6 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		pgtest.Must(ts.Start(ctx, ids[0]))
 	}
 	rules := teamstate.Rules{
-		ScanWindow:       set.Game.ScanWindow.Duration,
-		ScanGrace:        set.Game.ScanGrace.Duration,
 		MaxPatternPoints: set.Game.MaxPatternPoints,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 	}
@@ -213,11 +153,10 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	return &fixtureEnv{atlas: at, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
 }
 
-// tick returns n sixtieths of game.scan_window: n seconds with config.toml's
-// shipped 1m window. Scenario times scale with the window, so they keep the
-// same meaning under any config.
+// tick returns n seconds: the time unit scenarios are written in. There's no
+// time limit, so times only order events and stamp them.
 func (f *fixtureEnv) tick(n float64) time.Duration {
-	return time.Duration(n * float64(f.rules.ScanWindow) / 60)
+	return time.Duration(n * float64(time.Second))
 }
 
 // scanAt scans waypoint as member i at d after start, failing on error.
@@ -322,49 +261,69 @@ func TestScanNeedsSelection(t *testing.T) {
 	}
 }
 
-// TestSquareNeedsDistinctMembers walks a square to completion: a member can't
-// scan a second waypoint and a waypoint can't be scanned by a second member
-// (rejections change nothing), three waypoints forming a triangle don't
-// complete the selected square, and the fourth completes it and clears the
-// selection and stack.
-func TestSquareNeedsDistinctMembers(t *testing.T) {
+// TestSquareCasts walks a square to completion: a waypoint can't be scanned
+// twice (the rejection changes nothing), one member may scan several of its
+// waypoints, three waypoints forming a triangle don't complete the selected
+// square, and the fourth completes it, clears the selection and stack, and
+// logs the cast.
+func TestSquareCasts(t *testing.T) {
 	f := started(t)
 
 	if v := f.selectAt(t, 0, 5, "square"); v.Selection == nil || v.Selection.SelectedBy != f.users[5] {
 		t.Fatalf("selection: %+v", v.Selection)
 	}
-	res := f.scanAt(t, f.tick(1), 0, "1001")
-	expectOutcome(t, "first scan", res, teamstate.OutcomeScanAdded)
-	if !res.State.Stack[0].ExpiresAt.Equal(start.Add(f.tick(1) + f.rules.Limit())) {
-		t.Fatalf("expires_at %v", res.State.Stack[0].ExpiresAt)
+	expectOutcome(t, "first scan", f.scanAt(t, f.tick(1), 0, "1001"), teamstate.OutcomeScanAdded)
+	if err := f.scanErrAt(f.tick(2), 1, "1001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
+		t.Fatalf("same waypoint again: %v", err)
 	}
-	f.scanAt(t, f.tick(5), 1, "1002")
-
-	if err := f.scanErrAt(f.tick(6), 0, "1007"); !errors.Is(err, teamstate.ErrMemberAlreadyScanned) {
-		t.Fatalf("same member, another waypoint: %v", err)
-	}
-	if err := f.scanErrAt(f.tick(7), 2, "1001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
-		t.Fatalf("another member, same waypoint: %v", err)
-	}
+	// The same member scans a second waypoint: allowed.
+	expectOutcome(t, "member 0 again", f.scanAt(t, f.tick(3), 0, "1002"), teamstate.OutcomeScanAdded)
 	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1001", "1002"}) || f.loggedScans(t) != 2 {
-		t.Fatalf("rejections changed the stack: %v", got)
+		t.Fatalf("stack: %v", got)
 	}
 
 	// 1001, 1002, 1007 is a triangle, but the team selected a square.
 	expectOutcome(t, "third scan", f.scanAt(t, f.tick(10), 2, "1007"), teamstate.OutcomeScanAdded)
-	res = f.scanAt(t, f.tick(12), 3, "1008")
+	res := f.scanAt(t, f.tick(12), 0, "1008")
 	expectOutcome(t, "fourth scan", res, teamstate.OutcomePatternCompleted)
 	if !slices.Equal(res.Pattern, square) || res.AlreadyCompleted {
 		t.Fatalf("completion: %+v", res)
 	}
 	st := res.State
-	if st.Selection != nil || len(st.Stack) != 0 || !slices.Equal(st.Shapes, []string{"square"}) ||
-		len(st.Patterns) != 1 || !slices.Equal(st.Waypoints, square) {
+	if st.Selection != nil || len(st.Stack) != 0 || st.Poisoned || !slices.Equal(st.Shapes, []string{"square"}) ||
+		len(st.Patterns) != 1 || !slices.Equal(st.Waypoints, square) || st.LastCast == nil || st.LastCast.CastBy != f.users[0] {
 		t.Fatalf("after completion: %+v", st)
 	}
 	if err := f.scanErrAt(f.tick(13), 4, "1009"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("selection should clear after completion: %v", err)
 	}
+}
+
+// TestOneMemberScansWholePattern checks that a single member can scan every
+// waypoint of a pattern, the largest included.
+func TestOneMemberScansWholePattern(t *testing.T) {
+	f := started(t)
+	f.selectAt(t, 0, 0, "square")
+	res := teamstate.ScanResult{}
+	for i, w := range square {
+		res = f.scanAt(t, f.tick(float64(i+1)), 3, w)
+	}
+	expectOutcome(t, "one member, whole square", res, teamstate.OutcomePatternCompleted)
+}
+
+// TestNoTimeLimit checks that an attempt never expires: scans hours apart
+// still complete a pattern, and nothing drops out of the stack with time.
+func TestNoTimeLimit(t *testing.T) {
+	f := started(t)
+	f.selectAt(t, 0, 0, "square")
+	for i, w := range square[:3] {
+		f.scanAt(t, time.Duration(i)*time.Hour, i, w)
+	}
+	f.clock.at(10 * time.Hour)
+	if got := stackWaypoints(f.view(t)); !slices.Equal(got, square[:3]) {
+		t.Fatalf("stack after 10 h: %v", got)
+	}
+	expectOutcome(t, "last point 10 h later", f.scanAt(t, 10*time.Hour, 3, square[3]), teamstate.OutcomePatternCompleted)
 }
 
 // TestEverySelectionPurges checks that every selection empties the stack,
@@ -449,155 +408,53 @@ func TestConcurrentRescansAddOneScan(t *testing.T) {
 	}
 }
 
-// TestLateRepeatDoesNotRejectThePattern checks that when one member's scan
-// goes stale before the pattern is finished, only that scan is dropped: the
-// member rescans the same waypoint and the pattern completes.
-func TestLateRepeatDoesNotRejectThePattern(t *testing.T) {
-	f := started(t)
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, 0, 0, "1001")
-	f.scanAt(t, f.tick(10), 1, "1002")
-	f.scanAt(t, f.tick(20), 2, "1007")
-
-	// At limit + 5 (70 s), member 0's scan (70 s old) is stale: dropped,
-	// nothing else.
-	limit := f.rules.Limit()
-	res := f.scanAt(t, limit+f.tick(5), 3, "1008")
-	expectOutcome(t, "fourth scan after the first went stale", res, teamstate.OutcomeScanAdded)
-	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1002", "1007", "1008"}) {
-		t.Fatalf("stack: %v", got)
-	}
-
-	// Member 0 scans 1001 again at limit + 6 (71 s): allowed, since the old
-	// scan is stale; not rejected. Span 1002@10 to 1001@71 is 61 s, within
-	// the limit.
-	res = f.scanAt(t, limit+f.tick(6), 0, "1001")
-	expectOutcome(t, "rescan", res, teamstate.OutcomePatternCompleted)
-}
-
-// TestGraceTolerance checks the window and its grace: spans up to window +
-// grace complete, and a microsecond more drops the bottom scan.
-func TestGraceTolerance(t *testing.T) {
-	f := started(t)
-	limit := f.rules.Limit()
-	cases := []struct {
-		name string
-		span time.Duration
-		want string
-	}{
-		{"within the window", f.rules.ScanWindow - f.tick(1), teamstate.OutcomePatternCompleted},
-		{"over the window, inside the grace (don't punish)", f.rules.ScanWindow + f.rules.ScanGrace/2, teamstate.OutcomePatternCompleted},
-		{"exactly window + grace", limit, teamstate.OutcomePatternCompleted},
-		{"one microsecond over", limit + time.Microsecond, teamstate.OutcomeScanAdded},
-	}
-	t0 := time.Duration(0)
-	for _, c := range cases {
-		f.selectAt(t, t0, 0, "square") // purges the previous attempt
-		f.scanAt(t, t0, 0, square[0])
-		f.scanAt(t, t0+c.span/3, 1, square[1])
-		f.scanAt(t, t0+2*c.span/3, 2, square[2])
-		expectOutcome(t, c.name, f.scanAt(t, t0+c.span, 3, square[3]), c.want)
-		t0 += 2 * limit // members' earlier scans are long stale
-	}
-}
-
-// TestStaleScanFreesItsWaypointAndMember checks that once a scan goes stale
-// it's dropped, so another member can scan its waypoint, and its member can
-// scan again.
-func TestStaleScanFreesItsWaypointAndMember(t *testing.T) {
-	f := started(t)
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, 0, 0, "1001")
-	f.scanAt(t, f.tick(10), 1, "1002")
-
-	limit := f.rules.Limit()
-	res := f.scanAt(t, limit+f.tick(1), 2, "1001") // 66 s: member 0's 1001 is stale
-	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1002", "1001"}) {
-		t.Fatalf("stack: %v", got)
-	}
-	f.scanAt(t, limit+f.tick(2), 0, "1007") // member 0 is free again
-	expectOutcome(t, "complete", f.scanAt(t, limit+f.tick(3), 3, "1008"), teamstate.OutcomePatternCompleted)
-}
-
-// TestWrongScanLocksMember checks that a waypoint that can't be part of any
-// pattern of the selected shape, given the stack, is still pushed (marked
-// wrong), and that it occupies the member's one scan and its waypoint slot.
-func TestWrongScanLocksMember(t *testing.T) {
-	f := started(t, fixtureOptions{sql: `
-		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
-	f.selectAt(t, 0, 0, "square")
-
-	res := f.scanAt(t, f.tick(1), 0, "1012") // in no square
-	expectOutcome(t, "wrong waypoint", res, teamstate.OutcomeScanAdded)
-	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1012"}) {
-		t.Fatalf("stack %v", got)
-	}
-	if st := f.state.ForTeam(f.teamID); !st.Stack.At(0).Wrong {
-		t.Fatal("wrong scan not marked wrong")
-	}
-
-	// The member is locked: they can't scan again to overwrite it.
-	if err := f.scanErrAt(f.tick(2), 0, "1001"); !errors.Is(err, teamstate.ErrMemberAlreadyScanned) {
-		t.Fatalf("member rescanned after a wrong scan: %v", err)
-	}
-	// The waypoint slot is taken too.
-	if err := f.scanErrAt(f.tick(3), 1, "1012"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
-		t.Fatalf("another member rescanned the wrong waypoint: %v", err)
-	}
-}
-
-// TestWrongScanPoisonsSelection checks that once a wrong scan is in the stack,
-// no later scan can complete the selection, and that reselecting purges it.
-func TestWrongScanPoisonsSelection(t *testing.T) {
+// TestWrongScanIsReported checks that a waypoint that can't be part of any
+// pattern of the selected shape, given the stack, is pushed but reported:
+// outcome wrong_scan, marked wrong in the stack, and the attempt poisoned, so
+// every later scan, by anyone, is refused with selection_poisoned.
+func TestWrongScanIsReported(t *testing.T) {
 	f := started(t, fixtureOptions{sql: `
 		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
 	f.selectAt(t, 0, 0, "square")
 	f.scanAt(t, f.tick(1), 0, "1001")
-	f.scanAt(t, f.tick(2), 1, "1002")
-	// 1003 is in no square with 1001 and 1002: wrong, and it poisons the set.
-	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, "1003"), teamstate.OutcomeScanAdded)
 
-	// The remaining correct waypoints still can't complete it.
-	f.scanAt(t, f.tick(4), 3, "1007")
-	expectOutcome(t, "cannot complete a poisoned selection", f.scanAt(t, f.tick(5), 4, "1008"), teamstate.OutcomeScanAdded)
+	res := f.scanAt(t, f.tick(2), 1, "1012") // in no square
+	expectOutcome(t, "wrong waypoint", res, teamstate.OutcomeWrongScan)
+	if !res.State.Poisoned || len(res.State.Stack) != 2 || res.State.Stack[0].Wrong || !res.State.Stack[1].Wrong {
+		t.Fatalf("after a wrong scan: %+v", res.State)
+	}
+	if f.loggedScans(t) != 2 {
+		t.Fatalf("a wrong scan is still logged: %d", f.loggedScans(t))
+	}
+	for _, member := range []int{1, 2} { // the scanner and a teammate
+		if err := f.scanErrAt(f.tick(3), member, "1002"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
+			t.Fatalf("member %d scanning a poisoned attempt: %v", member, err)
+		}
+	}
+}
+
+// TestWrongScanPoisonsSelection checks that a poisoned attempt can't cast,
+// and that selecting again purges it so the square then completes.
+func TestWrongScanPoisonsSelection(t *testing.T) {
+	f := started(t)
+	f.selectAt(t, 0, 0, "square")
+	f.scanAt(t, f.tick(1), 0, "1001")
+	f.scanAt(t, f.tick(2), 1, "1002")
+	// 1003 is in no square with 1001 and 1002: wrong.
+	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, "1003"), teamstate.OutcomeWrongScan)
+	if err := f.scanErrAt(f.tick(4), 3, "1007"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
+		t.Fatalf("the rest of the square on a poisoned attempt: %v", err)
+	}
 
 	// Reselecting purges the wrong scan; the square then completes.
-	f.selectAt(t, f.tick(6), 0, "square")
+	if v := f.selectAt(t, f.tick(6), 0, "square"); v.Poisoned || len(v.Stack) != 0 {
+		t.Fatalf("after reselect: %+v", v)
+	}
 	res := teamstate.ScanResult{}
 	for i, w := range square {
 		res = f.scanAt(t, f.tick(7)+f.tick(float64(i)), i, w)
 	}
 	expectOutcome(t, "completes after reselect", res, teamstate.OutcomePatternCompleted)
-}
-
-// TestWrongScanNeverAgesOut checks that a wrong scan stays in the stack past
-// the scan limit, while a correct scan of the same age goes stale.
-func TestWrongScanNeverAgesOut(t *testing.T) {
-	f := started(t, fixtureOptions{sql: `
-		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, 0, 0, "1001")
-	f.scanAt(t, f.tick(1), 1, "1012") // wrong
-
-	limit := f.rules.Limit()
-	res := f.scanAt(t, limit+f.tick(10), 2, "1007")
-	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1012", "1007"}) {
-		t.Fatalf("stack %v: the wrong 1012 should stay, the stale 1001 should drop", got)
-	}
-
-	// A restart reproduces the wrong scan and its never-stale flag.
-	wp, _ := f.atlas.WaypointIndex("1012")
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
-	st := restarted.ForTeam(f.teamID)
-	wrong := false
-	for i := range st.Stack.Len() {
-		if sc := st.Stack.At(i); sc.Waypoint == wp {
-			wrong = sc.Wrong
-		}
-	}
-	if !wrong {
-		t.Fatal("wrong flag lost across restart")
-	}
 }
 
 // TestCompletionPurges checks that completing purges the stack and the
@@ -685,7 +542,7 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 func TestCompletingAgain(t *testing.T) {
 	f := started(t)
 	for round := range 2 {
-		t0 := time.Duration(round) * 2 * f.rules.Limit()
+		t0 := time.Duration(round) * f.tick(100)
 		f.selectAt(t, t0, 0, "square")
 		for i, w := range square {
 			res := f.scanAt(t, t0+f.tick(float64(i)), i, w)
@@ -727,7 +584,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 	for i, w := range square {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
-	later := f.rules.Limit() + f.tick(35) // 100 s: long after the square
+	later := f.tick(100) // long after the square
 	f.selectAt(t, later, 4, "triangle")
 	f.scanAt(t, later, 4, "1003")
 	f.scanAt(t, later+f.tick(1), 5, "1004")
@@ -744,8 +601,9 @@ func TestRestartRestoresEverything(t *testing.T) {
 	}
 }
 
-// TestConcurrentScans races two members at the same waypoint, and one member
-// at two waypoints: in each race exactly one scan may be accepted.
+// TestConcurrentScans races two members at the same waypoint (exactly one is
+// accepted) and one member at two waypoints (both are: a member may scan any
+// number).
 func TestConcurrentScans(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "square")
@@ -775,8 +633,9 @@ func TestConcurrentScans(t *testing.T) {
 	if ok != 1 || !errors.Is(errs[0], teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("two members, one waypoint: %d ok, %v", ok, errs)
 	}
+	// One member may scan any number of waypoints: both are accepted.
 	ok, errs = race([2]func() error{scan(2, "1002"), scan(2, "1007")})
-	if ok != 1 || !errors.Is(errs[0], teamstate.ErrMemberAlreadyScanned) {
+	if ok != 2 {
 		t.Fatalf("one member, two waypoints: %d ok, %v", ok, errs)
 	}
 }
@@ -913,111 +772,45 @@ func nextState(t *testing.T, sub *live.Subscription) teamstate.View {
 	return teamstate.View{}
 }
 
-// TestStaleScanIsPublished checks that when a correct scan goes stale, with
-// nobody acting, the store drops it and publishes team_state at once: the
-// first instant it's stale (limit + 1 µs), not before; then the next scan's
-// expiry is armed, and nothing is left pending once the stack is empty.
-func TestStaleScanIsPublished(t *testing.T) {
-	f := started(t)
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, 0, 0, "1001")
-	f.scanAt(t, f.tick(10), 1, "1002")
-	sub := f.hub.Subscribe(f.users[4])
-	defer sub.Close()
-
-	limit := f.rules.Limit()
-	f.clock.at(limit) // exactly limit old: still live, nothing sent
-	select {
-	case ev := <-sub.C:
-		t.Fatalf("published %s before the scan was stale", ev.Name())
-	default:
-	}
-	f.clock.at(limit + time.Microsecond)
-	if got := stackWaypoints(nextState(t, sub)); !slices.Equal(got, []string{"1002"}) {
-		t.Fatalf("after the first expiry: %v", got)
-	}
-	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1002"}) {
-		t.Fatalf("memory after the first expiry: %v", got)
-	}
-	if f.clock.pending() != 1 {
-		t.Fatalf("%d timers pending, want 1 (for 1002)", f.clock.pending())
-	}
-
-	f.clock.at(f.tick(10) + limit + time.Microsecond)
-	if got := stackWaypoints(nextState(t, sub)); len(got) != 0 {
-		t.Fatalf("after the second expiry: %v", got)
-	}
-	if f.clock.pending() != 0 {
-		t.Fatalf("%d timers pending on an empty stack", f.clock.pending())
-	}
-	// Both members are free again, with the selection still active.
-	f.scanAt(t, f.tick(10)+limit+f.tick(1), 0, "1001")
-}
-
-// TestExpiryTimerFollowsWrites checks that every write re-arms or cancels the
-// team's timer: one per team, none after a cast or a purge, and none for a
-// stack holding only wrong scans (they never go stale).
-func TestExpiryTimerFollowsWrites(t *testing.T) {
-	f := started(t, fixtureOptions{sql: `
-		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
-	f.scanAt(t, f.tick(2), 1, "1002")
-	if n := f.clock.pending(); n != 1 {
-		t.Fatalf("%d timers after two scans, want 1", n)
-	}
-	f.selectAt(t, f.tick(3), 0, "square") // purge
-	if n := f.clock.pending(); n != 0 {
-		t.Fatalf("%d timers after a purge", n)
-	}
-	f.scanAt(t, f.tick(4), 0, "1012") // wrong
-	if n := f.clock.pending(); n != 0 {
-		t.Fatalf("%d timers for a wrong-only stack", n)
-	}
-	f.selectAt(t, f.tick(5), 0, "square")
-	for i, w := range square {
-		f.scanAt(t, f.tick(6+float64(i)), i, w)
-	}
-	if n := f.clock.pending(); n != 0 {
-		t.Fatalf("%d timers after a cast", n)
-	}
-}
-
-// TestLastCast checks that a cast sets last_cast (pattern, shape, who, when),
-// that a new selection keeps it, that a repeat cast is marked
-// already_completed, that every cast is logged in team_cast, and that a
-// restart reloads the newest one.
-func TestLastCast(t *testing.T) {
+// TestCastLog checks that every cast is logged in memory and in team_cast,
+// repeats included and marked: last_cast is the newest, CastsForUser lists
+// them newest first, a new selection keeps them, and a restart reloads the
+// whole log.
+func TestCastLog(t *testing.T) {
 	f := started(t)
 	if v := f.view(t); v.LastCast != nil {
 		t.Fatalf("last_cast before any cast: %+v", v.LastCast)
 	}
+	if cs := pgtest.Must(f.state.CastsForUser(f.users[0])); len(cs) != 0 {
+		t.Fatalf("casts before any cast: %v", cs)
+	}
 	for round := range 2 {
-		t0 := time.Duration(round) * 2 * f.rules.Limit()
+		t0 := time.Duration(round) * f.tick(100)
 		f.selectAt(t, t0, 0, "square")
 		for i, w := range square {
 			f.scanAt(t, t0+f.tick(float64(i)), i, w)
 		}
 		lc := f.view(t).LastCast
 		if lc == nil || !slices.Equal(lc.Pattern, square) || lc.Shape != "square" || lc.CastBy != f.users[3] ||
-			!lc.CastAt.Equal(start.Add(t0+f.tick(3))) || lc.AlreadyCompleted != (round == 1) {
+			!lc.CastAt.Equal(start.Add(t0+f.tick(3))) || lc.AlreadyCompleted != (round == 1) || lc.Damage <= 0 {
 			t.Fatalf("round %d: last_cast %+v", round, lc)
 		}
 	}
-	f.selectAt(t, 5*f.rules.Limit(), 0, "triangle")
-	if f.view(t).LastCast == nil {
-		t.Fatal("a new selection cleared last_cast")
-	}
+	f.selectAt(t, f.tick(500), 0, "triangle")
 
-	var casts int
+	cs := pgtest.Must(f.state.CastsForUser(f.users[2]))
+	if len(cs) != 2 || !cs[0].AlreadyCompleted || cs[1].AlreadyCompleted || !cs[0].CastAt.After(cs[1].CastAt) {
+		t.Fatalf("cast log (newest first): %+v", cs)
+	}
+	var rows int
 	if err := f.db.Pool().QueryRow(context.Background(),
-		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&casts); err != nil || casts != 2 {
-		t.Fatalf("team_cast has %d rows (%v), want 2", casts, err)
+		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("team_cast has %d rows (%v), want 2", rows, err)
 	}
 	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
-	before := pgtest.Must(json.Marshal(f.view(t).LastCast))
-	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.ForUser(f.users[0])).LastCast))
+	before := pgtest.Must(json.Marshal(cs))
+	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.CastsForUser(f.users[2]))))
 	if string(before) != string(after) {
-		t.Fatalf("last_cast across restart\nbefore: %s\nafter:  %s", before, after)
+		t.Fatalf("cast log across restart\nbefore: %s\nafter:  %s", before, after)
 	}
 }

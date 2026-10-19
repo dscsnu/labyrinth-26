@@ -24,7 +24,7 @@ type teamRows struct {
 	patterns  []int         // team_pattern keys
 	selection *selectionRow // team_selection, if any
 	stack     []scanRow     // the stack: newest scans after the selection, oldest first
-	lastCast  *castRow      // the newest team_cast row, if any
+	casts     []castRow     // every team_cast row, oldest first
 }
 
 // castRow is a team_cast row.
@@ -89,18 +89,18 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 		return nil, err
 	}
 
-	// The newest cast per team.
+	// Every cast per team, oldest first: the cast log.
 	rows, err = d.pool.Query(ctx, `
-		SELECT DISTINCT ON (team_id) team_id, pattern_id, cast_by, cast_at, already_completed
+		SELECT team_id, pattern_id, cast_by, cast_at, already_completed
 		FROM team_cast`+filter+`
-		ORDER BY team_id, id DESC`, teamID)
+		ORDER BY team_id, id`, teamID)
 	if err != nil {
 		return nil, err
 	}
 	var cast castRow
 	if _, err := pgx.ForEachRow(rows, []any{&id, &cast.patternID, &cast.castBy, &cast.castAt, &cast.alreadyCompleted}, func() error {
-		row := cast
-		get(id).lastCast = &row
+		t := get(id)
+		t.casts = append(t.casts, cast)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -120,8 +120,8 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 	}
 
 	// The stack: for each team with a selection, its newest stackSize scans
-	// after the selection was made, returned oldest first. The wrong flag is
-	// read too, so wrong scans can be rebuilt as never-stale.
+	// after the selection was made, returned oldest first, with each scan's
+	// wrong flag (so a poisoned attempt stays poisoned across a restart).
 	rows, err = d.pool.Query(ctx, `
 		SELECT sel.team_id, r.waypoint_id, r.user_id, r.scanned_at, r.wrong
 		FROM team_selection sel

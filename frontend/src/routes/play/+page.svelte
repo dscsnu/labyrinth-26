@@ -1,7 +1,6 @@
 <script lang="ts">
-    import { ScanGate } from "#lib/game/scanGate.ts";
     import { ServerClock } from "#lib/game/serverClock.ts";
-    import { ScanResultSchema, TeamStateSchema, type TeamState } from "#lib/types/Game.type.ts";
+    import { ScanResultSchema, TeamStateSchema, type Cast, type TeamState } from "#lib/types/Game.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
     import { goto } from "$app/navigation";
     import { onMount, untrack } from "svelte";
@@ -16,44 +15,33 @@
     let team = $state<Team | null>(null);
     let connected = $state(false);
 
-    // Time, measured the one canonical way: the server's clock as estimated
-    // from the stream's hello event (ServerClock). The countdown's deadline is
-    // the bottom scan's scanned_at + the window (config.toml game.scan_window),
-    // so every phone, reloaded or not, counts to the same moment. gate isn't
-    // reactive, so version is bumped after each change.
-    const clock = new ServerClock();
-    const gate = new ScanGate(untrack(() => data.game.scan_window_ms));
-    let version = $state(0);
-    let now = $state(clock.now());
+    // The cast log, newest first: loaded with the page, then each new
+    // last_cast (from a response or team_state) is prepended once.
+    let casts = $state<Cast[]>(untrack(() => data.casts));
     const observe = (s: TeamState) => {
         live = s;
-        gate.observe(s.stack.length > 0 ? Date.parse(s.stack[0].scanned_at) : null);
-        version++;
+        const lc = s.last_cast;
+        if (lc && !casts.some((c) => c.cast_at === lc.cast_at)) casts = [lc, ...casts];
     };
 
-    let remaining = $derived.by(() => {
-        void version;
-        return gate.remainingMs(now);
-    });
-    let open = $derived.by(() => {
-        void version;
-        return gate.canScan(now);
-    });
+    // Time, measured the one canonical way: the server's clock as estimated
+    // from the stream's hello event (ServerClock). There's no time limit; it
+    // only labels scans "how long ago", the same on every phone.
+    const clock = new ServerClock();
+    let now = $state(clock.now());
+    const ago = (iso: string) => {
+        const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+        return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.floor(s / 60)} min ago` : `${Math.floor(s / 3600)} h ago`;
+    };
+
     let selected = $derived(ts.selection?.shape ?? null);
     let selectedShape = $derived(game.shapes.find((s) => s.id === selected));
-    // Every scan is final: once you've scanned for this attempt, you're locked
-    // until it ends (cast or restart). Wrong scans aren't marked, on purpose.
-    let iScanned = $derived(ts.stack.some((s) => s.user_id === user?.id));
-    // A stack as big as the type's largest pattern that hasn't cast must hold
-    // a wrong scan: completion would have purged it. Only a restart helps.
-    let stuck = $derived(!!selectedShape && selectedShape.points.length > 0 && ts.stack.length >= Math.max(...selectedShape.points));
     let busy = $state(false);
     let waypoint = $state("");
     let message = $state<{ ok: boolean; text: string } | null>(null);
 
     onMount(() => {
-        observe(data.state); // a stack already running when the page loaded
-        const tick = setInterval(() => (now = clock.now()), 100);
+        const tick = setInterval(() => (now = clock.now()), 1000);
         const events = new EventSource("/api/events");
         events.onopen = () => (connected = true);
         events.onerror = () => (connected = false);
@@ -92,12 +80,12 @@
         if (!res.ok) return (message = { ok: false, text: `${json.code}: ${json.message}` });
         observe(TeamStateSchema.parse(json.payload));
         message = restart
-            ? { ok: true, text: "attempt restarted: every scan cleared, everyone can scan again" }
+            ? { ok: true, text: "attempt restarted: every scan cleared" }
             : { ok: true, text: `selected ${shape}: stack purged` };
     };
 
     // Restarting is reselecting the same type: the backend purges every scan,
-    // wrong ones included, and unlocks every member. Any member can do it.
+    // the wrong one included. Any member can do it.
     const restart = () => selected && selectShape(selected, true);
 
     const giveUp = async () => {
@@ -111,22 +99,20 @@
 
     const scan = async (e: SubmitEvent) => {
         e.preventDefault();
-        // The gate is the rule: after the window, nothing is sent.
-        if (!gate.canScan(clock.now())) {
-            message = { ok: false, text: "time's up: select the type again to restart" };
-            return;
-        }
         busy = true;
         const { res, json } = await call("/play/scan", "POST", { waypoint_id: waypoint.trim() });
         busy = false;
         if (!res.ok) return (message = { ok: false, text: `${json.code}: ${json.message}` });
         const result = ScanResultSchema.parse(json.payload);
-        observe(result.state); // a first scan's 200 sets the deadline from its scanned_at
-        waypoint = "";
+        observe(result.state);
+        const name = selectedShape?.name ?? selected;
         message =
             result.outcome === "pattern_completed"
                 ? { ok: true, text: `completed ${result.pattern?.join("-")}${result.already_completed ? " (again)" : ""}` }
-                : { ok: true, text: "scan added" };
+                : result.outcome === "wrong_scan"
+                  ? { ok: false, text: `${waypoint.trim()} doesn't match any ${name} pattern with the points already scanned. Restart the attempt.` }
+                  : { ok: true, text: "scan added" };
+        waypoint = "";
     };
 
     const memberName = (id: string) => team?.members.find((m: Team["members"][number]) => m.id === id)?.name ?? id.slice(0, 8);
@@ -158,37 +144,24 @@
         <button disabled={busy} onclick={giveUp}>give up</button>
     </p>
     <p><small>
-        Every scan is final. If someone scans a point that doesn't fit, this attempt can't cast
-        (you won't be told which scan it was): restart to clear every scan and try again.
+        No time limit, and anyone can scan any of the points. A point that doesn't fit any
+        {selectedShape?.name ?? selected} pattern spoils the attempt: restart to clear it.
     </small></p>
 {:else}
     <p>No type selected.</p>
 {/if}
 
 <h2>2. Enter waypoints</h2>
-<p>
-    {#if remaining === null}
-        Countdown starts when the first waypoint is accepted ({game.scan_window_ms / 1000} s).
-    {:else if open}
-        <b>{(remaining / 1000).toFixed(1)} s</b> left
-    {:else}
-        <b style="color: red">time's up</b>
-        <button disabled={busy} onclick={restart}>restart attempt</button>
-    {/if}
-</p>
-{#if stuck}
+{#if ts.poisoned}
     <p style="color: red">
-        Everyone needed has scanned and nothing cast, so a scan didn't fit.
+        A scan doesn't match any {selectedShape?.name ?? selected} pattern, so this attempt can't cast.
         <button disabled={busy} onclick={restart}>restart attempt</button>
     </p>
 {/if}
-{#if selected && iScanned}
-    <p>You've scanned for this attempt; a teammate scans the next point. Locked until it casts or someone restarts.</p>
-{/if}
 <form onsubmit={scan}>
     <input bind:value={waypoint} inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="1001" required
-        disabled={!selected || !open || iScanned || busy} />
-    <button disabled={!selected || !open || iScanned || busy}>Scan</button>
+        disabled={!selected || ts.poisoned || busy} />
+    <button disabled={!selected || ts.poisoned || busy}>Scan</button>
     <small>dev seed waypoints: 1001–1011</small>
 </form>
 
@@ -196,12 +169,6 @@
     <p style:color={message.ok ? "green" : "red"}>{message.text}</p>
 {/if}
 
-{#if ts.last_cast}
-    <p>
-        Last cast: <b>{ts.last_cast.shape}</b> {ts.last_cast.pattern.join("-")} ({ts.last_cast.damage} dmg) by {memberName(ts.last_cast.cast_by)}
-        at {new Date(ts.last_cast.cast_at).toLocaleTimeString()}{ts.last_cast.already_completed ? " (cast before)" : ""}
-    </p>
-{/if}
 
 <h3>Stack (bottom → top)</h3>
 {#if ts.stack.length === 0}
@@ -209,7 +176,23 @@
 {:else}
     <ol>
         {#each ts.stack as s (s.waypoint_id)}
-            <li>{s.waypoint_id} by {memberName(s.user_id)}{s.user_id === user?.id ? " (you)" : ""}</li>
+            <li style:color={s.wrong ? "red" : null}>
+                {s.waypoint_id} by {memberName(s.user_id)}{s.user_id === user?.id ? " (you)" : ""}, {ago(s.scanned_at)}{s.wrong ? " ✗ doesn't fit" : ""}
+            </li>
+        {/each}
+    </ol>
+{/if}
+
+<h2>Casts</h2>
+{#if casts.length === 0}
+    <p>none yet</p>
+{:else}
+    <ol>
+        {#each casts as c (c.cast_at)}
+            <li>
+                <b>{c.shape}</b> {c.pattern.join("-")} ({c.damage} dmg) by {memberName(c.cast_by)},
+                {new Date(c.cast_at).toLocaleTimeString()}{c.already_completed ? " (cast before)" : ""}
+            </li>
         {/each}
     </ol>
 {/if}
