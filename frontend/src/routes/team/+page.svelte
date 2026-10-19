@@ -17,7 +17,7 @@
     onMount(() => {
         // EventSource reconnects by itself; the first event after each
         // (re)connect is the full current state.
-        const events = new EventSource("/team/events");
+        const events = new EventSource("/api/events");
         events.onopen = () => (connected = true);
         events.onerror = () => (connected = false);
         events.addEventListener("team", (e) => {

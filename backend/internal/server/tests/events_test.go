@@ -195,11 +195,9 @@ func TestTeamEventStream(t *testing.T) {
 func TestEventStreamAuthAndCleanup(t *testing.T) {
 	e := setup(t)
 
-	for _, path := range []string{"/api/events", "/api/teams/me/events"} {
-		req, _ := http.NewRequest("GET", e.backend.URL+path, nil)
-		if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("%s, no token: %d", path, res.StatusCode)
-		}
+	req, _ := http.NewRequest("GET", e.backend.URL+"/api/events", nil)
+	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no token: %d", res.StatusCode)
 	}
 
 	streams := func() float64 {
@@ -320,10 +318,10 @@ func TestStreamStartsWithHello(t *testing.T) {
 	}
 }
 
-// TestStreamCookieAndAlias checks that /api/events accepts the token cookie
-// a browser's EventSource sends, that no other route does, and that the
-// deprecated /api/teams/me/events alias serves the same stream with Bearer.
-func TestStreamCookieAndAlias(t *testing.T) {
+// TestStreamCookieAuth checks that /api/events accepts the token cookie a
+// browser's EventSource sends, that no other route does (reads and writes
+// alike), that a bad cookie is refused, and that the old stream path is gone.
+func TestStreamCookieAuth(t *testing.T) {
 	e := setup(t)
 	p := e.newPlayer("p")
 	cookie := &http.Cookie{Name: auth.TokenCookie, Value: p.token}
@@ -336,10 +334,10 @@ func TestStreamCookieAndAlias(t *testing.T) {
 	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("GET /api/teams/me with only the cookie: %d, want 401", res.StatusCode)
 	}
-	req, _ = http.NewRequest("GET", e.backend.URL+"/api/teams/me/events", nil)
+	req, _ = http.NewRequest("POST", e.backend.URL+"/api/teams", strings.NewReader(`{"name":"Cookie"}`))
 	req.AddCookie(cookie)
 	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("alias with only the cookie: %d, want 401", res.StatusCode)
+		t.Fatalf("a write with only the cookie: %d, want 401", res.StatusCode)
 	}
 	req, _ = http.NewRequest("GET", e.backend.URL+"/api/events", nil)
 	req.AddCookie(&http.Cookie{Name: auth.TokenCookie, Value: "not-a-token"})
@@ -347,10 +345,10 @@ func TestStreamCookieAndAlias(t *testing.T) {
 		t.Fatalf("bad cookie: %d, want 401", res.StatusCode)
 	}
 
-	alias := e.openStreamAt("/api/teams/me/events", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+p.token) })
-	expectNoTeam(t, "alias stream", alias.next(t, "alias stream"))
-	if got := alias.seen(); !slices.Equal(got, []string{"hello", "no_team"}) {
-		t.Fatalf("alias events %v, want [hello no_team]", got)
+	req, _ = http.NewRequest("GET", e.backend.URL+"/api/teams/me/events", nil)
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	if res := e.do(req); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("old stream path: %d, want 404", res.StatusCode)
 	}
 }
 

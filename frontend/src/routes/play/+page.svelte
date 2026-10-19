@@ -54,7 +54,7 @@
     onMount(() => {
         observe(data.state); // a stack already running when the page loaded
         const tick = setInterval(() => (now = clock.now()), 100);
-        const events = new EventSource("/team/events");
+        const events = new EventSource("/api/events");
         events.onopen = () => (connected = true);
         events.onerror = () => (connected = false);
         // Every (re)connect opens with hello: re-measure the clock offset.

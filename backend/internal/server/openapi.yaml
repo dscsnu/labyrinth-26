@@ -15,8 +15,8 @@ info:
     Unknown paths get 404 `not_found`, wrong methods 405 `method_not_allowed`, both as envelopes.
 
     **Live updates** come over one server-sent event stream per user at `GET /api/events`, which also
-    accepts the `labyrinth_token` cookie (a browser's EventSource can't send headers).
-    `GET /api/teams/me/events` is a deprecated alias of it (Bearer only).
+    accepts the `labyrinth_token` cookie (a browser's EventSource can't send headers; the frontend and
+    backend share a domain, so the browser sends it). The cookie is accepted on this route only.
 
     ⚠ `POST /api/teams/me/state/scans` takes the raw 4-digit waypoint ID until QR verification exists.
 
@@ -417,21 +417,6 @@ paths:
 
         : ping
         ```
-      responses:
-        "200":
-          description: The stream.
-          content:
-            text/event-stream:
-              schema: { type: string }
-        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
-
-  /api/teams/me/events:
-    get:
-      tags: [live]
-      deprecated: true
-      summary: Deprecated alias of GET /api/events
-      description: |
-        The same stream as `GET /api/events`, Bearer only. Kept until the frontend moves to `/api/events`.
       responses:
         "200":
           description: The stream.
