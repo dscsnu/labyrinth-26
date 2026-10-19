@@ -1,19 +1,21 @@
 package tests
 
 // Simulated teams: each player is a client with its own network delay, its
-// own event stream, and the frontend's countdown rule (scanGate, mirrored from
-// frontend/src/lib/game/scanGate.ts):
+// own event stream, and the frontend's time rules (mirrored from
+// frontend/src/lib/game/serverClock.ts and scanGate.ts):
 //
-//   - the countdown starts when the client first sees a non-empty stack: its
-//     own 200 for the first scan, or a teammate's scan arriving as a
-//     team_state event
-//   - it resets whenever the client sees an empty stack (selection,
-//     completion)
-//   - once game.scan_window has passed, the client sends no more scans
+//   - time is measured on the server's clock, estimated from the stream's
+//     hello {server_time}: offset = server_time − local time when hello
+//     arrives (re-measured on each connect)
+//   - the countdown's deadline is the stack's bottom scan's scanned_at +
+//     game.scan_window, on that estimated server clock; an empty stack means
+//     no countdown
+//   - once the deadline has passed, the client sends no more scans
 //
-// The server allows game.scan_window + game.scan_grace, bottom to top. A
-// client's countdown starts after the server accepted the bottom scan, so a
-// scan sent before the client's deadline reaches the server at most
+// The server allows game.scan_window + game.scan_grace, bottom to top. hello
+// arrives one response delay after the server stamped it, so the client's
+// estimate runs behind by that delay and its deadline ends that much late;
+// a scan sent just before it reaches the server at most
 // window + (response delay + request delay) after the bottom scan. These tests
 // check that any round trip up to the grace is safe, and show what happens
 // beyond it.
@@ -44,33 +46,26 @@ var simSquare = []string{"1001", "1002", "1007", "1008"}
 // errGateClosed means the client's countdown ran out, so it didn't send.
 var errGateClosed = errors.New("countdown over: select again")
 
-// scanGate is the frontend's countdown rule (scanGate.ts), in Go.
+// scanGate is the frontend's countdown rule (scanGate.ts), in Go. Times are
+// on the server's clock.
 type scanGate struct {
-	window  time.Duration
-	started time.Time // zero: no countdown running
+	window   time.Duration
+	deadline time.Time // zero: no countdown running
 }
 
-// observe updates the gate with a stack size the client just learned of.
-func (g *scanGate) observe(stackSize int, now time.Time) {
-	switch {
-	case stackSize == 0:
-		g.started = time.Time{}
-	case g.started.IsZero():
-		g.started = now
+// observe updates the gate from the latest stack's bottom scan time (zero for
+// an empty stack).
+func (g *scanGate) observe(bottom time.Time) {
+	if bottom.IsZero() {
+		g.deadline = time.Time{}
+		return
 	}
+	g.deadline = bottom.Add(g.window)
 }
 
-// canScan reports whether the client may send a scan now.
-func (g *scanGate) canScan(now time.Time) bool {
-	return g.started.IsZero() || now.Sub(g.started) < g.window
-}
-
-// deadline is when the running countdown ends; zero if none is running.
-func (g *scanGate) deadline() time.Time {
-	if g.started.IsZero() {
-		return time.Time{}
-	}
-	return g.started.Add(g.window)
+// canScan reports whether the client may send a scan at serverNow.
+func (g *scanGate) canScan(serverNow time.Time) bool {
+	return g.deadline.IsZero() || serverNow.Before(g.deadline)
 }
 
 // simClient is one player's phone: a network delay each way, an event
@@ -79,12 +74,14 @@ type simClient struct {
 	e        *env
 	p        player
 	up, down time.Duration // request and response delays
+	skew     time.Duration // how far this phone's clock is off (0: accurate)
 
-	mu    sync.Mutex
-	gate  scanGate
-	stack []any    // last stack seen
-	shape []string // completed shapes last seen
-	sent  int      // scan requests actually sent
+	mu     sync.Mutex
+	offset time.Duration // server clock − local clock, from hello (serverClock.ts)
+	gate   scanGate
+	stack  []any    // last stack seen
+	shape  []string // completed shapes last seen
+	sent   int      // scan requests actually sent
 }
 
 // newSimClient connects p's event stream with delay down, and returns its
@@ -111,8 +108,28 @@ func (e *env) newSimClient(p player, up, down time.Duration) *simClient {
 			c.apply(ev.data)
 		}
 	}()
+	// hello, delivered down late like everything else: measure the offset.
+	go func() {
+		for ev := range s.hellos {
+			time.Sleep(c.down)
+			st, err := time.Parse(time.RFC3339Nano, ev.data["server_time"].(string))
+			if err != nil {
+				panic(err)
+			}
+			c.mu.Lock()
+			c.offset = st.Sub(c.localNow())
+			c.mu.Unlock()
+		}
+	}()
 	return c
 }
+
+// localNow is the phone's own clock, off by skew.
+func (c *simClient) localNow() time.Time { return time.Now().Add(c.skew) }
+
+// serverNow is the client's estimate of the server's clock. The caller holds
+// c.mu.
+func (c *simClient) serverNow() time.Time { return c.localNow().Add(c.offset) }
 
 // apply records a team state the client just received.
 func (c *simClient) apply(state map[string]any) {
@@ -123,14 +140,22 @@ func (c *simClient) apply(state map[string]any) {
 	for _, s := range state["shapes"].([]any) {
 		c.shape = append(c.shape, s.(string))
 	}
-	c.gate.observe(len(c.stack), time.Now())
+	var bottom time.Time
+	if len(c.stack) > 0 {
+		at, err := time.Parse(time.RFC3339Nano, c.stack[0].(map[string]any)["scanned_at"].(string))
+		if err != nil {
+			panic(err)
+		}
+		bottom = at
+	}
+	c.gate.observe(bottom)
 }
 
 // scan sends a scan unless the gate is closed, with the client's delays, and
 // returns the status, error code and outcome.
 func (c *simClient) scan(waypoint string) (status int, code, outcome string, err error) {
 	c.mu.Lock()
-	if !c.gate.canScan(time.Now()) {
+	if !c.gate.canScan(c.serverNow()) {
 		c.mu.Unlock()
 		return 0, "", "", errGateClosed
 	}
@@ -161,11 +186,24 @@ func (c *simClient) scan(waypoint string) (status int, code, outcome string, err
 	return res.StatusCode, env.Code, env.Payload.Outcome, nil
 }
 
-// deadline is the client's countdown end; zero if none is running.
+// deadline is the client's countdown end in real time (the server-time
+// deadline, minus the offset and the phone's skew), for tests to sleep until;
+// zero if none is running.
 func (c *simClient) deadline() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.gate.deadline()
+	if c.gate.deadline.IsZero() {
+		return time.Time{}
+	}
+	return c.gate.deadline.Add(-c.offset - c.skew)
+}
+
+// serverDeadline is the client's countdown end on the server's clock, as the
+// client computed it; zero if none is running.
+func (c *simClient) serverDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gate.deadline
 }
 
 // eventually fails unless cond holds within a few seconds.
@@ -237,14 +275,15 @@ func TestSimTeamCompletesUnderLatency(t *testing.T) {
 		eventually(t, "player sees the purge and the square", func() bool {
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			return len(c.stack) == 0 && len(c.shape) == 1 && c.shape[0] == "square" && c.gate.started.IsZero()
+			return len(c.stack) == 0 && len(c.shape) == 1 && c.shape[0] == "square" && c.gate.deadline.IsZero()
 		})
 	}
 }
 
 // TestSimLastScanAtDeadlineWithinGrace has the last player on a slow network
 // (300 ms each way, a 600 ms round trip, under the 1 s grace) send at the very
-// end of their own countdown, which started when the first scan reached them
+// end of their own countdown (the bottom scan's time + the window, on their
+// hello-corrected clock, which runs one response delay behind the server's)
 // over the event stream. The server still accepts it and the square completes.
 func TestSimLastScanAtDeadlineWithinGrace(t *testing.T) {
 	slow := 300 * time.Millisecond
@@ -397,7 +436,54 @@ func TestSimStaleScanReachesEveryone(t *testing.T) {
 		eventually(t, "player sees the stale scan dropped", func() bool {
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			return len(c.stack) == 0 && c.gate.started.IsZero()
+			return len(c.stack) == 0 && c.gate.deadline.IsZero()
 		})
+	}
+}
+
+// TestSimSkewedClocksShareTheDeadline gives players phones whose clocks are up
+// to 9 s wrong, either way. Each corrects with hello, so every phone computes
+// the same deadline on the server's clock, and one whose clock is far off
+// still gets its last scan in at the end of the countdown.
+func TestSimSkewedClocksShareTheDeadline(t *testing.T) {
+	skews := []time.Duration{-9 * time.Second, 7 * time.Second, 0, 4 * time.Second, -3 * time.Second, 9 * time.Second}
+	_, cs := simTeam(t, "square", func(int) (time.Duration, time.Duration) { return 20 * time.Millisecond, 20 * time.Millisecond })
+	for i, c := range cs {
+		c.mu.Lock()
+		c.skew = skews[i]
+		c.mu.Unlock()
+	}
+	// Reconnect-equivalent: re-measure each offset with the skew in place.
+	for _, c := range cs {
+		h := c.e.openStream(c.p)
+		ev := <-h.hellos
+		time.Sleep(c.down)
+		st, _ := time.Parse(time.RFC3339Nano, ev.data["server_time"].(string))
+		c.mu.Lock()
+		c.offset = st.Sub(c.localNow())
+		c.mu.Unlock()
+		h.cancel()
+	}
+
+	if status, code, _, err := cs[0].scan(simSquare[0]); err != nil || status != http.StatusOK {
+		t.Fatalf("first scan: %d %s %v", status, code, err)
+	}
+	for _, c := range cs {
+		eventually(t, "every phone has a deadline", func() bool { return !c.serverDeadline().IsZero() })
+	}
+	want := cs[0].serverDeadline()
+	for i, c := range cs {
+		if got := c.serverDeadline(); !got.Equal(want) {
+			t.Fatalf("player %d (clock off by %v): deadline %v, want %v", i, skews[i], got, want)
+		}
+	}
+	for i, w := range simSquare[1:3] {
+		cs[i+1].scan(w)
+	}
+	last := cs[5] // clock 9 s fast
+	time.Sleep(time.Until(last.deadline().Add(-50 * time.Millisecond)))
+	status, code, outcome, err := last.scan(simSquare[3])
+	if err != nil || status != http.StatusOK || outcome != "pattern_completed" {
+		t.Fatalf("last scan from a phone 9 s fast: %d %s %q %v", status, code, outcome, err)
 	}
 }

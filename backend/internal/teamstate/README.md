@@ -42,7 +42,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Last cast** | `State.LastCast`, `last_cast` in JSON: the team's newest cast (pattern, shape, who, when, and whether the pattern was already completed). Kept until the next cast; a new selection or a clear doesn't remove it. |
 | **Wrong scan** | A scan whose waypoint, with the correct scans already in the stack, isn't part of any pattern of the selected shape. It's still pushed (never rejected), occupies its member's one scan and its waypoint slot, poisons the selection (it can no longer complete), and **never goes stale**: it stays until the selection is purged. The client is never told which scans are wrong. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection. |
-| **Countdown** | The client's timer: **1 m** (`game.scan_window`) from the moment that phone first sees a non-empty stack. After it the phone sends no scans. The grace is never shown; it absorbs network delay (see [The client countdown and latency](#the-client-countdown-and-latency)). |
+| **Countdown** | The client's timer, to a deadline on the server's clock: the bottom scan's `scanned_at` + **1 m** (`game.scan_window`), the same on every phone. The phone estimates server time from the stream's `hello`. After the deadline the phone sends no scans. The grace is never shown; it absorbs network delay (see [The client countdown and latency](#the-client-countdown-and-latency)). |
 | **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts and sizes, plus the window, grace and stack capacity in milliseconds and points. Static while the backend runs. |
 
 **Client words.** The client's **"type"** is our **Shape**, its **"shape"** is our **Pattern**, its **"point"** is our **Waypoint**, and its **"buffer"** is our **Stack**. This README and the code always use the code's words. The full vocabulary, spells included, is in [`internal/atlas/README.md`](../atlas/README.md).
@@ -255,52 +255,66 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 Why the stacks agree: memory pushes every accepted scan and only drops stale *correct* scans, which are always the oldest. The live correct scans fit one pattern, so there are at most **6** (`game.max_pattern_points`) of them, and they're the newest rows since the selection — exactly what the query returns, after the same time filter. Wrong scans are never dropped, in memory or after a restart.
 
 ## The client countdown and latency
-The server allows a pattern's scans to span **65 s** (window + grace), measured by **its own clock** from the moment it accepted the bottom scan. A phone can't see that moment: it only learns of the first scan when a response or event reaches it, after some network delay. So the client counts down the **window only**, and the **grace pays for the network**.
+The server allows a pattern's scans to span **65 s** (window + grace), measured by **its own clock** from the moment it accepted the bottom scan. Every phone counts down to the same moment on that clock, but it can only estimate the server's clock, and its estimate runs late by one network delay. So the client counts down the **window only**, and the **grace pays for the network**.
+
+**Server time on the phone** (`frontend/src/lib/game/serverClock.ts`, class `ServerClock`). Every event stream opens with `hello {server_time}` (AGENTS.md §9). On each `hello`, the phone sets:
+- offset = `Date.parse(server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic: never jumps when the user or the network changes the wall clock)
+- server now = localNow + offset
+
+Every reconnect sends a new `hello`, so the offset is re-measured. Before the first `hello` the offset is 0 (the phone's own clock).
 
 **The rule** (`frontend/src/lib/game/scanGate.ts`, class `ScanGate`):
-1. **Start** the countdown when this client first sees a **non-empty** stack: its own `200` for the first scan, or a teammate's scan arriving as a `team_state` event. Later scans don't restart it.
-2. **Reset** it whenever the client sees an **empty** stack: a new selection, a completion, a clear, or the server's expiry event dropping the last correct scan.
-3. **Stop sending** once **1 m** (`game.scan_window`, from `scan_window_ms`) has passed: the phone sends no scan at all. The team selects again to start over.
+1. **Deadline** = the stack's **bottom** scan's `scanned_at` + **1 m** (`game.scan_window`, from `scan_window_ms`), read from the latest `team_state` (or a scan's `200`). Later scans don't move it.
+2. **No countdown** while the stack is **empty**: a new selection, a completion, a clear, or the server's expiry event dropping the last correct scan.
+3. **Stop sending** once server now (`ServerClock.now()`) reaches the deadline: the phone sends no scan at all. The team selects again to start over.
+4. **A new bottom sets a new deadline.** When the bottom scan goes stale, the server publishes a `team_state` without it, and the next scan's `scanned_at` + window is the new deadline.
 
-The window comes from `GET /api/game/shapes`; the grace is never shown or counted down.
+The window comes from `GET /api/game/shapes`; the grace is never shown or counted down. The phone never decides state from time: it only stops sending. The server still publishes every expiry itself.
 
-**The bound.** Let the server accept the bottom scan at time *T*. For one phone:
-- *d*<sub>down</sub>: how long the news of that scan (its `200`, or the `team_state` event) takes to reach the phone. Its countdown starts at *T* + *d*<sub>down</sub> and ends at *T* + *d*<sub>down</sub> + *W*.
-- *d*<sub>up</sub>: how long that phone's last scan takes to reach the server (request plus processing up to `now()`).
-- The last scan is sent before the countdown ends, so the server stamps it before *T* + *W* + *d*<sub>down</sub> + *d*<sub>up</sub>.
+**The bound.** Let the server accept the bottom scan at server time *T*, so the deadline is *T* + *W* on the server's clock. For one phone:
+- *d*: how late that phone's `hello` arrived (the response delay). Its estimate of server time runs *d* behind, never ahead, so it stops at server time ≤ *T* + *W* + *d*.
+- *u*: how long that phone's last scan takes to reach the server (request plus processing up to `now()`). The server stamps it before *T* + *W* + *d* + *u*.
 - The server accepts it with the bottom still live if the span is at most *W* + *G*.
 
-So **a phone is safe whenever *d*<sub>down</sub> + *d*<sub>up</sub> ≤ *G***: the response (or event) delay plus the request delay fits in the grace, **5 s** (`game.scan_grace`). Beyond that, the bottom scan is already stale when the late scan lands: the server drops it and answers `scan_added`, not `pattern_completed` (walkthrough 3's behaviour), and the team rescans that point or selects again.
+So **a phone is safe whenever *d* + *u* ≤ *G***: the `hello` delay plus the request delay fits in the grace, **5 s** (`game.scan_grace`). Beyond that, the bottom scan is already stale when the late scan lands: the server drops it and answers `scan_added`, not `pattern_completed` (walkthrough 3's behaviour), and the team rescans that point or selects again.
 
-- **Why not count down to `expires_at`.** That needs the phone's clock to agree with the server's. Counting from when the phone itself saw the stack uses only its own monotonic clock (`performance.now()`).
-- **A stale bottom drops but the countdown doesn't reset.** The stack is still non-empty, so the countdown keeps running from the first scan seen. The new bottom is later, so the phone is only more conservative.
-- **Page load mid-attempt.** `/play` starts the countdown from the bottom scan's `scanned_at` against the phone's wall clock. Clock skew shifts it; the grace absorbs small skew.
+- **The phone's own clock error doesn't matter.** `hello` cancels it: a phone 9 s fast gets an offset 9 s smaller, and lands on the same server time.
+- ***d* is the `hello` delay, not the current one.** If the network was slow when the stream opened and fast later (or the other way round), the error is what `hello` took. The next reconnect re-measures it.
+- **A late `team_state` is safe.** A phone that learns of the bottom scan late gets the same deadline, so it just sees less of the countdown.
 
-**Worked example**, config as shipped (*W* = **60 s**, *G* = **5 s**), square `1001 1002 1007 1008`, times after 12:00:
+**Why this design:**
+- **The same deadline on every phone.** It's computed from a state timestamp, not from when each phone happened to see the stack, so teammates' countdowns end together.
+- **It survives reloads.** A page loaded mid-attempt reads the bottom `scanned_at` and gets the deadline everyone else has.
+- **It's immune to phone clock error.** Only the offset from `hello` is used, never the phone's wall clock.
 
-| Time | Event | A's countdown | D's countdown |
+**Worked example**, config as shipped (*W* = **60 s**, *G* = **5 s**), square `1001 1002 1007 1008`, server times after 12:00. A's stream opened earlier: its `hello` was stamped 11:58:00.000 and arrived 0.2 s later, so A's estimate runs 0.2 s behind. D's `hello` (stamped 11:58:30.000) took 1.5 s, so D's runs 1.5 s behind. D's phone clock is also 9 s fast; the offset cancels that.
+
+| Server time | Event | A's estimate | D's estimate |
 |---|---|---|---|
-| 00:00.000 | Server accepts A's `1001` (bottom), stack `1001/A@00.000` | | |
-| 00:00.200 | A's `200` arrives (*d*<sub>down</sub> = 0.2 s) | starts; ends 01:00.200 | |
-| 00:01.500 | D's `team_state` event arrives over a slow link (*d*<sub>down</sub> = 1.5 s) | | starts; ends 01:01.500 |
+| 00:00.000 | Server accepts A's `1001` (bottom), stack `1001/A@00.000`; deadline **01:00.000** for everyone | | |
+| 00:00.200 | A's `200` arrives | deadline 01:00.000 | |
+| 00:01.500 | D's `team_state` event arrives | | deadline 01:00.000 |
 | 00:10 – 00:30 | B and C scan `1002`, `1007`; accepted | running | running |
-| 01:01.400 | D taps scan `1008`, 0.1 s before D's countdown ends | | still open: sent |
-| 01:03.400 | The request reaches the server (*d*<sub>up</sub> = 2.0 s) | | |
-| | Span 63.4 s ≤ 65 s: **`pattern_completed`**. *d*<sub>down</sub> + *d*<sub>up</sub> = 3.5 s ≤ 5 s | reset (empty stack) | reset |
+| 01:00.200 | A's countdown ends | 01:00.000 | 00:58.700 |
+| 01:01.400 | D taps scan `1008`, 0.1 s before D's countdown ends | | 00:59.900: open, sent |
+| 01:03.400 | The request reaches the server (*u* = 2.0 s) | | |
+| | Span 63.4 s ≤ 65 s: **`pattern_completed`**. *d* + *u* = 3.5 s ≤ 5 s | no countdown (empty stack) | no countdown |
 
-Had D's request taken 4.0 s instead (*d*<sub>down</sub> + *d*<sub>up</sub> = 5.5 s > 5 s), it would land at 01:05.400: A's scan is 65.4 s old, stale and dropped first, so the answer is `scan_added` with stack `1002 1007 1008`.
+Had D's request taken 4.0 s instead (*d* + *u* = 5.5 s > 5 s), it would land at 01:05.400: A's scan is 65.4 s old, stale and dropped first, so the answer is `scan_added` with stack `1002 1007 1008`.
 
-**Tested** end to end in `internal/server/tests/simulation_test.go`, with the window shrunk to 2 s and the grace to 1 s so the tests run in seconds. Each simulated player has its own request and response delays, its own event stream, and a Go copy of `ScanGate`:
+**Tested** end to end in `internal/server/tests/simulation_test.go`, with the window shrunk to 2 s and the grace to 1 s so the tests run in seconds. Each simulated player has its own request and response delays, its own event stream, an offset measured from `hello` (delivered one response delay late), an optional phone clock error (`skew`), and a Go copy of `ScanGate`:
 
 | Test | Shows |
 |---|---|
-| `TestSimTeamCompletesUnderLatency` | Four players scan the square at once, each with different delays up to 150 ms each way: exactly one `pattern_completed`; every screen ends with an empty stack, the square completed and its countdown reset |
-| `TestSimLastScanAtDeadlineWithinGrace` | The last player, 300 ms each way (0.6 s ≤ 1 s grace), sends 20 ms before their own countdown ends: `pattern_completed` |
+| `TestSimTeamCompletesUnderLatency` | Four players scan the square at once, each with different delays up to 150 ms each way: exactly one `pattern_completed`; every screen ends with an empty stack, the square completed and no countdown |
+| `TestSimLastScanAtDeadlineWithinGrace` | The last player, 300 ms each way (0.6 s ≤ 1 s grace), sends 20 ms before their own deadline (on their `hello`-corrected clock, 300 ms behind the server's): `pattern_completed` |
 | `TestSimLatencyBeyondGraceLosesBottomScan` | The same with 700 ms each way (1.4 s > 1 s grace): the bottom scan is stale on arrival, so `scan_added` |
-| `TestSimGateClosesThenReselectOpens` | After a countdown runs out the client sends nothing; a reselect resets every player's countdown and the square can be scanned again |
+| `TestSimGateClosesThenReselectOpens` | After the deadline the client sends nothing; a reselect empties the stack, every player's countdown ends, and the square can be scanned again |
 | `TestSimRaceSameWaypoint` | Two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every screen converges on a one-scan stack |
+| `TestSimStaleScanReachesEveryone` | In real time, after one scan with nobody acting, every player's stream shows an empty stack once the scan is older than window + grace (3 s), and no countdown runs |
+| `TestSimSkewedClocksShareTheDeadline` | Six phones with clocks off by −9, +7, 0, +4, −3 and +9 s (20 ms each way) re-measure their offset from `hello`: all compute the identical server-time deadline, and the phone 9 s fast still lands its last scan 50 ms before its deadline: `pattern_completed` |
 
-The countdown itself is unit-tested in `frontend/src/lib/game/scanGate.test.ts` (`bun run test` in `frontend/`). Keep `scanGate.ts` and the Go `scanGate` in `internal/server/tests/simulation_test.go` in step.
+The countdown and the clock are unit-tested in `frontend/src/lib/game/scanGate.test.ts` (9 tests, `ScanGate` and `ServerClock`; `bun run test` in `frontend/`). Keep `serverClock.ts`, `scanGate.ts` and the Go `simClient` and `scanGate` in `internal/server/tests/simulation_test.go` in step.
 
 ## Walkthroughs
 Team `482913`, members A–F, 2025 seed (square = `1001 1002 1007 1008` = indexes 0, 1, 6, 7; `square` = shape 2), config.toml as shipped (limit 65 s). Times are `mm:ss` after 12:00. Stacks are written bottom → top as `waypoint/member@time`.
@@ -371,7 +385,7 @@ Limit 65 s, so a correct scan stamped at *t* is live through *t* + 65 s exactly 
 | 01:35.000001 | Timer fires: drops `1002/B` | armed for **02:25.000001** (A's rescan) | `1001/A@80` | unchanged | `team_state`, stack `[1001]` |
 | 02:25.000001 | Timer fires: drops `1001/A` | **none** (no correct scans left) | empty; selection still `square` | unchanged | `team_state`, stack `[]` |
 
-Every phone's countdown resets on the empty stack, and A or B can scan again under the same selection. Had the backend restarted at 01:50, `Load` would rebuild `1001/A@10 1002/B@30 1001/A@80` from `team_scan` (every row after `after_scan_id`, newest 6; `expire` never deletes rows). The first two are stale (their expiries, 01:15.000001 and 01:35.000001, are past), so `view` already shows `[1001]`, and the timer `Load` arms is due at once: `expire` drops both, leaving the same `1001/A@80` stack as before the restart. Its event goes to nobody (no streams are open before the backend serves); each member gets the state as their stream reconnects.
+Each `team_state` moves every phone's deadline to the new bottom's `scanned_at` + 60 s: 01:10 (A's `1001@10`), then 01:30 (B's, after the first expiry), then 02:20 (A's rescan); the empty stack at 02:25.000001 ends the countdown, and A or B can scan again under the same selection. Had the backend restarted at 01:50, `Load` would rebuild `1001/A@10 1002/B@30 1001/A@80` from `team_scan` (every row after `after_scan_id`, newest 6; `expire` never deletes rows). The first two are stale (their expiries, 01:15.000001 and 01:35.000001, are past), so `view` already shows `[1001]`, and the timer `Load` arms is due at once: `expire` drops both, leaving the same `1001/A@80` stack as before the restart. Its event goes to nobody (no streams are open before the backend serves); each member gets the state as their stream reconnects.
 
 A wrong scan arms nothing: a stack of only wrong scans has no timer at all, and never shrinks until a purge.
 
@@ -440,7 +454,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 - `selection` is `null` when nothing is selected.
 - `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow), and `damage` is what the cast spell deals. It stays until the next cast: selecting or clearing doesn't remove it.
 - `stack` is the live scans, bottom (oldest) first; `[]` when empty. Stale correct scans are left out; wrong scans are included (with no flag telling them apart).
-- `expires_at` is `scanned_at` + 65 s (window + grace): when a correct scan goes stale on the server. One microsecond later the server publishes a `team_state` without it. The app's countdown doesn't use it (see [The client countdown and latency](#the-client-countdown-and-latency)); it's for display.
+- `expires_at` is `scanned_at` + 65 s (window + grace): when a correct scan goes stale on the server. One microsecond later the server publishes a `team_state` without it. The app's countdown doesn't use it (it counts to the bottom scan's `scanned_at` + 60 s, see [The client countdown and latency](#the-client-countdown-and-latency)); it's for display.
 
 **`Game`** (`GET /api/game/shapes`), with the 2025 seed and config.toml as shipped:
 ```json
@@ -678,5 +692,5 @@ Checked in this order:
   | `TestExpiryTimerFollowsWrites` | one timer after two scans; none after a purge; none for a stack of only a wrong scan; none after a cast |
   | `TestLastCast` | walkthrough 7: `last_cast` null before any cast; set (pattern, shape, `cast_by`, `cast_at`) after a cast; `already_completed` on the repeat; kept by a new selection; two `team_cast` rows; a restart reloads the same `last_cast` (JSON equal) |
 - `internal/server/tests/teamstate_test.go`: `TestSelectAndScanRoutes`, every route and error code over HTTP, including `waypoint_already_scanned`, `member_already_scanned`, a wrong scan being accepted and locking the member, and the body size limit; `TestGameShapes`, `GET /api/game/shapes` without a token (`401 missing_token`) and with one: the seed's 5 shapes, `square` with 18 patterns of 4 points, and the window, grace and capacity from `config.toml`.
-- `internal/server/tests/simulation_test.go`: the countdown under latency (see [The client countdown and latency](#the-client-countdown-and-latency)), and `TestSimStaleScanReachesEveryone`: in real time, after one scan with nobody acting, every simulated player's stream shows an empty stack once the scan is older than the simulated window + grace, and every countdown resets.
+- `internal/server/tests/simulation_test.go`: the countdown under latency and clock error, all seven `TestSim…` tests (table in [The client countdown and latency](#the-client-countdown-and-latency)), including `TestSimStaleScanReachesEveryone` (the expiry reaches every stream in real time) and `TestSimSkewedClocksShareTheDeadline` (phones up to ±9 s off share one deadline).
 - `internal/server/tests/events_test.go`: `team_state` on connect; `TestStartPublishesTeamState`: when the leader starts, every open stream gets `team` then the empty `team_state`, in that order.

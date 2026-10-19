@@ -269,8 +269,9 @@ paths:
       summary: Pattern types to pick, and the timing rules
       description: |
         The shapes ("types" on the client) a team can select, and the countdown rules. The client counts down
-        `scan_window_ms` from its first accepted scan and sends nothing after; the server allows
-        `scan_window_ms + scan_grace_ms`, so the grace absorbs network latency.
+        to the stack's bottom `scanned_at` + `scan_window_ms`, on the server's clock as estimated from the
+        stream's `hello`, and sends nothing after; the server allows `scan_window_ms + scan_grace_ms`, so the
+        grace absorbs network latency.
       responses:
         "200":
           description: Shapes and rules.
@@ -488,8 +489,11 @@ components:
     Hello:
       type: object
       description: |
-        The first event on every stream. Clients compare `server_time` with their own clock to correct
-        countdowns; the server owns time and publishes time-driven changes itself.
+        The first event on every stream, and the canonical clock for clients. On each one, so on every
+        connect, a client re-measures its offset: server_time minus its own monotonic clock. Client
+        countdowns are deadlines in server time computed from state timestamps (the scan countdown is the
+        stack's bottom `scanned_at` + `scan_window_ms`). The server owns time and publishes time-driven
+        changes itself; clients never decide state from time. Carries nothing else.
       required: [server_time]
       properties:
         server_time: { type: string, format: date-time, description: The server's clock when the stream opened, UTC. }
