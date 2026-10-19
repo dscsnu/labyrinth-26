@@ -68,6 +68,7 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
   3. Otherwise `next`.
 
   `server.Build` wraps admin routes as `authAPI.RequireAuth(userAPI.RequireAdmin(h))` and hands that to `teams.API.AdminRoutes`. One Postgres read per admin request: admin traffic is a handful of people, not the game loop.
+- **`RequireStaff(next)`** is the same guard for `HELPER` **or** `ADMIN`. It reads the role from the database on every request like `RequireAdmin`, and answers `403 not_staff` (message `only staff can do this`, `ErrNotStaff`) unless the role is `RoleHelper` or `RoleAdmin`. `server.Build` wraps the QR mint route as `authAPI.RequireAuth(userAPI.RequireStaff(h))` and hands it to `qr.API.StaffRoutes`.
 
 ### `read.go`: types and reads
 - **`Role`** is a `string` type. Constants `RolePlayer = "PLAYER"`, `RoleHelper = "HELPER"`, `RoleAdmin = "ADMIN"`, matching the `user_role` enum.
@@ -264,7 +265,7 @@ Called only after auth has verified the email (see `internal/auth/README.md`).
 ### General rules
 - One account per Google subject; one account per email.
 - Roles change only by hand in Postgres. No route changes them.
-- Code that gates on role must read it with `Get`; the token's role (`identity.Role`) can be up to **12 h** (`auth.token_ttl`) stale. Routes do it through `RequireAdmin`.
+- Code that gates on role must read it with `Get`; the token's role (`identity.Role`) can be up to **12 h** (`auth.token_ttl`) stale. Routes do it through `RequireAdmin` (admin) or `RequireStaff` (helper/admin).
 
 ### `RequireAdmin` (every `/api/admin` route)
 | Case | Result |
@@ -275,6 +276,15 @@ Called only after auth has verified the email (see `internal/auth/README.md`).
 | Role in `userprofile` is `ADMIN` (even if the token says `PLAYER`) | The route runs |
 | Database error | `500 internal error`, logged |
 - `google_sub` and `last_login_at` are never sent to clients. `/api/me` sends the caller only their own email.
+
+### `RequireStaff` (the `/api/qr` mint route)
+| Case | Result |
+|---|---|
+| No token, or a bad one | `401` from auth's middleware, before this runs |
+| Token valid, user deleted | `401 user_not_found` |
+| Role in `userprofile` is `PLAYER` (whatever the token says) | `403 not_staff` |
+| Role in `userprofile` is `HELPER` or `ADMIN` (even if the token says `PLAYER`) | The route runs |
+| Database error | `500 internal error`, logged |
 
 ## Concurrency
 No locks and no memory: Postgres settles every race.
@@ -307,7 +317,7 @@ No locks and no memory: Postgres settles every race.
 - **A removed avatar can't be cleared.** Since an empty `picture` keeps the stored avatar, a user who deletes their Google photo keeps the old URL (which may stop loading).
 - **Emails are case-sensitive.** Google normally sends lowercase, but nothing enforces it.
 - **No role management.** Roles are set by SQL. The admin routes that exist (`/api/admin/teams…`, in teams) use roles but can't change them.
-- **`HELPER` has no routes.** Nothing gates on it yet.
+- **`HELPER` gates only QR minting.** `RequireStaff` (HELPER/ADMIN) is used by `GET /api/qr/{waypoint_id}`; nothing else gates on `HELPER` yet.
 - **No account deletion.** Deleting a user who has played is blocked by foreign keys without `ON DELETE` actions on `team`, `team_scan` and `team_selection`.
 - **`last_login_at` is written but never read.**
 
@@ -331,6 +341,7 @@ End to end in `internal/server` (real Postgres):
 | `internal/server/tests/auth_test.go` `TestEmailInUse` | A sign-in whose email another account has → `reason=email_in_use` |
 | `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile` | A second sign-in with a new name and no picture: the team shows the new name and keeps the avatar |
 | `internal/server/tests/admin_test.go` `TestAdminGuard` | `RequireAdmin`: no token `401 missing_token`; a player `403 not_admin`; made `ADMIN` by SQL (token still says `PLAYER`) is let in; demoted by SQL is refused on the next request |
+| `internal/server/tests/qr_test.go` `TestQRGuard` | `RequireStaff`: no token `401 missing_token`; a player `403 not_staff`; made `HELPER` (and `ADMIN`) by SQL is let in; demoted by SQL is refused on the next request |
 | `internal/server/tests/teams_test.go` `newPlayer` helper | every team and team-state test creates its users through `SignInWithGoogle` |
 
 Not covered by any test yet: `401 user_not_found` over HTTP, and a database error on `/api/me`.

@@ -398,6 +398,8 @@ Routes registered here but owned by use cases (see their READMEs):
 | `teams` | `GET /api/teams/me`, `POST /api/teams`, `POST /api/teams/join`, `POST /api/teams/leave`, `PUT /api/teams/me/ready`, `POST /api/teams/me/start` | Bearer |
 | `teams` (admin) | `GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}[?new_leader=<uuid>]` | Bearer + `ADMIN` in Postgres (`403 not_admin`) |
 | `teamstate` | `GET /api/game/shapes`, `GET /api/teams/me/state`, `GET /api/teams/me/casts` (the cast log, newest first), `PUT` and `DELETE /api/teams/me/state/selection`, `POST /api/teams/me/state/scans` | Bearer |
+| `qr` | `POST /api/qr/verify` | Bearer |
+| `qr` (staff) | `GET /api/qr/{waypoint_id}` | Bearer + `HELPER`/`ADMIN` in Postgres (`403 not_staff`) |
 
 `/healthz` is the only route that touches Postgres on every call. `streams` counts every open subscription (all users, all tabs).
 

@@ -18,7 +18,7 @@ Every number below that comes from `config.toml` is shown with its current value
 ## Packages
 | Package | Files | What it does | Imported by |
 |---|---|---|---|
-| `config` | `config.go`, `settings.go` | Reads `.env` variables and `config.toml`, validates both, reports every problem at once. Parses, generates and prints the Ed25519 signing key. | `main`, `server`, `auth`, `teamstate` (`MaxTeamSize`) |
+| `config` | `config.go`, `settings.go` | Reads `.env` variables and `config.toml`, validates both, reports every problem at once. Parses, generates and prints the Ed25519 signing key and the QR signing secret. | `main`, `server`, `auth`, `teamstate` (`MaxTeamSize`) |
 | `config/configtest` | `configtest.go` | Loads the repository's `config.toml` for tests. | tests |
 | `httpx` | `respond.go` | The response envelope `{"success", "code", "message", "payload"}` and `DecodeJSON`. | every `api.go`, `server` |
 | `identity` | `identity.go` | Carries the signed-in user through a request, so use cases don't import `auth`. | `auth` (sets), everyone else (reads) |
@@ -39,14 +39,18 @@ Two sources, loaded together by `Load()`:
 Both are read **once at startup**. A change needs a restart.
 
 ### `config.go`
-- **`Config`**: `Port`, `DatabaseURL`, `JWTKey ed25519.PrivateKey`, `GoogleClientID`, `GoogleClientSecret`, `PublicURL *url.URL`, `FrontendURL *url.URL`, `AllowedEmailDomains []string`, `Settings Settings`.
+- **`Config`**: `Port`, `DatabaseURL`, `JWTKey ed25519.PrivateKey`, `QRSecret []byte`, `GoogleClientID`, `GoogleClientSecret`, `PublicURL *url.URL`, `FrontendURL *url.URL`, `AllowedEmailDomains []string`, `Settings Settings`.
 - **`Load()`** reads every variable below, then `LoadSettings(SettingsPath())`. Each problem is appended to a list; at the end, if any, it returns `nil` and `errors.Join` of all of them, so one start shows everything that's wrong.
 - **`SecureCookies()`**: `true` when `PUBLIC_URL`'s scheme is `https`. Auth uses it for the `Secure` flag on its cookies.
 - **`ParsePrivateKey(b64)`**: trims spaces, base64-decodes (standard alphabet), parses PKCS#8 DER, requires Ed25519. Errors:
   - `must be base64 (generate with: go run . keygen)`
   - `not a PKCS#8 private key: …`
   - `must be an Ed25519 key`
+- **`ParseQRSecret(b64)`**: trims spaces, base64-decodes, requires at least 32 bytes. Errors:
+  - `must be base64 (generate with: go run . keygen)`
+  - `must be at least 32 bytes, got N`
 - **`GenerateKeyPair()`**: a new Ed25519 pair as base64 PKCS#8 (private, 48 bytes DER → 64 characters) and base64 SPKI (public, 44 bytes DER → 60 characters). Used by `labyrinth keygen`.
+- **`GenerateQRSecret()`**: 32 random bytes, base64. Used by `labyrinth keygen`.
 - **`PublicKeyBase64(key)`**: the base64 SPKI of `key`'s public half. Used by `labyrinth pubkey`.
 - **`getenv(key, fallback)`**: the variable, or `fallback` if unset **or empty**.
 
@@ -56,6 +60,7 @@ Both are read **once at startup**. A change needs a restart.
 | `PORT` | no, default `3000` | not validated | — | `main`: listen on `":" + PORT` |
 | `DATABASE_URL` | yes | non-empty; its format is checked only when `postgres.Connect` parses it | `DATABASE_URL is required` | `main` |
 | `JWT_PRIVATE_KEY` | yes | `ParsePrivateKey` | `JWT_PRIVATE_KEY is required`, or `JWT_PRIVATE_KEY: <parse error>` | `auth.NewTokens` |
+| `QR_SECRET` | yes | `ParseQRSecret` | `QR_SECRET is required`, or `QR_SECRET: <parse error>` | `qr.New` |
 | `GOOGLE_CLIENT_ID` | yes | non-empty | `GOOGLE_CLIENT_ID is required` | `auth.NewGoogle` |
 | `GOOGLE_CLIENT_SECRET` | yes | non-empty | `GOOGLE_CLIENT_SECRET is required` | `auth.NewGoogle` |
 | `PUBLIC_URL` | yes | trailing `/` trimmed; must parse with a scheme and host | `PUBLIC_URL is required` / `PUBLIC_URL must be an absolute URL` | Google redirect URI `PUBLIC_URL + "/auth/google/callback"`; `SecureCookies` |
@@ -67,7 +72,7 @@ Both are read **once at startup**. A change needs a restart.
 "Required" means set **and non-empty**: `.env.example` ships `JWT_PRIVATE_KEY=""`, which fails with `JWT_PRIVATE_KEY is required` until you run `go run . keygen`.
 
 ### `settings.go`: `config.toml`
-- **`Settings`** has one struct per table: `Teams`, `Game`, `Auth`, `Live`, `Server`, `Storage`, each field with a `toml` tag.
+- **`Settings`** has one struct per table: `Teams`, `Game`, `QR`, `Auth`, `Live`, `Server`, `Storage`, each field with a `toml` tag.
 - **`Duration`** wraps `time.Duration`; its `UnmarshalText` uses `time.ParseDuration`, so durations are strings like `"30s"`, `"2m"`, `"12h"`. A bare number fails (`time: missing unit in duration "60"`).
 - **`LoadSettings(path)`**:
   1. `toml.DecodeFile(path, &s)`. A syntax error, a wrong type (`size = "6"`) or a bad duration is returned **alone**, as `read <path>: toml: line N (last key "live.heartbeat"): …`. Validation doesn't run.
@@ -87,6 +92,8 @@ Both are read **once at startup**. A change needs a restart.
 | `teams.name_max_length` | `int` | `32` | 1–32 (`… must be 1-32 (the database's limit)`) | Longest team name, in characters |
 | `teams.code_attempts` | `int` | `10` | ≥ 1 | Random 6-digit team codes to try per creation |
 | `game.max_pattern_points` | `int` | `6` | 1–15 (`game.max_pattern_points must be 1-15`; `config.MaxPatternPoints`, the size of the stack's fixed array) | Most waypoints per pattern; a team's stack holds this many plus one wrong scan. Not tied to `teams.size`: one member may scan several points |
+| `qr.rotate` | `Duration` | `"5s"` | > 0 (`qr.rotate must be positive`) | How often a waypoint's rotating QR changes; the `/qr` display re-issues a token this often |
+| `qr.tolerance` | `Duration` | `"5s"` | > 0 (`qr.tolerance must be positive`) | How much longer than `qr.rotate` a scan stays accepted; a token is valid `qr.rotate` + `qr.tolerance` after issue |
 | `auth.token_ttl` | `Duration` | `"12h"` | > 0 | Access token lifetime; a role change applies at the next sign-in |
 | `auth.login_code_ttl` | `Duration` | `"2m"` | > 0 | Time to redeem a sign-in's one-time code |
 | `auth.oauth_state_ttl` | `Duration` | `"10m"` | ≥ 1 s (`auth.oauth_state_ttl must be at least 1s`): the state cookie's `Max-Age` is whole seconds | Time a user may spend on Google's screen |
@@ -129,8 +136,8 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | Test | Covers |
 |---|---|
 | `TestRepositoryConfigLoads` | The committed `backend/config.toml` is valid |
-| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `per_point`, `per_100m`, `walkability`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
-| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero `per_point`, negative `per_100m`, walkability under 1.0; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
+| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `qr.rotate`, `qr.tolerance`, `per_point`, `per_100m`, `walkability`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
+| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero `per_point`, negative `per_100m`, walkability under 1.0; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `qr.rotate`, `qr.tolerance`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
 
 Not tested: `Load()` and the environment variables, and the key functions. A missing `per_100m` is a case in `TestLoadSettingsRejects`.
 

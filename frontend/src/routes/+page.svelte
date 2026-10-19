@@ -13,6 +13,8 @@
     {JSON.stringify(user, null, 2)}
 
     <p><a href="/team">Team</a></p>
+    <p><a href="/test-scan">Test scan</a></p>
+    <p><a href="/qr">QR display</a></p>
     {#if user.role === "ADMIN"}<p><a href="/admin">Admin</a></p>{/if}
 
     <form method="POST" action="/auth/logout">

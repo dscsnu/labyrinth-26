@@ -35,6 +35,8 @@ tags:
     description: Forming a team and starting the game (see internal/teams/README.md)
   - name: game
     description: Selecting a type and scanning (see internal/teamstate/README.md)
+  - name: qr
+    description: Rotating waypoint QR tokens (see internal/qr/README.md)
   - name: live
     description: Server-sent events
   - name: admin
@@ -436,6 +438,62 @@ paths:
           $ref: "#/components/responses/Error"
           description: "Codes: `not_in_game`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`"
 
+  /api/qr/{waypoint_id}:
+    get:
+      tags: [qr]
+      summary: The waypoint's signing key and timing rules
+      description: |
+        Staff only (HELPER or ADMIN, read from the database each request). Returns the waypoint-scoped
+        HMAC key and the timing rules; the `/qr` display signs its own rotating tokens locally (no
+        polling), one per `qr.rotate`. Each token is valid for `qr.rotate` + `qr.tolerance` (10 s).
+      parameters:
+        - { name: waypoint_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{4}$" }, example: "1001" }
+      responses:
+        "200":
+          description: The signing key and timing rules.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/SigningKey" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_waypoint_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_staff`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`" }
+
+  /api/qr/verify:
+    post:
+      tags: [qr]
+      summary: Verify a scanned token
+      description: |
+        Any signed-in user; changes nothing. Returns the waypoint a token stands for if its signature
+        checks out and it's within its window, so a scanner can be tested without touching team state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [qr]
+              additionalProperties: false
+              properties:
+                qr: { type: string, description: The token read off the QR., example: "1001:1760000000.nR5…" }
+      responses:
+        "200":
+          description: The waypoint.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/QRVerify" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_qr`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qr_expired`" }
+
   /api/events:
     get:
       tags: [live]
@@ -701,3 +759,18 @@ components:
         pattern: { type: array, items: { type: string }, description: Set on pattern_completed., example: ["1001", "1002", "1007", "1008"] }
         already_completed: { type: boolean, description: The pattern had been completed before, so progress didn't grow. }
         state: { $ref: "#/components/schemas/TeamState" }
+
+    SigningKey:
+      type: object
+      required: [waypoint_id, key, rotate_ms, window_ms, server_time]
+      properties:
+        waypoint_id: { type: string, pattern: "^[0-9]{4}$", example: "1001" }
+        key: { type: string, description: "The waypoint-scoped HMAC key, hex-encoded (32 bytes)." }
+        rotate_ms: { type: integer, description: How often the display signs a fresh token (qr.rotate), in milliseconds., example: 5000 }
+        window_ms: { type: integer, description: "How long each token is valid: qr.rotate + qr.tolerance, in milliseconds.", example: 10000 }
+        server_time: { type: integer, description: The backend's clock in whole seconds, to correct the display's own clock., example: 1760000000 }
+    QRVerify:
+      type: object
+      required: [waypoint_id]
+      properties:
+        waypoint_id: { type: string, pattern: "^[0-9]{4}$", description: The waypoint the verified token stands for., example: "1001" }

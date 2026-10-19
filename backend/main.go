@@ -53,7 +53,11 @@ func run(log *slog.Logger, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("# backend/.env\nJWT_PRIVATE_KEY=\"%s\"\n\n# frontend/.env\nJWT_PUBLIC_KEY=\"%s\"\n", priv, pub)
+		qr, err := config.GenerateQRSecret()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("# backend/.env\nJWT_PRIVATE_KEY=\"%s\"\nQR_SECRET=\"%s\"\n\n# frontend/.env\nJWT_PUBLIC_KEY=\"%s\"\n", priv, qr, pub)
 		return nil
 	}
 
