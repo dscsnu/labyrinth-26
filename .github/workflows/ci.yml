@@ -1,0 +1,105 @@
+# CI: the backend/AGENTS.md §14 checklist, plus the frontend's checks, on
+# every push to main and every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (gofmt, vet, docaudit, race tests ×3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    # A throwaway Postgres, as in AGENTS.md §14. Tests drop schemas in it.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: t
+          POSTGRES_PASSWORD: t
+          POSTGRES_DB: t
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U t"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://t:t@localhost:55432/t?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: docaudit (every declaration documented)
+        run: go run ./cmd/docaudit
+
+      # Three runs, as AGENTS.md §14 asks: a flaky pass is a fail. -v so the
+      # next step can check nothing was skipped (a skip here usually means
+      # TEST_DATABASE_URL didn't reach the tests).
+      - name: race tests ×3
+        run: go test -race -count=3 -v ./... 2>&1 | tee test.log; exit "${PIPESTATUS[0]}"
+        shell: bash
+
+      - name: no skipped tests
+        shell: bash
+        run: |
+          if grep -E -- '--- SKIP' test.log; then
+            echo "Tests were skipped; AGENTS.md §14 requires none."
+            exit 1
+          fi
+
+  frontend:
+    name: frontend (svelte-check, unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: install
+        run: bun install --frozen-lockfile
+
+      # svelte-check needs the public env vars to exist; the example's values
+      # are enough to type-check.
+      - name: env
+        run: cp .env.example .env
+
+      - name: type-check
+        run: bun run check
+
+      - name: unit tests
+        run: bun run test

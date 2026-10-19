@@ -305,6 +305,7 @@ docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t
   -e POSTGRES_DB=t -p 55432:5432 postgres:17-alpine
 TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -race -count=1 ./...
 ```
+- **CI runs this checklist** on every push to `main` and every pull request (`.github/workflows/ci.yml`): gofmt, vet, docaudit, the race tests three times against a throwaway Postgres (failing on any skipped test), and the frontend's `bun run check` and `bun run test`. Don't merge a PR with a red CI run.
 - **Run the race tests three times**; a flaky pass is a fail.
 - **Check tests ran:** with `-v`, nothing may be `SKIP`.
 - **Hot-path changes:** `go run ./cmd/loadtest -players 600 -rush-window 3s` with 0 errors.

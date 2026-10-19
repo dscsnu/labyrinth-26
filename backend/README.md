@@ -19,6 +19,8 @@ Google Cloud Console → APIs & Services → Credentials → **OAuth client ID**
 
 ## Tests
 
+CI (`.github/workflows/ci.yml`) runs everything below, plus gofmt, vet and docaudit, on every push to `main` and every pull request.
+
 ```bash
 go test ./...                                    # unit tests
 docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t \
