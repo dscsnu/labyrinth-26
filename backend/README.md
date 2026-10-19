@@ -35,10 +35,11 @@ Every package's tests live in its own `tests/` subfolder (`internal/<package>/te
 ```
 internal/
   atlas/       static game content: waypoints, shapes, patterns (and their spells); read-only, loaded once
+  bosses/      static boss sequence (name, asset, description, HP) every team fights; read-only, loaded once
   auth/        Google sign-in, access tokens, the auth middleware
   user/        players, helpers and admins
   teams/       teams of up to teams.size (6) players with a leader, lobby → game
-  teamstate/   each team's selection, scan stack (wrong scans marked), visited waypoints, completed patterns and cast log; publishes team_state
+  teamstate/   each team's selection, scan stack (wrong scans marked), visited waypoints, completed patterns, cast log and boss progress; publishes team_state
   spells/      offline geometry and damage formula: projection, TSP tour, convex hull; not imported by server
   server/      wires the use cases together; /healthz and the live event stream
   platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
@@ -155,7 +156,8 @@ Full request and response shapes and every error code: **http://localhost:3000/d
 | GET | `/api/admin/teams` | Bearer + `ADMIN` | Every team, sorted by ID. The role is read from Postgres on each request, not from the token (`403 not_admin`) |
 | DELETE | `/api/admin/teams/{team_id}/members/{user_id}` | Bearer + `ADMIN` | Remove a member from a team in any status (lobby or started). Removing the leader needs `?new_leader=<user id>`, a remaining member; the only member can't be removed (`409 last_member`). The removed player gets `no_team` and can create or join a team; their scans and casts stay with the team |
 | GET | `/api/game/shapes` | Bearer | The selectable shapes (`id`, `name`, `patterns` count, distinct `points` sizes) and `max_pattern_points`; the same for every user, static while running |
-| GET | `/api/teams/me/state` | Bearer | Your team's state (`TeamState`, the same JSON as the `team_state` event's `message`): visited waypoints, completed patterns and shapes, selection, `last_cast` (the newest cast, or `null`), the scan stack (each scan marked `wrong` or not), `poisoned`, `cast_count` and `version` |
+| GET | `/api/game/bosses` | Bearer | Every boss in serial order (`serial`, `name`, `asset`, `description`, `hp`): **7** (`game.bosses`), the same for every user, static while running; `[]` before boss content is loaded |
+| GET | `/api/teams/me/state` | Bearer | Your team's state (`TeamState`, the same JSON as the `team_state` event's `message`): visited waypoints, completed patterns and shapes, selection, `last_cast` (the newest cast, or `null`), the scan stack (each scan marked `wrong` or not), `poisoned`, boss progress (`bosses_defeated`, `boss {serial, damage}` or `null`, `damage_multiplier`), `cast_count` and `version` |
 | GET | `/api/teams/me/casts` | Bearer | Your team's cast log: every completed pattern, repeats included (`already_completed`), with its `damage`, newest first |
 | PUT | `/api/teams/me/state/selection` | Bearer | `{"shape"}`: select the shape to attempt; always empties the scan stack |
 | DELETE | `/api/teams/me/state/selection` | Bearer | Give up the selection (and its stack) |
@@ -171,5 +173,5 @@ Each use case's README has the full details: rules, error codes and event shapes
 ## Configuration
 
 Two files:
-- **`config.toml`**: every tunable rule and timing (team size, pattern size, the rotating-QR window `qr.rotate` and `qr.tolerance`, token lifetimes, heartbeat, server timeouts including `server.read_timeout` (30 s for a whole request), body limit, write timeout, and `storage.instance_lock_check` (5 s between instance-lock checks)). Each key is commented in the file. Read once at startup from `$CONFIG_FILE` (default `./config.toml`; the Docker image sets `/config.toml`); unknown, missing (`missing key <table>.<key>`, even where zero would be valid) or out-of-range values stop the backend from starting. The full key table is in `internal/platform/README.md`. Restart to apply a change. Code never hard-codes these: see AGENTS.md §10.
+- **`config.toml`**: every tunable rule and timing (team size, pattern size, the number of bosses `game.bosses`, the rotating-QR window `qr.rotate` and `qr.tolerance`, token lifetimes, heartbeat, server timeouts including `server.read_timeout` (30 s for a whole request), body limit, write timeout, and `storage.instance_lock_check` (5 s between instance-lock checks)). Each key is commented in the file. Read once at startup from `$CONFIG_FILE` (default `./config.toml`; the Docker image sets `/config.toml`); unknown, missing (`missing key <table>.<key>`, even where zero would be valid) or out-of-range values stop the backend from starting. The full key table is in `internal/platform/README.md`. Restart to apply a change. Code never hard-codes these: see AGENTS.md §10.
 - **`.env`**: secrets and deployment URLs only. See `.env.example`. Required: `DATABASE_URL`, `JWT_PRIVATE_KEY` (from `go run . keygen`), `QR_SECRET` (from `go run . keygen`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `PUBLIC_URL`, `FRONTEND_URL`. Optional: `PORT` (3000), `ALLOWED_EMAIL_DOMAINS` (comma-separated, e.g. `snu.edu.in`).

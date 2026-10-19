@@ -25,7 +25,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | Term | Meaning |
 |---|---|
 | **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Atlas`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). `Atlas` is the `*atlas.Atlas` (static content); nothing reads `App.Atlas` today (`Build` passes the atlas to teamstate directly), it's there for `main`, tests and future use cases. Unexported: the `*postgres.DB` (for `/healthz`) and the heartbeat. |
-| **Build order** | Each use case is constructed after everything it reads. `atlas` is static content every game use case reads, so `atlas.Load` runs first. `teamstate` reads `atlas` and `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
+| **Build order** | Each use case is constructed after everything it reads. `atlas` and `bosses` are static content the game use cases read, so `atlas.Load` and `bosses.Load` run first. `teamstate` reads `atlas`, `bosses` and `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
 | **Authed route** | A route wrapped in auth's `RequireAuth` (passed to each use case as `authAPI.Authed`). It needs `Authorization: Bearer <jwt>` and puts the caller on the request via `platform/identity`. `GET /api/events` uses `RequireStreamAuth` instead, which also takes the token from the `labyrinth_token` cookie. |
 | **Stream** | One open `GET /api/events`: one `live.Subscription` in the hub, keyed by the caller's user ID. A client opens one, and it carries every scope. |
 | **Scope** | Who an event goes to: one **user** (`Hub.Send`), a **team**'s current members (`Hub.Send` per member), or every stream, **game**-wide (`Hub.Broadcast`). The publisher decides; clients never subscribe to channels. |
@@ -92,15 +92,15 @@ Every number below that comes from `config.toml` is shown with its current value
   3. `auth.NewTokens(cfg.JWTKey, auth.token_ttl)`: the JWT signer and verifier.
   4. `auth.NewLoginCodes(db, auth.login_code_ttl)`.
   5. `auth.NewGoogle(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, PUBLIC_URL + "/auth/google/callback", google)`.
-  6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`.
+  6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`. Then `bosses.Load(ctx, db, log, bosses.Rules{Count: game.bosses})`: reads and validates the boss sequence once (exactly serials 1…`game.bosses`, or an empty table). An error (`load bosses: …`, `invalid bosses: …`) is returned as is. See `internal/bosses/README.md`.
   7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart, OnRosterChange})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `OnRosterChange` is `func(t) { stateStore.RosterChanged(t.ID) }`, the roster hook. `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start, and no admin can remove anyone, before `Build` returns and routes are served.
   8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
-  9. `teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas. It needs the atlas (through its `Atlas` interface) and `teamStore` (through its `Teams` interface), so it runs after steps 6 and 7.
+  9. `teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas and the bosses. It needs the atlas (`Atlas` interface), the bosses (`Bosses` interface) and `teamStore` (`Teams` interface), so it runs after steps 6 and 7.
   10. The `App` (with `Atlas: theAtlas`, and a `live.Streamer` from `live.heartbeat`, `live.write_timeout`, `live.retry_min` and `live.retry_max`), then a `http.ServeMux` with, in this order:
      - `GET /healthz` (no auth)
      - `GET /openapi.yaml` and `GET /docs` (no auth; see [API docs](#api-docs-openapi))
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
-     - `user`, `teams`, `teamstate`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
+     - `user`, `teams`, `teamstate`, `bosses`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
      - the admin routes: `admin := func(h) { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }`, then `teamsAPI.AdminRoutes(mux, admin)` (`GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}`)
      - `GET /api/events`, wrapped in `authAPI.RequireStreamAuth` (Bearer or the `labyrinth_token` cookie)
   11. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
@@ -126,6 +126,7 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `teams.name_max_length` | 32 | `teams.Rules.NameMaxLength` |
 | `teams.code_attempts` | 10 | `teams.Rules.CodeAttempts` |
 | `game.max_pattern_points` | 6 | `atlas.Rules.MaxPatternPoints` and `teamstate.Rules.MaxPatternPoints` |
+| `game.bosses` | 7 | `bosses.Rules.Count` |
 | `auth.token_ttl` | 12 h | `auth.NewTokens` |
 | `auth.login_code_ttl` | 2 m | `auth.NewLoginCodes` |
 | `auth.oauth_state_ttl` | 10 m | read by `auth.API` from `cfg.Settings` (state token TTL and cookie `MaxAge`) |
@@ -268,7 +269,8 @@ data: {"type":"snapshot","message":{"team_id":"482913","waypoints":[],"patterns"
 | | `selection_cleared` | a member cleared the selection | members | back to choosing |
 | | `scan_added` | a scan joined the stack | members | show who scanned (`stack[].user_id`) |
 | | `wrong_scan` | a scan joined the stack marked `wrong`; `poisoned` is `true` | members | tell the team, offer a reselect |
-| | `spell_cast` | a scan completed a pattern: `last_cast` is the new cast, `cast_count` went up, selection and stack purged | members | play the cast, prepend `last_cast` to the log |
+| | `spell_cast` | a scan completed a pattern: `last_cast` is the new cast, `cast_count` went up, selection and stack purged, its `dealt` damage went to the current `boss` | members | play the cast, prepend `last_cast` to the log |
+| | `boss_defeated` | a `spell_cast` whose damage defeated the boss: `bosses_defeated` went up, `boss` is the next one at 0 damage (or `null` after the last) | members | celebrate the defeat, as well as everything `spell_cast` does |
 | | `resync` | reloaded after a failed write | members | render |
 
 `no_team` of any type means: clear both the team and its team state.
@@ -396,7 +398,8 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 | teamstate `DELETE …/selection`, nothing selected | nothing (no-op) | |
 | teamstate `POST /api/teams/me/state/scans`, outcome `scan_added` | `team_state: scan_added` | members |
 | teamstate `POST …/scans`, outcome `wrong_scan` | `team_state: wrong_scan` (the scan marked `wrong`, `poisoned` `true`) | members |
-| teamstate `POST …/scans`, outcome `pattern_completed` (a cast) | `team_state: spell_cast` (selection `null`, stack `[]`, new `last_cast`, `cast_count` + 1) | members |
+| teamstate `POST …/scans`, outcome `pattern_completed` (a cast) | `team_state: spell_cast` (selection `null`, stack `[]`, new `last_cast`, `cast_count` + 1, `boss.damage` up by `last_cast.dealt`) | members |
+| teamstate `POST …/scans`, a cast that brings the boss to its HP | `team_state: boss_defeated` (as `spell_cast`, plus `bosses_defeated` + 1 and `boss` the next one, or `null`) | members |
 | teamstate write fails to persist (`reconcile`) | `team_state: resync`, reloaded from Postgres (nothing if the reload fails too) | members |
 | Any rejection (`4xx`) or `500` before persisting | nothing | |
 
@@ -436,22 +439,17 @@ A client that stops reading (a phone that lost signal without closing the connec
 - The **cast log**: `team_state` carries only `last_cast` and `cast_count`; the log is `GET /api/teams/me/casts` (see [Versioning and the cast log](#versioning-and-the-cast-log)).
 - **Diffs**, event IDs, or payload-less notifications: every event, whatever its `type`, carries the full state in `message`.
 - Another team's state, or any member's email.
-- `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load. Static data never goes in events (AGENTS.md §9).
+- `GET /api/game/shapes` (`Game`) and `GET /api/game/bosses` (the boss list): static while the backend runs; read once per page load. Static data never goes in events (AGENTS.md §9): `team_state.boss` carries only the serial and the damage dealt.
 
 ### Client integration
 What a client must do to use the stream as designed.
 
-> **Breaking change (envelope, version, `cast_count`).** Every event's `data` is now `{"type", "message"}`. The frontend still parses `data` as the bare payload, so it breaks until it reads `.message`:
-> - `frontend/src/routes/team/+page.svelte:23`: `TeamSchema.parse(JSON.parse(e.data))` → `.parse(JSON.parse(e.data).message)` (`no_team` at :26 ignores its data: unaffected)
-> - `frontend/src/routes/play/+page.svelte:49-50`: `hello` reads `JSON.parse(e.data).server_time` → `.message.server_time`
-> - `frontend/src/routes/play/+page.svelte:53`: `team`, and `:54`: `team_state` → parse `.message`
->
-> The new `version` and `cast_count` fields don't break `TeamSchema` / `TeamStateSchema` (plain `z.object`s ignore unknown keys), but steps 3 and 4 below use them.
+**Where the frontend is.** `/team` and `/play` read the envelope (`envelope(schema)` in `frontend/src/lib/types/Live.type.ts`) and keep a copy only if it's newer (`isNewer`, step 3): `team` by `version` (or always when it's another team), `team_state` by `version` for stream events and write responses alike. `/play` prepends each new `last_cast`, re-fetches the log through `/play/casts` when `cast_count` is more than it holds (step 4), and says "<boss> defeated!" on a `boss_defeated` event. Step 1 isn't done yet: each page opens its own `EventSource`.
 
 1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect. (Not done yet: `/team` and `/play` each open their own.)
 2. **Register events by name, unwrap the envelope.** One zod schema per event: `type` as an enum, `message` as the payload's schema. Keep the newest `message` of each. `no_team` clears both `team` and `team_state`. Game-wide events (later) carry `message: null` when nothing is active.
 3. **Keep the newest copy by `version`**, for `team` and for `team_state` separately, whether it came from the stream or a write response ([the rule](#versioning-and-the-cast-log)).
-4. **Use `type` for moments, `message` for state.** Play the cast on `spell_cast`, toast on `member_joined`, offer a reselect on `wrong_scan`; render everything from `message`. On `spell_cast`, prepend `last_cast` to the cast log; when `cast_count` exceeds the log's length, re-fetch `GET /api/teams/me/casts`.
+4. **Use `type` for moments, `message` for state.** Play the cast on `spell_cast` (and `boss_defeated`, which is a cast too), celebrate on `boss_defeated`, toast on `member_joined`, offer a reselect on `wrong_scan`; render everything from `message`. On `spell_cast`, prepend `last_cast` to the cast log; when `cast_count` exceeds the log's length, re-fetch `GET /api/teams/me/casts`.
 5. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`). On every `hello`: offset = `Date.parse(message.server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead. The game has no time limit; `/play` uses the clock for "scanned 2 min ago" labels.
 6. **Open `/api/events` on the frontend's origin.** In production the shared domain's reverse proxy routes it to the backend, which reads the `labyrinth_token` cookie; in dev, Vite's proxy does (`frontend/vite.config.ts`).
 7. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots (type `snapshot`), and step 3 sorts out anything that arrives out of order.
@@ -470,7 +468,7 @@ const envelope = <T extends z.ZodTypeAny, K extends [string, ...string[]]>(types
 const TeamEvent = envelope(["snapshot", "created", "member_joined", "member_left", "leader_changed",
     "member_removed", "ready_changed", "started", "profile_updated", "resync"], TeamSchema);
 const TeamStateEvent = envelope(["snapshot", "game_started", "shape_selected", "selection_cleared",
-    "scan_added", "wrong_scan", "spell_cast", "resync"], TeamStateSchema);
+    "scan_added", "wrong_scan", "spell_cast", "boss_defeated", "resync"], TeamStateSchema);
 
 // Keep an incoming copy if the backend restarted (new epoch) or it's newer.
 const newer = (incoming: Version, held?: Version) =>
@@ -481,7 +479,8 @@ events.addEventListener("team_state", (e) => {
     const { type, message } = TeamStateEvent.parse(JSON.parse(e.data));
     if (!newer(message.version, state?.version)) return; // stale or repeated
     state = message;                                     // render from message
-    if (type === "spell_cast") playCast(message.last_cast!);
+    if (type === "spell_cast" || type === "boss_defeated") playCast(message.last_cast!);
+    if (type === "boss_defeated") celebrate(message.last_cast!.boss!);
     if (message.cast_count > casts.length) refetchCasts();
 });
 events.addEventListener("no_team", () => { team = null; state = null; });
@@ -503,6 +502,7 @@ Routes registered here but owned by use cases (see their READMEs):
 | `user` | `GET /api/me` (`401 user_not_found` if the token's user was deleted) | Bearer |
 | `teams` | `GET /api/teams/me`, `POST /api/teams`, `POST /api/teams/join`, `POST /api/teams/leave`, `PUT /api/teams/me/ready`, `POST /api/teams/me/start` | Bearer |
 | `teams` (admin) | `GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}[?new_leader=<uuid>]` | Bearer + `ADMIN` in Postgres (`403 not_admin`) |
+| `bosses` | `GET /api/game/bosses` (every boss, serial 1 first; static) | Bearer |
 | `teamstate` | `GET /api/game/shapes`, `GET /api/teams/me/state`, `GET /api/teams/me/casts` (the cast log, newest first), `PUT` and `DELETE /api/teams/me/state/selection`, `POST /api/teams/me/state/scans` | Bearer |
 | `qr` | `POST /api/qr/verify` | Bearer |
 | `qr` (staff) | `GET /api/qr/{waypoint_id}` | Bearer + `HELPER`/`ADMIN` in Postgres (`403 not_staff`) |
@@ -528,7 +528,8 @@ Any other path or method:
 | Another backend holds the instance lock (serving, `migrate` or `seed`) | `another backend instance is already running against this database`; exit `1`, before migrating or seeding |
 | An applied migration was edited | `migration NNNN_name: migration was edited after it was applied; …`; nothing new applied; exit `1` |
 | `atlas.Load` fails: bad content (`invalid atlas: …`, every case in `internal/atlas/README.md`) or a failed read (`load atlas: …`) | `Build` returns the error; exit `1`, before teams or team state load |
-| `teams.Load` or `teamstate.Load` fails (unreachable database, or stored team state naming a waypoint, pattern or shape the atlas doesn't have) | `Build` returns the error; exit `1` |
+| `bosses.Load` fails: bad boss content (`invalid bosses: …`, e.g. a count other than `game.bosses`; every case in `internal/bosses/README.md`) or a failed read (`load bosses: …`) | `Build` returns the error; exit `1` |
+| `teams.Load` or `teamstate.Load` fails (unreachable database, stored team state naming a waypoint, pattern or shape the atlas doesn't have, or a `team_boss` row with more bosses defeated than `game.bosses`) | `Build` returns the error; exit `1` |
 | Port in use | `ListenAndServe`'s error; exit `1` |
 
 ### `/healthz`
@@ -697,6 +698,7 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), one member scanning a second waypoint (`200`), `pattern_completed`; state after; reselect; clear; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `wrong_scan` with `stack[0].wrong` and `poisoned` `true`, a teammate's next scan `409 selection_poisoned`, and a reselect making scans work again |
 | `TestCastLogRoute` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/teams/me/casts` is `404 not_in_team` without a team, `[]` before any cast; after the same square twice, two casts newest first, the newer `already_completed`, shape `square`, `damage` > 0 |
 | `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, every shape's damage range valid, `max_pattern_points` equal to `config.toml`'s, and no `scan_window_ms` |
+| `TestGameBosses` | `tests/teamstate_test.go` | `GET /api/game/bosses` without a token is `401 missing_token`; `[]` before content; after seed + `restart`, `game.bosses` bosses with serials 1… in order, each with name, asset and HP > 0; a started team's state shows `boss` serial 1 at 0, `bosses_defeated` 0, `damage_multiplier` 1; after a square over HTTP, `last_cast` hit boss 1 with `dealt` = `damage`, not defeated, and `boss.damage` = `dealt` |
 | `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack and the square completed |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
 | `TestSimWrongScanReachesEveryone` | `tests/simulation_test.go` | after `1001`, one player scans `1004` (in no square with it) while a teammate scans `1002`: the first gets `wrong_scan`, the other either `200` (it landed first) or `409 selection_poisoned`; every phone sees `poisoned`; a reselect clears it on every phone |

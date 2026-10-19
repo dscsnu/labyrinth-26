@@ -37,7 +37,8 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
    - A scan of a waypoint that's already in the attempt is **rejected** (`waypoint_already_scanned`).
    - A scan that can't be part of any pattern of the type (with the scans already in) is **accepted, marked wrong, and reported** (`wrong_scan`, `stack[].wrong`, `poisoned`). It **poisons** the attempt: every later scan is refused (`selection_poisoned`) until someone selects again.
    - When the scans are exactly one valid pattern, it **completes** (a cast, logged in `team_cast` and listed by `GET /api/teams/me/casts`). Every new selection and every completion **purges** the scans.
-4. Progress (patterns and shapes completed, waypoints visited, the cast log) is the team's score.
+   - **Every cast damages the team's current boss.** All teams fight the same **7** (`game.bosses`) bosses in serial order (`GET /api/game/bosses`: name, asset, description, HP). A cast deals its pattern's damage × the team's multiplier (1 unless something sets it; nothing does yet), rounded. Reaching the boss's HP defeats it and moves the team to the next; the excess is lost. After the last boss, casts still count but deal nothing.
+4. Progress (patterns and shapes completed, waypoints visited, the cast log, bosses defeated) is the team's score.
 
 **Scale and constraints:**
 - Up to ~10,000 players on one day, all at once.
@@ -94,6 +95,7 @@ Every feature belongs to exactly one **use case**: one package under `internal/`
 | `teams` | teams, membership, ready, start | memory, written through |
 | `teamstate` | selection, scan stack, completions | memory, written through |
 | `atlas` | static content: waypoints, shapes, patterns, spells | memory, read-only, loaded once |
+| `bosses` | static content: the boss sequence (name, asset, description, HP) | memory, read-only, loaded once |
 | `qr` | rotating waypoint QR tokens: mint (staff) and verify | none (stateless; derived from the secret and the clock) |
 
 **Files**, the same in every use case:
@@ -110,7 +112,7 @@ internal/<usecase>/
 ```
 - **No test files beside the code.** A use case's directory holds only code and its README; every test lives in its `tests/` subpackage (§13). The same goes for `platform/` packages and `server/`.
 - **The four main files always exist** (`api.go`, `read.go`, `write.go`, `db.go`), even when one is small.
-- **A read-only use case** (static content, no runtime writes, no routes; `atlas`) is the one exception: it has **no `api.go` or `write.go`**, and its README says so in their sections. It still has `doc.go`, `read.go`, `db.go`, `store.go` (the layout and `Load`) and `README.md`.
+- **A read-only use case** (static content, no runtime writes; `atlas`, `bosses`) is the one exception: it has **no `write.go`**, and **no `api.go` unless it serves a route of its own** (`bosses` serves `GET /api/game/bosses`; `atlas` has none). Its README says so in those sections. It still has `doc.go`, `read.go`, `db.go`, `store.go` (the layout and `Load`) and `README.md`.
 - **Supporting files** are fine when each holds one clear thing and the README lists it: `google.go` (auth), `sets.go` and `geometry.go` (atlas).
 - **Where code goes:**
   - SQL only in `db.go`.
@@ -129,7 +131,7 @@ internal/<usecase>/
 
 ## 5. Where state lives
 - **Postgres only** (`auth`, `user`): for data that's rarely read or written. `read.go` and `write.go` call `db.go` directly. Say so in the README, and why.
-- **In memory, read-only** (`atlas`): for static content read on every request and never written at runtime. `Load` builds it once from Postgres and validates it; it's **immutable** once `Load` returns, so reads take **no locks**, and there's no entry/snapshot machinery, write-through or reconcile. Anything derived (indexes, lookup maps, computed values like spells) is rebuilt by `Load` on every start and listed in its README's Memory ↔ Postgres table. Content changes need a restart.
+- **In memory, read-only** (`atlas`, `bosses`): for static content read on every request and never written at runtime. `Load` builds it once from Postgres and validates it; it's **immutable** once `Load` returns, so reads take **no locks**, and there's no entry/snapshot machinery, write-through or reconcile. Anything derived (indexes, lookup maps, computed values like spells) is rebuilt by `Load` on every start and listed in its README's Memory ↔ Postgres table. Content changes need a restart.
 - **In memory, written through** (`teams`, `teamstate`): for data read or written constantly during the event. Then:
   1. **`store.go` holds the layout:**
      - an index map behind a `sync.RWMutex`
@@ -342,16 +344,17 @@ Everything a team's players see about the game loop reaches them as **one struct
 - **One struct, sent whole.** Per-team gameplay state lives in `teamstate.State`. Clients get it as one JSON object, the `View`, which is the `team_state` event's `message`. It's sent whole over the event stream on connect and after every change, and it's the response of every teamstate route (`GET /api/teams/me/state`, both selection routes, and `ScanResult.state` on a scan).
 - **Clients never poll.** Everything the play screen shows about the team's game comes from the latest `View`. Its other inputs, and the only ones, are:
   - the static `GET /api/game/shapes` (rules and content, fetched once)
+  - the static `GET /api/game/bosses` (the boss sequence, fetched once; `team_state.boss` names the current one by serial)
   - `GET /api/teams/me/casts` (the cast log, fetched once on load; each new cast then arrives as `team_state.last_cast` with type `spell_cast`, which the client prepends, and `team_state.cast_count` tells it to re-fetch when it missed some)
   - the `team` event (the roster)
   - `hello` (the clock, §9)
   - **game-wide events** (§9): resources identical for every player, such as a quiz or a quick-time event, each its own game-scope event carrying `null` or an object with an `id`. They're the one deliberate exception to "one struct": something every player sees the same way is one broadcast, not a copy in every team's `team_state`. **What a team does with them** (its answers, its score from them) is per-team, so it goes in `team_state` like any other result.
-- **Static vs per-team.** Static definitions (waypoints, shapes, patterns, spell values) belong to `atlas`. Per-team gameplay state belongs in `State`.
-- **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them. The one exception is a **history** too long to resend on every change (the cast log): a read endpoint for the load, with each new entry carried live in `team_state` (`last_cast`), plus a count (`cast_count`) so a client knows when its copy is incomplete.
-- **`team_state` is versioned** (`version`, §9): every apply bumps it, so a client keeps the newest copy whether it came from the stream or a response. Each publish says why in its envelope `type` (`shape_selected`, `scan_added`, `wrong_scan`, `spell_cast`, …).
+- **Static vs per-team.** Static definitions belong to a read-only use case: waypoints, shapes, patterns and spell values to `atlas`, the bosses (name, asset, HP) to `bosses`. Per-team gameplay state belongs in `State`: a team's boss progress (`State.Boss`: `bosses_defeated`, `boss {serial, damage}`, `damage_multiplier`) is in `team_state`, the boss itself isn't.
+- **New per-team results go inside `team_state`.** A module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`, as boss progress does. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them. The one exception is a **history** too long to resend on every change (the cast log): a read endpoint for the load, with each new entry carried live in `team_state` (`last_cast`), plus a count (`cast_count`) so a client knows when its copy is incomplete.
+- **`team_state` is versioned** (`version`, §9): every apply bumps it, so a client keeps the newest copy whether it came from the stream or a response. Each publish says why in its envelope `type` (`shape_selected`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, …).
 - **Nothing changes with time alone.** There's no time limit. Clients use timestamps (`scanned_at`, `cast_at`) only for display, against server time estimated from `hello` (`serverClock.ts`, §9), never to change the state they show. If a time-driven change is ever added, the server publishes it (§9); clients never infer it.
 - **Rejected or no-op requests publish nothing** (§6, §9). That includes `409`s and clearing with nothing selected. A wrong scan is not a rejection: it's pushed and published.
-- **Spells are already in `team_state`.** Clients derive the spell lifecycle from it, with no event of its own: a spell **starts** when `selection` is set, members **finish their part** as `stack` grows (`stack[].user_id` says who, its length how many), and a spell **finishes** when `last_cast` changes (`cast_at`, `shape`, `cast_by`).
+- **Spells are already in `team_state`.** Clients derive the spell lifecycle from it, with no event of its own: a spell **starts** when `selection` is set, members **finish their part** as `stack` grows (`stack[].user_id` says who, its length how many), and a spell **finishes** when `last_cast` changes (`cast_at`, `shape`, `cast_by`; `dealt` and `boss` say what it did to which boss, `defeated_boss` whether it finished it).
 
 **A new gameplay feature isn't done until it has all of these:**
 

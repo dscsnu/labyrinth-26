@@ -394,7 +394,7 @@ No races to resolve: the atlas is built once before `Load` returns and never mod
 
 ## Not decided yet
 - **Spells: any subset, or only defined patterns?** The PR assumes a spell for every subset of 2–6 waypoints (1,474 subsets of the seed's 11). Main has 359 curated patterns of selected shapes, and only those can complete. Spells for arbitrary subsets would be a game-rule change (completing something that isn't a pattern), not just a data change.
-- **Spells: what damage is applied to.** Nothing on main has HP or a target. Likely a future use case that reads `Pattern.Spell` when teamstate completes a pattern (through a small interface of its own, or a callback from `server.Build`, AGENTS.md §4).
+- **Spells: what damage is applied to.** Decided: teamstate deals each cast's `Spell.Damage` (× the team's multiplier) to the team's current boss ([`internal/bosses/README.md`](../bosses/README.md), "Damage rules").
 - **Spells: rounding** of `Damage` to `int`, and how the hull treats collinear points, are the PR's to state here.
 - **Coordinates aren't range-checked.** A waypoint at `0, 0` would load and, once positions are computed, skew the projection's origin. Consider a check in `New` alongside spells.
 - **`Waypoint(i)` and friends panic on a bad index** rather than returning `ok`. Fine while only atlas-issued indexes are passed.

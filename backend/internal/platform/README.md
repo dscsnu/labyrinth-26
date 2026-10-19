@@ -92,6 +92,7 @@ Both are read **once at startup**. A change needs a restart.
 | `teams.name_max_length` | `int` | `32` | 1–32 (`… must be 1-32 (the database's limit)`) | Longest team name, in characters |
 | `teams.code_attempts` | `int` | `10` | ≥ 1 | Random 6-digit team codes to try per creation |
 | `game.max_pattern_points` | `int` | `6` | 1–15 (`game.max_pattern_points must be 1-15`; `config.MaxPatternPoints`, the size of the stack's fixed array) | Most waypoints per pattern; a team's stack holds this many plus one wrong scan. Not tied to `teams.size`: one member may scan several points |
+| `game.bosses` | `int` | `7` | ≥ 1 (`game.bosses must be at least 1`) | How many bosses every team fights, in serial order; the `boss` table must hold exactly serials 1 to this (or be empty), or startup is refused (`bosses.Load`) |
 | `qr.rotate` | `Duration` | `"5s"` | > 0 (`qr.rotate must be positive`) | How often a waypoint's rotating QR changes; the `/qr` display re-issues a token this often |
 | `qr.tolerance` | `Duration` | `"5s"` | > 0 (`qr.tolerance must be positive`) | How much longer than `qr.rotate` a scan stays accepted; a token is valid `qr.rotate` + `qr.tolerance` after issue |
 | `auth.token_ttl` | `Duration` | `"12h"` | > 0 | Access token lifetime; a role change applies at the next sign-in |
@@ -122,6 +123,7 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | Unknown key or table | `unknown key …` for each, plus any validation errors |
 | A key missing | `missing key <table>.<key>`, plus `<key> must be …` if zero is out of range |
 | `max_pattern_points = 16` | `game.max_pattern_points must be 1-15` |
+| `bosses = 0` | `game.bosses must be at least 1` |
 | `per_100m` line removed | `missing key spell.per_100m` (zero would be valid, so only the missing-key check catches it) |
 | `oauth_state_ttl = "500ms"` | `auth.oauth_state_ttl must be at least 1s` |
 | `read_timeout = "1s"` with `read_header_timeout = "10s"` | `server.read_timeout must be at least server.read_header_timeout` |
@@ -136,8 +138,8 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | Test | Covers |
 |---|---|
 | `TestRepositoryConfigLoads` | The committed `backend/config.toml` is valid |
-| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `qr.rotate`, `qr.tolerance`, `per_point`, `per_100m`, `walkability`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
-| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero `per_point`, negative `per_100m`, walkability under 1.0; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `qr.rotate`, `qr.tolerance`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
+| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `bosses`, `qr.rotate`, `qr.tolerance`, `per_point`, `per_100m`, `walkability`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
+| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero bosses, zero `per_point`, negative `per_100m`, walkability under 1.0; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `qr.rotate`, `qr.tolerance`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
 
 Not tested: `Load()` and the environment variables, and the key functions. A missing `per_100m` is a case in `TestLoadSettingsRejects`.
 
@@ -395,7 +397,7 @@ The fan-out benchmark runs the 10,000 clients on the same machine as the server,
 - **`Ping(ctx)`**: used by `/healthz`.
 - **`Close()`**: closes the pool.
 - **`ErrNotFound`** (`"not found"`): the sentinel every `db.go` returns for a missing row, so use cases don't depend on `pgx.ErrNoRows`. Returned by `user`, `auth` (unknown or expired login code) and `teams`.
-- **`SeedDev2025(ctx)`**: runs the embedded `seeds/dev_2025.sql` in one `Exec`. The file wraps everything in `BEGIN … COMMIT` and every insert is `ON CONFLICT DO NOTHING`, so it's idempotent. It inserts 11 waypoints (`1001`–`1011`), 5 shapes (`collinear`, `lightning`, `square`, `tree`, `triangle`) and 359 patterns with their waypoints. It never updates or deletes, so an edited row in the database stays edited. Content is read at startup: run `go run . seed` while the backend is stopped, then start it. `seed` takes the instance lock first, so it refuses (`ErrAnotherInstance`) while a backend serves the same database.
+- **`SeedDev2025(ctx)`**: runs the embedded `seeds/dev_2025.sql` in one `Exec`. The file wraps everything in `BEGIN … COMMIT` and every insert is `ON CONFLICT DO NOTHING`, so it's idempotent. It inserts 11 waypoints (`1001`–`1011`), 5 shapes (`collinear`, `lightning`, `square`, `tree`, `triangle`) and 359 patterns with their waypoints. It never updates or deletes, so an edited row in the database stays edited. Then it runs `seeds/dev_2025_spells.sql` (each pattern's `damage`, generated by `cmd/spells`) and `seeds/dev_2025_bosses.sql` (7 placeholder bosses, serials 1–7, HP 200 to 1000; `ON CONFLICT (serial) DO UPDATE`, so re-seeding resets their name, asset, description and HP). Content is read at startup: run `go run . seed` while the backend is stopped, then start it. `seed` takes the instance lock first, so it refuses (`ErrAnotherInstance`) while a backend serves the same database.
 
 ### `migrate.go`: the migration runner
 **`Migrate(ctx, log)`**, run on every start (and by `migrate` and `seed`), always **after** `main` has taken the instance lock:
@@ -440,6 +442,8 @@ The migrations:
 | `0005_scan_cleanup.sql` | Drops `team_scan_team_idx` (`team_id`, from 0003), redundant with 0004's index. Adds `COMMENT ON TABLE team_scan` correcting 0003's SQL comment ("every scan, including repeats"): one row per **accepted** scan; rejected scans are never written. Never edit 0003 to fix it: its checksum would change |
 | `0006_wrong_scans.sql` | Adds `team_scan.wrong BOOLEAN NOT NULL DEFAULT false`: a scan that didn't fit the selected shape, so a restart rebuilds a poisoned attempt as poisoned |
 | `0007_team_cast.sql` | `team_cast` (`id` identity PK, `team_id` → `team` `ON DELETE CASCADE`, `pattern_id` → `pattern`, `cast_by` → `userprofile`, `cast_at`, `already_completed`): every cast, repeats included; the newest row per team is `last_cast` after a restart. Index `team_cast_team_id_idx` on `(team_id, id DESC)` |
+| `0008_pattern_damage.sql` | `pattern.damage INTEGER CHECK (damage > 0)`: each pattern's precomputed spell damage, loaded by the atlas (written by `seeds/dev_2025_spells.sql`, generated by `cmd/spells`) |
+| `0009_bosses.sql` | `boss` (`serial` PK ≥ 1, `name` 1–64 chars, `asset` non-empty, `description`, `hp` > 0): the boss sequence, read by the bosses use case. `team_boss` (`team_id` PK → `team` `ON DELETE CASCADE`, `defeated` ≥ 0, `damage` ≥ 0, `multiplier` > 0, defaults 0, 0, 1): each team's boss progress, written by teamstate with each cast. `team_cast` gains `dealt` (≥ 0, default 0), `boss_serial` (nullable → `boss`) and `defeated_boss` (default false): what each cast did to the bosses |
 
 Each use case's README documents its tables and constraints.
 
