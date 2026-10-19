@@ -102,10 +102,9 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	user.NewAPI(users, log).Routes(mux, authAPI.Authed)
 	teams.NewAPI(teamStore, log).Routes(mux, authAPI.Authed)
 	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
-	// The one event stream. A browser may reach it directly (cookie); the
-	// old path is a deprecated alias for the SvelteKit proxy, Bearer only.
+	// The one event stream. Browsers open it on the shared domain with the
+	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.
 	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(http.HandlerFunc(app.events)))
-	mux.Handle("GET /api/teams/me/events", authAPI.Authed(app.events))
 
 	app.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), set.Server.MaxBodyBytes)
 	return app, nil
@@ -169,9 +168,8 @@ func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]int{"streams": a.Hub.Count()})
 }
 
-// events handles GET /api/events (and its deprecated alias
-// GET /api/teams/me/events), the caller's one live stream. It starts with the
-// snapshot and then sends one event per change, at every scope.
+// events handles GET /api/events, the caller's one live stream. It starts
+// with the snapshot and then sends one event per change, at every scope.
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	userID := identity.UserID(r)
 	sub := a.Hub.Subscribe(userID) // before reading snapshots, so no change slips between

@@ -30,7 +30,7 @@ func NewAPI(store *Store, log *slog.Logger) *API {
 }
 
 // Routes registers the team routes; authed wraps a handler in the auth
-// middleware. The live stream (GET /api/teams/me/events) is registered by the
+// middleware. The live stream (GET /api/events) is registered by the
 // server, since it carries events from several use cases.
 func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.Handle("GET /api/teams/me", authed(a.getMine))

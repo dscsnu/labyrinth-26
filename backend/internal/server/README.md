@@ -27,7 +27,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Atlas`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). `Atlas` is the `*atlas.Atlas` (static content); nothing reads `App.Atlas` today (`Build` passes the atlas to teamstate directly), it's there for `main`, tests and future use cases. Unexported: the `*postgres.DB` (for `/healthz`) and the heartbeat. |
 | **Build order** | Each use case is constructed after everything it reads. `atlas` is static content every game use case reads, so `atlas.Load` runs first. `teamstate` reads `atlas` and `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
 | **Authed route** | A route wrapped in auth's `RequireAuth` (passed to each use case as `authAPI.Authed`). It needs `Authorization: Bearer <jwt>` and puts the caller on the request via `platform/identity`. `GET /api/events` uses `RequireStreamAuth` instead, which also takes the token from the `labyrinth_token` cookie. |
-| **Stream** | One open `GET /api/events` (or its deprecated alias `GET /api/teams/me/events`): one `live.Subscription` in the hub, keyed by the caller's user ID. A client opens one, and it carries every scope. |
+| **Stream** | One open `GET /api/events`: one `live.Subscription` in the hub, keyed by the caller's user ID. A client opens one, and it carries every scope. |
 | **Scope** | Who an event goes to: one **user** (`Hub.Send`), a **team**'s current members (`Hub.Send` per member), or every stream, **game**-wide (`Hub.Broadcast`). The publisher decides; clients never subscribe to channels. |
 | **Initial snapshots** | The events a stream sends before anything else: `hello`, then `team` or `no_team`, then `team_state` if the caller is in a team, then game-wide resources (none yet). |
 | **Instance lock** | A Postgres advisory lock (key `7272027`) the process holds from just after connecting until it exits, checked every **5 s** (`storage.instance_lock_check`). A second backend, `migrate` or `seed` on the same database refuses to run. |
@@ -100,7 +100,6 @@ Every number below that comes from `config.toml` is shown with its current value
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
      - `user`, `teams`, `teamstate`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
      - `GET /api/events`, wrapped in `authAPI.RequireStreamAuth` (Bearer or the `labyrinth_token` cookie)
-     - `GET /api/teams/me/events`, the deprecated alias, wrapped in `authAPI.Authed` (Bearer only)
   11. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
 - **`envelopeUnrouted(mux)`** wraps the mux. For each request it asks `mux.Handler(r)` for the matching pattern:
   - a pattern matched → `mux.ServeHTTP` as usual
@@ -177,10 +176,9 @@ The complete reference for the live stream: what it carries, what triggers each 
 ### Endpoint
 | | |
 |---|---|
-| Backend | `GET /api/events`, with `Authorization: Bearer <jwt>` or, failing that, the `labyrinth_token` cookie (any signed-in user, in a team or not). No token or a bad one: `401 missing_token` / `401 invalid_token`, no stream. `GET /api/teams/me/events` is a deprecated alias, Bearer only, kept until the frontend moves |
+| Backend | `GET /api/events`, with `Authorization: Bearer <jwt>` or, failing that, the `labyrinth_token` cookie (any signed-in user, in a team or not). No token or a bad one: `401 missing_token` / `401 invalid_token`, no stream. |
 | Production routing | The reverse proxy in front of both apps sends `/api/events` on the frontend's origin straight to the backend, so the browser's cookie reaches it and no Node process copies the stream. Deployment config doesn't exist yet; this is the rule it must follow |
-| Browser (today) | `GET /team/events`, same origin, through the SvelteKit proxy `frontend/src/routes/team/events/+server.ts`: `new EventSource("/team/events")`. See [Client integration](#client-integration) for the move to `/api/events` |
-| Proxy | Reads the httpOnly session token (`locals.token`; none → `401 not signed in`), calls the backend with it (`backendFetch`) and returns the backend's body unchanged with `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`. A backend `401` stays `401`; any other failure is `502 event stream unavailable`. The browser closing its request aborts the backend request too (`signal: request.signal`) |
+| Browser | `new EventSource("/api/events")` on the frontend's own origin (`/team`, `/play`). The browser sends the `labyrinth_token` cookie (httpOnly, `path=/`, `SameSite=Lax`). In local dev, Vite's dev server forwards `/api/events` to `BACKEND_URL` (`frontend/vite.config.ts`, `server.proxy`), standing in for the reverse proxy. There is no SvelteKit route for the stream |
 | Response | `200`, `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no` (so nginx doesn't buffer). The body never ends on its own |
 
 ### How `events` serves a stream
@@ -369,13 +367,13 @@ A client that stops reading (a phone that lost signal without closing the connec
 - `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load. Static data never goes in events (AGENTS.md §9).
 
 ### Client integration
-What a client must do to use the stream as designed. **The frontend doesn't do all of this yet**: it opens one `EventSource` per page (`/team`, `/play`) through the SvelteKit proxy at `/team/events`, which keeps working through the deprecated alias. The steps below are the migration.
+What a client must do to use the stream as designed. The frontend does steps 2–6 today (it opens `/api/events` directly and measures time with `hello`); step 1, one shared connection instead of one per page (`/team`, `/play`), is still to do.
 
 1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect.
 2. **Register events by name.** Keep a map from event name to its zod schema (`hello`, `team`, `no_team`, `team_state`, and each game-wide event as it's added), and keep the newest parsed snapshot of each. `no_team` clears both `team` and `team_state`. A game-wide event whose data is `null` means nothing is active.
 3. **Derive notifications from transitions.** Compare each snapshot with the one before it. Game-wide: a new `id`, or a status change. Spells, from `team_state`: `selection` set (a spell started), `stack` growing (another member scanned; `stack[].user_id` says who), `last_cast.cast_at` changing (a spell finished).
 4. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`; `/play` already does this). On every `hello`: offset = `Date.parse(server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead, and the phone's own clock error cancels out. Every countdown is a deadline in server time from a state timestamp: the scan countdown is the stack's bottom `scanned_at` + **1 m** (`game.scan_window`) (`frontend/src/lib/game/scanGate.ts`; a quiz's `closes_at` would work the same way). Countdowns never change state: the server publishes the change itself when the time comes.
-5. **Move to `/api/events`.** In production the reverse proxy routes it straight to the backend, which reads the `labyrinth_token` cookie; keep the SvelteKit proxy only for local dev. Remove `GET /api/teams/me/events` once nothing uses it.
+5. **Open `/api/events` on the frontend's origin.** In production the shared domain's reverse proxy routes it to the backend, which reads the `labyrinth_token` cookie; in dev, Vite's proxy does (`frontend/vite.config.ts`). Done: `/team` and `/play` do this.
 6. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots. The responses to writes (`ScanResult.state`) may arrive before or after the matching event; both are full snapshots.
 
 ## API
@@ -383,7 +381,6 @@ What a client must do to use the stream as designed. **The frontend doesn't do a
 |---|---|---|---|
 | GET | `/healthz` | none | `200 {"success":true,"payload":{"streams":3}}`, or `503 {"success":false,"message":"database unreachable"}` |
 | GET | `/api/events` | Bearer or `labyrinth_token` cookie | `200 text/event-stream` (see above) |
-| GET | `/api/teams/me/events` | Bearer | deprecated alias of `/api/events` |
 | GET | `/openapi.yaml` | none | `200 application/yaml`: the OpenAPI 3.1 spec |
 | GET | `/docs` | none | `200 text/html`: Swagger UI over `/openapi.yaml` |
 
