@@ -152,7 +152,13 @@ func transportReason(err error) string {
 	return "transport error"
 }
 
-// teamView is the part of a team event the load test inspects.
+// teamEvent is a "team" event's data: why it was sent, and the team.
+type teamEvent struct {
+	Type    string   `json:"type"`
+	Message teamView `json:"message"`
+}
+
+// teamView is the part of a team the load test inspects.
 type teamView struct {
 	ID      string `json:"id"`
 	Status  string `json:"status"`
@@ -237,10 +243,11 @@ func (c *client) openStream(p player, f *fanout) (*stream, error) {
 				if name != "team" {
 					continue
 				}
-				var t teamView
-				if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &t) != nil {
+				var ev teamEvent
+				if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev) != nil {
 					continue
 				}
+				t := ev.Message
 				f.mu.Lock()
 				for _, m := range t.Members {
 					if m.IsReady && !seenReady[m.ID] {

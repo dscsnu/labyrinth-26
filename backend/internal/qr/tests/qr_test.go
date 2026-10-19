@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,45 @@ func TestSigningKeyAndVerify(t *testing.T) {
 	for _, bad := range []string{"", "notatoken", "1001:abc.<sig>", "1001:1.<sig>", "1001:1760000000.!base64"} {
 		if _, err := v.Verify(bad); !errors.Is(err, qr.ErrInvalid) {
 			t.Fatalf("malformed %q: %v, want ErrInvalid", bad, err)
+		}
+	}
+}
+
+// TestVerifyRejectsNonCanonicalSignature checks that a token whose signature
+// is the right bytes spelled non-canonically is refused. A 32-byte signature
+// is 43 base64url characters, and the last carries only 4 bits of data plus 2
+// filler bits that must be zero: setting a filler bit gives a spelling the
+// lenient decoder reads as the same bytes. Every one of the 3 such spellings
+// must be ErrInvalid, while the canonical token still verifies.
+func TestVerifyRejectsNonCanonicalSignature(t *testing.T) {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	v, clock := newVerifier(bytes.Repeat([]byte{0x42}, 32))
+	key, err := v.SigningKey("1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := mint(t, key.Key, "1001", base.Unix())
+	clock.now = base.Add(time.Second)
+	if _, err := v.Verify(tok); err != nil {
+		t.Fatalf("canonical token: %v", err)
+	}
+
+	payload, sig, _ := strings.Cut(tok, ".")
+	if len(sig) != 43 {
+		t.Fatalf("signature is %d characters, want 43", len(sig))
+	}
+	last := strings.IndexByte(alphabet, sig[42])
+	if last&3 != 0 {
+		t.Fatalf("canonical last character %q has filler bits set", sig[42])
+	}
+	want, _ := base64.RawURLEncoding.DecodeString(sig)
+	for filler := 1; filler <= 3; filler++ {
+		alt := sig[:42] + string(alphabet[last|filler])
+		if got, err := base64.RawURLEncoding.DecodeString(alt); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("filler %d: lenient decode %x, %v; want the same bytes", filler, got, err)
+		}
+		if _, err := v.Verify(payload + "." + alt); !errors.Is(err, qr.ErrInvalid) {
+			t.Fatalf("filler %d (%q): %v, want ErrInvalid", filler, alt[42], err)
 		}
 	}
 }

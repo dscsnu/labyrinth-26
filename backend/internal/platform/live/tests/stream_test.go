@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,26 +112,56 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 // TestServeWritesFrames checks the exact bytes of a stream: the retry line,
-// then each event as "event:" and "data:" lines, with a multi-line payload
-// split into one data line per line.
+// then each event as one "event:" line and one "data:" line holding the
+// envelope {"type", "message"}.
 func TestServeWritesFrames(t *testing.T) {
 	h, _ := newHub(t)
 	sub := h.Subscribe(uuid.New())
 	w := newFakeWriter()
 	done, disconnect := serve(streamer(time.Hour), w, sub, []live.Event{
-		live.NewEvent("hello", []byte(`{"a":1}`)),
-		live.NewEvent("multi", []byte("x\ny")),
-		live.NewEvent("empty", nil),
+		live.MustNewEvent("hello", "connected", struct {
+			A int `json:"a"`
+		}{1}),
+		live.MustNewEvent("raw", "snapshot", json.RawMessage(`{"b": [1, 2]}`)),
+		live.MustNewEvent("empty", "left", struct{}{}),
 	})
 	defer func() { disconnect(); <-done }()
 
 	want := "retry: 1000\n\n" +
-		"event: hello\ndata: {\"a\":1}\n\n" +
-		"event: multi\ndata: x\ndata: y\n\n" +
-		"event: empty\ndata: \n\n"
+		"event: hello\ndata: {\"type\":\"connected\",\"message\":{\"a\":1}}\n\n" +
+		"event: raw\ndata: {\"type\":\"snapshot\",\"message\":{\"b\":[1,2]}}\n\n" +
+		"event: empty\ndata: {\"type\":\"left\",\"message\":{}}\n\n"
 	waitFor(t, "initial events", func() bool { got, _ := w.state(); return got == want })
 	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Fatalf("Content-Type = %q", ct)
+	}
+}
+
+// TestNewEvent checks an event's name, type and data, that a json.RawMessage
+// is passed through (compacted), and that a message that can't be encoded is
+// an error.
+func TestNewEvent(t *testing.T) {
+	ev, err := live.NewEvent("team_state", "spell_cast", json.RawMessage(`{"seq": 3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Name() != "team_state" || ev.Type() != "spell_cast" || string(ev.Data()) != `{"type":"spell_cast","message":{"seq":3}}` {
+		t.Fatalf("got %q %q %s", ev.Name(), ev.Type(), ev.Data())
+	}
+	if _, err := live.NewEvent("bad", "x", make(chan int)); err == nil {
+		t.Fatal("encoding a channel should fail")
+	}
+}
+
+// TestVersionNext checks that Next counts up within an epoch and keeps
+// counting into a new one.
+func TestVersionNext(t *testing.T) {
+	v := live.Version{}.Next(7)
+	if v != (live.Version{Epoch: 7, Seq: 1}) {
+		t.Fatalf("first version %+v", v)
+	}
+	if v = v.Next(7); v != (live.Version{Epoch: 7, Seq: 2}) {
+		t.Fatalf("second version %+v", v)
 	}
 }
 
@@ -164,7 +195,7 @@ func TestServeCoalescesQueuedEvents(t *testing.T) {
 	user := uuid.New()
 	sub := h.Subscribe(user)
 	for _, name := range []string{"a", "b", "c"} {
-		h.Send(user, live.NewEvent(name, []byte("{}")))
+		h.Send(user, event(name, "{}"))
 	}
 	w := newFakeWriter()
 	done, disconnect := serve(streamer(time.Hour), w, sub, nil)
@@ -206,7 +237,7 @@ func TestHeartbeatOnlyWhenIdle(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sub := hub.Subscribe(user)
 		defer sub.Close()
-		s.Serve(w, r, sub, []live.Event{live.NewEvent("hello", []byte("{}"))})
+		s.Serve(w, r, sub, []live.Event{event("hello", "{}")})
 	}))
 	defer srv.Close()
 
@@ -234,7 +265,7 @@ func TestHeartbeatOnlyWhenIdle(t *testing.T) {
 	// Busy: an event every heartbeat/5 for 3 heartbeats.
 	busyUntil := time.Now().Add(3 * heartbeat)
 	for time.Now().Before(busyUntil) {
-		hub.Send(user, live.NewEvent("tick", []byte("{}")))
+		hub.Send(user, event("tick", "{}"))
 		time.Sleep(heartbeat / 5)
 	}
 	drain := func(d time.Duration) (pings, ticks int) {

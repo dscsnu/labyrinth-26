@@ -132,6 +132,7 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	next := *cur
 	next.Selection = Selection{Active: true, Shape: shape, By: userID, At: now}
 	next.Stack = NewStack(s.rules.MaxPatternPoints)
+	next.Version = cur.Version.Next(s.rules.Epoch)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -143,7 +144,7 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(e, t.ID, &next)
+	s.publish(e, t.ID, &next, ShapeSelected)
 	return s.view(t.ID, next), nil
 }
 
@@ -174,6 +175,7 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	next := *cur
 	next.Selection = Selection{}
 	next.Stack = NewStack(s.rules.MaxPatternPoints)
+	next.Version = cur.Version.Next(s.rules.Epoch)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -185,7 +187,7 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(e, t.ID, &next)
+	s.publish(e, t.ID, &next, SelectionCleared)
 	return s.view(t.ID, next), nil
 }
 
@@ -238,15 +240,17 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	next := *cur
 	next.Waypoints = cur.Waypoints.With(w)
 	next.Stack = cur.Stack.Push(StackScan{Waypoint: w, UserID: userID, At: now, Wrong: wrong})
+	next.Version = cur.Version.Next(s.rules.Epoch)
 	res := ScanResult{Outcome: OutcomeScanAdded}
+	typ := ScanAdded
 	if wrong {
-		res.Outcome = OutcomeWrongScan
+		res.Outcome, typ = OutcomeWrongScan, WrongScan
 	}
 	// A wrong scan can't complete: the set fits no pattern of the shape.
 	completed, isComplete := s.atlas.PatternFor(set)
 	isComplete = !wrong && isComplete && s.atlas.Pattern(completed).Shape == cur.Selection.Shape
 	if isComplete {
-		res.Outcome = OutcomePatternCompleted
+		res.Outcome, typ = OutcomePatternCompleted, SpellCast
 		res.Pattern = s.atlas.WaypointIDs(set)
 		res.AlreadyCompleted = cur.Patterns.Has(completed)
 		next.Patterns = cur.Patterns.With(completed)
@@ -270,7 +274,7 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(e, t.ID, &next)
+	s.publish(e, t.ID, &next, typ)
 	res.State = s.view(t.ID, next)
 	return res, nil
 }
@@ -317,5 +321,5 @@ func (s *Store) PublishTeam(teamID string) {
 	defer e.mu.Unlock()
 
 	// 6. publish
-	s.publish(e, teamID, e.cur.Load())
+	s.publish(e, teamID, e.cur.Load(), GameStarted)
 }

@@ -107,7 +107,10 @@ func (v *Verifier) Verify(token string) (string, error) {
 	if err != nil {
 		return "", ErrInvalid
 	}
-	sigBytes, err := base64.RawURLEncoding.DecodeString(sig)
+	// Strict: a 32-byte signature is 43 characters whose last carries only 4
+	// bits, so the lenient decoder would also accept the 3 spellings with
+	// non-zero filler bits. Only the canonical encoding is a valid token.
+	sigBytes, err := base64.RawURLEncoding.Strict().DecodeString(sig)
 	if err != nil || !hmac.Equal(sign(v.keyFor(waypoint), payload), sigBytes) {
 		return "", ErrInvalid
 	}

@@ -74,8 +74,12 @@ func loadWithHub(t testing.TB, db *postgres.DB) (*teams.Store, *live.Hub) {
 		NameMaxLength: set.Teams.NameMaxLength,
 		WriteTimeout:  set.Storage.WriteTimeout.Duration,
 		CodeAttempts:  set.Teams.CodeAttempts,
+		Epoch:         epochs.Add(1),
 	})), hub
 }
+
+// epochs hands each store a new epoch, as each backend process has its own.
+var epochs atomic.Int64
 
 // snapshot serialises everything s holds, for comparing across restarts:
 // every team (All), and for every member, the team ForUser finds (the
@@ -83,6 +87,9 @@ func loadWithHub(t testing.TB, db *postgres.DB) (*teams.Store, *live.Hub) {
 func snapshot(t *testing.T, s *teams.Store) string {
 	t.Helper()
 	all := s.All()
+	for i := range all {
+		all[i].Version = live.Version{} // memory-only: checked on its own
+	}
 	userTeam := map[string]string{}
 	for _, team := range all {
 		for _, m := range team.Members {
@@ -139,8 +146,17 @@ func TestSurvivesRestart(t *testing.T) {
 	}
 
 	before := snapshot(t, s)
-	if after := snapshot(t, load(t, pgtest.Open(t, dbURL))); after != before {
+	restarted := load(t, pgtest.Open(t, dbURL))
+	if after := snapshot(t, restarted); after != before {
 		t.Fatalf("state changed across restart\nbefore: %s\nafter:  %s", before, after)
+	}
+	// Version is memory-only: a restart starts every team again at seq 0,
+	// in the new process's epoch.
+	oldEpoch := must(s.ForUser(users[0])).Version.Epoch
+	for _, team := range restarted.All() {
+		if team.Version.Seq != 0 || team.Version.Epoch == oldEpoch {
+			t.Fatalf("team %s after restart: version %+v, want seq 0 in a new epoch (old %d)", team.ID, team.Version, oldEpoch)
+		}
 	}
 }
 
@@ -176,10 +192,13 @@ func TestFailedWriteReconciles(t *testing.T) {
 	db := pgtest.Open(t, dbURL)
 	ctx := context.Background()
 	users := newUsers(t, db, 3)
-	s := load(t, db)
+	s, hub := loadWithHub(t, db)
 	team := must(s.Create(ctx, users[0], "T"))
 	must(s.Join(ctx, users[1], team.ID))
-	must(s.Join(ctx, users[2], team.ID))
+	team = must(s.Join(ctx, users[2], team.ID))
+	sub, gone := hub.Subscribe(users[0]), hub.Subscribe(users[1])
+	defer sub.Close()
+	defer gone.Close()
 
 	conn := pgtest.Must(pgx.Connect(ctx, dbURL))
 	if _, err := conn.Exec(ctx, "DELETE FROM teammember WHERE user_id = $1", users[1]); err != nil {
@@ -197,7 +216,66 @@ func TestFailedWriteReconciles(t *testing.T) {
 	if _, err := s.ForUser(users[1]); !errors.Is(err, teams.ErrNotInTeam) {
 		t.Fatalf("removed member still indexed: %v", err)
 	}
+	// The reload is published as resync, one version on, and the member
+	// Postgres no longer has gets no_team as resync.
+	if ev := <-sub.C; ev.Name() != "team" || ev.Type() != live.Resync {
+		t.Fatalf("reload published %s:%s, want team:resync", ev.Name(), ev.Type())
+	}
+	if got.Version.Seq != team.Version.Seq+1 {
+		t.Fatalf("reload version %+v, want seq %d", got.Version, team.Version.Seq+1)
+	}
+	if ev := <-gone.C; ev.Name() != "no_team" || ev.Type() != live.Resync {
+		t.Fatalf("dropped member got %s:%s, want no_team:resync", ev.Name(), ev.Type())
+	}
 	must(s.SetReady(ctx, users[2], true))
+}
+
+// TestVersionAndTypes checks that every change to a team publishes its type
+// and the next version, and that no-ops publish nothing and keep it.
+func TestVersionAndTypes(t *testing.T) {
+	db := pgtest.Open(t, pgtest.URL(t, "teams_test"))
+	ctx := context.Background()
+	if configtest.Settings(t).Teams.Size < 2 {
+		t.Skip("needs teams.size >= 2")
+	}
+	users := newUsers(t, db, 2)
+	s, hub := loadWithHub(t, db)
+	sub := hub.Subscribe(users[0])
+	defer sub.Close()
+
+	var seq uint64
+	step := func(what string, got teams.Team, typ live.EventType) {
+		t.Helper()
+		seq++
+		if got.Version.Seq != seq || got.Version.Epoch == 0 {
+			t.Fatalf("%s: version %+v, want seq %d in the store's epoch", what, got.Version, seq)
+		}
+		ev := <-sub.C
+		if ev.Name() != "team" || ev.Type() != typ {
+			t.Fatalf("%s: published %s:%s, want team:%s", what, ev.Name(), ev.Type(), typ)
+		}
+	}
+	quiet := func(what string, got teams.Team) {
+		t.Helper()
+		if got.Version.Seq != seq {
+			t.Fatalf("%s: version %+v, want seq %d (no change)", what, got.Version, seq)
+		}
+		select {
+		case ev := <-sub.C:
+			t.Fatalf("%s published %s:%s", what, ev.Name(), ev.Type())
+		default:
+		}
+	}
+	team := must(s.Create(ctx, users[0], "Versions"))
+	step("create", team, teams.TeamCreated)
+	step("join", must(s.Join(ctx, users[1], team.ID)), teams.TeamMemberJoined)
+	step("ready", must(s.SetReady(ctx, users[1], true)), teams.TeamReadyChanged)
+	quiet("ready again", must(s.SetReady(ctx, users[1], true)))
+	s.RefreshProfile(users[1], "Renamed", nil)
+	step("profile", must(s.ForUser(users[0])), teams.TeamProfileUpdated)
+	s.RefreshProfile(users[1], "Renamed", nil)
+	quiet("same profile", must(s.ForUser(users[0])))
+	step("start", must(s.Start(ctx, users[0])), teams.TeamStarted)
 }
 
 // BenchmarkForUser measures concurrent in-memory team reads: one team of

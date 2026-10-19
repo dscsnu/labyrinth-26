@@ -31,6 +31,10 @@ type State struct {
 	// current snapshot's slice; it builds a new one (copy-on-write), so
 	// snapshots stay immutable.
 	Casts []Cast
+	// Version orders this team's snapshots (see live.Version): every apply
+	// sets the next one. Memory-only; it starts again, in a new Epoch, after a
+	// restart.
+	Version live.Version
 }
 
 // Poisoned reports whether the stack holds a wrong scan: the attempt can't
@@ -157,6 +161,13 @@ type View struct {
 	// Poisoned reports that a scan in the stack is wrong: nothing more can be
 	// scanned until the team selects again.
 	Poisoned bool `json:"poisoned"`
+	// CastCount is how many casts are in the team's cast log, repeats
+	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
+	// it when this is more than its length plus the cast it just saw.
+	CastCount int `json:"cast_count"`
+	// Version orders this team's snapshots: keep a copy only if its epoch
+	// differs from the one held, or it has a higher seq (live.Version).
+	Version live.Version `json:"version"`
 }
 
 // CastView is a Cast as JSON.
@@ -311,7 +322,7 @@ func (s *Store) Snapshot(userID uuid.UUID) (live.Event, bool) {
 		return live.Event{}, false
 	}
 	st := s.ForTeam(t.ID)
-	ev, err := s.event(t.ID, &st)
+	ev, err := s.event(t.ID, &st, live.Snapshot)
 	if err != nil {
 		s.log.Error("encode team state event", "error", err)
 		return live.Event{}, false
@@ -323,7 +334,7 @@ func (s *Store) Snapshot(userID uuid.UUID) (live.Event, bool) {
 func (s *Store) view(teamID string, st State) View {
 	c := s.atlas
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{},
-		Stack: []StackScanView{}, Poisoned: st.Poisoned()}
+		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version}
 	for _, p := range st.Patterns.Indexes() {
 		v.Patterns = append(v.Patterns, c.WaypointIDs(c.Pattern(p).Waypoints))
 	}

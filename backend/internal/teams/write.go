@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"labyrinth/internal/platform/live"
 )
 
 // Writes. Every write follows the same write-through steps, marked in each
@@ -98,7 +100,9 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string) (Team
 			return Team{}, err
 		}
 
-		// 3. build: the snapshot is the team as Postgres returned it
+		// 3. build: the snapshot is the team as Postgres returned it, at its
+		// first version
+		team.Version = live.Version{}.Next(s.rules.Epoch)
 		// 5. apply
 		e := &entry{}
 		e.cur.Store(&team)
@@ -107,7 +111,7 @@ func (s *Store) Create(ctx context.Context, userID uuid.UUID, name string) (Team
 		s.userTeam[userID] = id
 		s.mu.Unlock()
 		// 6. publish
-		s.publish(&team)
+		s.publish(&team, TeamCreated)
 		return team, nil
 	}
 	return Team{}, errors.New("could not find a free team id")
@@ -157,13 +161,14 @@ func (s *Store) Join(ctx context.Context, userID uuid.UUID, teamID string) (Team
 	// 3. build
 	next := *t
 	next.Members = append(slices.Clone(t.Members), m)
+	next.Version = t.Version.Next(s.rules.Epoch)
 	// 5. apply
 	e.cur.Store(&next)
 	s.mu.Lock()
 	s.userTeam[userID] = teamID
 	s.mu.Unlock()
 	// 6. publish
-	s.publish(&next)
+	s.publish(&next, TeamMemberJoined)
 	return next, nil
 }
 
@@ -192,6 +197,7 @@ func (s *Store) Leave(ctx context.Context, userID uuid.UUID) error {
 		next.LeaderID = next.Members[0].ID // members are in join order
 		newLeader = &next.LeaderID
 	}
+	next.Version = t.Version.Next(s.rules.Epoch)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -210,12 +216,17 @@ func (s *Store) Leave(ctx context.Context, userID uuid.UUID) error {
 	if deleteTeam {
 		e.gone = true
 		// 6. publish
-		s.hub.Send(userID, noTeamEvent)
+		s.sendNoTeam(noTeamDeleted, userID)
 		return nil
 	}
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(&next, userID)
+	typ := TeamMemberLeft
+	if newLeader != nil {
+		typ = TeamLeaderChanged
+	}
+	s.publish(&next, typ)
+	s.sendNoTeam(noTeamLeft, userID)
 	return nil
 }
 
@@ -247,6 +258,7 @@ func (s *Store) SetReady(ctx context.Context, userID uuid.UUID, ready bool) (Tea
 			next.Members[i].IsReady = ready
 		}
 	}
+	next.Version = t.Version.Next(s.rules.Epoch)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -258,7 +270,7 @@ func (s *Store) SetReady(ctx context.Context, userID uuid.UUID, ready bool) (Tea
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(&next)
+	s.publish(&next, TeamReadyChanged)
 	return next, nil
 }
 
@@ -286,11 +298,12 @@ func (s *Store) RefreshProfile(userID uuid.UUID, name string, avatarURL *string)
 	next := *t
 	next.Members = slices.Clone(t.Members)
 	next.Members[i].Name, next.Members[i].AvatarURL = name, avatarURL
+	next.Version = t.Version.Next(s.rules.Epoch)
 
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(&next)
+	s.publish(&next, TeamProfileUpdated)
 }
 
 // equalPtr reports whether a and b are both nil or point to equal strings.
@@ -338,12 +351,13 @@ func (s *Store) Start(ctx context.Context, userID uuid.UUID) (Team, error) {
 	next := *t
 	next.Status = InGame
 	next.StartedAt = &startedAt
+	next.Version = t.Version.Next(s.rules.Epoch)
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish: the team, then (through OnStart) anything other use cases
 	// show for a started team. Still under the lock, so a member's stream
 	// gets "team" before what follows from it.
-	s.publish(&next)
+	s.publish(&next, TeamStarted)
 	if s.rules.OnStart != nil {
 		s.rules.OnStart(next)
 	}
@@ -391,6 +405,7 @@ func (s *Store) RemoveMember(ctx context.Context, teamID string, userID uuid.UUI
 	if newLeader != nil {
 		next.LeaderID = *newLeader
 	}
+	next.Version = t.Version.Next(s.rules.Epoch)
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
@@ -407,7 +422,12 @@ func (s *Store) RemoveMember(ctx context.Context, teamID string, userID uuid.UUI
 	// 6. publish: the team to its members, no_team to the removed user, then
 	// (through OnRosterChange) whatever other use cases derive from a
 	// started team's roster.
-	s.publish(&next, userID)
+	typ := TeamMemberRemoved
+	if newLeader != nil {
+		typ = TeamLeaderChanged
+	}
+	s.publish(&next, typ)
+	s.sendNoTeam(noTeamRemoved, userID)
 	if next.Status != Lobby && s.rules.OnRosterChange != nil {
 		s.rules.OnRosterChange(next)
 	}

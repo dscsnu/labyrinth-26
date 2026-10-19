@@ -1,7 +1,9 @@
 package tests
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -10,6 +12,12 @@ import (
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 )
+
+// event returns a live event named name of type "test" whose message is the
+// JSON msg.
+func event(name, msg string) live.Event {
+	return live.MustNewEvent(name, "test", json.RawMessage(msg))
+}
 
 // newHub returns a hub with config.toml's live.hub_shards and
 // live.subscriber_buffer, and that buffer.
@@ -27,7 +35,7 @@ func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 	slow, fast := h.Subscribe(user), h.Subscribe(user)
 
 	for i := range buffer + 1 {
-		h.Send(user, live.NewEvent("team", []byte{byte('0' + i%10)}))
+		h.Send(user, event("team", fmt.Sprint(i%10)))
 		<-fast.C // fast keeps up
 	}
 
@@ -39,8 +47,8 @@ func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 		t.Fatalf("slow subscriber got %d buffered events before being dropped, want %d", n, buffer)
 	}
 
-	h.Send(user, live.NewEvent("team", []byte("x")))
-	if ev, ok := <-fast.C; !ok || string(ev.Data()) != "x" {
+	h.Send(user, event("team", `"x"`))
+	if ev, ok := <-fast.C; !ok || string(ev.Data()) != `{"type":"test","message":"x"}` {
 		t.Fatalf("fast subscriber stopped receiving: %v %v", ev, ok)
 	}
 	if got := h.Count(); got != 1 {
@@ -64,8 +72,8 @@ func TestHubCloseAndRemove(t *testing.T) {
 	if _, ok := <-b.C; ok {
 		t.Fatal("subscription open after hub close")
 	}
-	b.Close()                                          // safe after hub close
-	h.Broadcast(live.NewEvent("quiz", []byte("null"))) // no-op once closed
+	b.Close()                          // safe after hub close
+	h.Broadcast(event("quiz", "null")) // no-op once closed
 
 	late := h.Subscribe(uuid.New())
 	if _, ok := <-late.C; ok {
@@ -83,7 +91,7 @@ func TestHubSendsOnlyToThatUser(t *testing.T) {
 	alice, bob := uuid.New(), uuid.New()
 	a, b := h.Subscribe(alice), h.Subscribe(bob)
 
-	h.Send(alice, live.NewEvent("team", []byte("{}")))
+	h.Send(alice, event("team", "{}"))
 	if ev := <-a.C; ev.Name() != "team" {
 		t.Fatalf("alice got %v", ev)
 	}
@@ -108,7 +116,7 @@ func TestHubBroadcastReachesEveryStream(t *testing.T) {
 	slow := h.Subscribe(uuid.New())
 
 	for i := range buffer + 1 {
-		h.Broadcast(live.NewEvent("quiz", fmt.Appendf(nil, `{"id":%d}`, i)))
+		h.Broadcast(event("quiz", fmt.Sprintf(`{"id":%d}`, i)))
 		for j, s := range subs {
 			if ev := <-s.C; ev.Name() != "quiz" {
 				t.Fatalf("stream %d got %q", j, ev.Name())
@@ -141,8 +149,8 @@ func TestHubConcurrentUse(t *testing.T) {
 			sub := h.Subscribe(id)
 			defer sub.Close()
 			for range 50 {
-				h.Send(id, live.NewEvent("team", []byte("{}")))
-				h.Broadcast(live.NewEvent("quiz", []byte("null")))
+				h.Send(id, event("team", "{}"))
+				h.Broadcast(event("quiz", "null"))
 				for len(sub.C) > 0 {
 					<-sub.C
 				}
@@ -168,7 +176,7 @@ func BenchmarkHubSend(b *testing.B) {
 		}()
 	}
 	defer h.Close()
-	ev := live.NewEvent("team_state", make([]byte, 512))
+	ev := event("team_state", `"`+strings.Repeat("x", 512)+`"`)
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
@@ -192,7 +200,7 @@ func BenchmarkHubBroadcast(b *testing.B) {
 		}()
 	}
 	defer h.Close()
-	ev := live.NewEvent("quiz", make([]byte, 256))
+	ev := event("quiz", `"`+strings.Repeat("x", 256)+`"`)
 	for b.Loop() {
 		h.Broadcast(ev)
 	}

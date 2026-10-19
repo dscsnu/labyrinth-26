@@ -65,7 +65,7 @@ Every number below that comes from `config.toml` is shown with its current value
   - `ForUser(userID)`: two map lookups under a brief shared lock, then a lock-free snapshot load. About 60 ns per read, measured with `BenchmarkForUser` (one team of **6** (`teams.size`) members, 16 goroutines reading at once, on an i7-12650H)
   - `ByID(teamID)`
   - `All()`: every team, sorted by ID. Copies the index under the shared lock, then loads each snapshot lock-free. For admin views; the restart test compares `All()` (plus each member's `ForUser`) before and after.
-  - `Snapshot(userID)`: the `team`/`no_team` event for a new stream
+  - `Snapshot(userID)`: the `team`/`no_team` event of type `snapshot` for a new stream
   - `Store.Size()`: the method returning **6** (`teams.size`), the team size from `Rules`. Used by tests.
 
 ### `write.go`: writes, each written through
@@ -93,7 +93,8 @@ Every number below that comes from `config.toml` is shown with its current value
 - **`lockUsersTeam`** finds and locks a user's team, retrying if the user moved team between lookup and lock.
 - **`lockTeam`** finds and locks a team by ID (`RemoveMember`): `ErrTeamNotFound` if there's none, or it was deleted (`gone`) while waiting for the lock.
 - **`reconcile`** reloads a team after a failed write.
-- **`publish`** and **`teamEvent`** send events. **`randomTeamID`** picks codes from 100000–999999.
+- **`publish(t, typ)`** sends `team` of type `typ` to the members; **`sendNoTeam(ev, users...)`** sends a prebuilt `no_team` event (one per type, `noTeamLeft`, `noTeamDeleted`, `noTeamRemoved`, `noTeamResync`, `noTeamSnapshot`, encoded once since `{}` never changes). **`teamEvent(t, typ)`** builds the envelope. The type constants (`TeamCreated` … `TeamProfileUpdated`, `NoTeamLeft`, `NoTeamDeleted`, `NoTeamRemoved`) are in `store.go`; `live.Snapshot` and `live.Resync` come from `platform/live`.
+- **Version:** `Rules.Epoch` (one per process, from `server.Build`). Every write's build step sets `next.Version = t.Version.Next(epoch)` (`Create` starts at seq 1); `reconcile` continues from the in-memory version; `Load` starts every team at seq 0. No-ops don't bump. **`randomTeamID`** picks codes from 100000–999999.
 
 ## Data model: memory
 ```
@@ -138,6 +139,7 @@ Migration `0002`:
 | `team` row | `Team` fields |
 | `teammember` rows joined with `userprofile` (name, avatar), ordered by `joined_at, user_id` | `Team.Members`, and `userTeam[user] = team` |
 | `userprofile.name`, `avatar_url` changed by a sign-in | `Member.Name`, `Member.AvatarURL`, via `RefreshProfile` at once; nothing teams writes |
+| (none: memory-only) | `Team.Version`: `{epoch, seq}` for clients to order snapshots. `Load` starts every team at seq 0 in the new process's epoch, which clients treat as newer than anything from the old process, so nothing needs storing |
 
 Ties in `joined_at` break by `user_id`, so the order (and so leader succession) is the same after a restart. Names and avatars match too: `RefreshProfile` only copies into memory what `userprofile` already holds, so a restart reads the same values.
 
@@ -162,7 +164,7 @@ Every function in `write.go`, marked in the code:
 3. **build** the next snapshot
 4. **persist** via `db.go`, detached from the request, capped at **5 s** (`storage.write_timeout`)
 5. **apply**: swap the snapshot, update `teams`/`userTeam`
-6. **publish** `team` to members (`no_team` to a leaver)
+6. **publish** `team` to members (`no_team` to a leaver), each with its envelope type (below); the build step set the next `Version`
 
 | Function | Steps, in code order | `db.go` call | Why the order differs (AGENTS.md §6) |
 |---|---|---|---|
@@ -190,7 +192,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). The `/api/admin
 | GET | `/api/admin/teams` | none | `200` every team, sorted by ID (admin) |
 | DELETE | `/api/admin/teams/{team_id}/members/{user_id}[?new_leader=<user id>]` | none | `200` the team after the removal (admin) |
 
-**Team JSON** (payload, and the `team` event's data):
+**Team JSON** (payload, and the `team` event's `message`):
 ```json
 {"id": "482913", "name": "Seven Evil Exes",
  "leader_id": "6f1c…", "status": "LOBBY",
@@ -198,11 +200,28 @@ All routes need `Authorization: Bearer <token>` (`401` without). The `/api/admin
  "members": [
    {"id": "6f1c…", "name": "Jia Khot", "avatar_url": "https://…", "is_ready": false, "joined_at": "2026-10-17T12:00:00Z"},
    {"id": "9a2b…", "name": "Aarav", "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T12:00:04Z"}
- ]}
+ ],
+ "version": {"epoch": 1760702400000, "seq": 2}}
 ```
+`version` orders this team's snapshots: keep a copy only if its `epoch` differs from the one held, or its `seq` is higher. Every response above that returns a team carries it, like the event.
 Emails are never included. **Error body:** `{"success": false, "code": "team_full", "message": "team is full"}`.
 
-**Live events** on `GET /api/events` (team scope, sent to each member with `Hub.Send`): `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar. On a start, `team` is followed by the team's `team_state` (sent by teamstate through `Rules.OnStart`). On an admin removal, the rest get `team` and the removed player gets `no_team`; from then on they get no `team_state` (teamstate's `RosterChanged`).
+**Live events** on `GET /api/events` (team scope, sent to each member with `Hub.Send`), each data an envelope `{"type", "message"}`: `team` (message: the JSON above), or `no_team` (message: `{}`). The type says why:
+
+| Write | `team` type (to the members) | `no_team` type (to the user out) |
+|---|---|---|
+| connect | `snapshot` | `snapshot` (user in no team) |
+| `Create` | `created` | |
+| `Join` | `member_joined` | |
+| `Leave`, others remain | `member_left`, or `leader_changed` if the leader left | `left` |
+| `Leave`, last member | | `team_deleted` |
+| `SetReady` | `ready_changed` | |
+| `Start` | `started` (then teamstate's `team_state` of type `game_started`, through `Rules.OnStart`) | |
+| `RemoveMember` (admin) | `member_removed`, or `leader_changed` if the leader was removed | `removed` (and from then on no `team_state`: teamstate's `RosterChanged`) |
+| `RefreshProfile` | `profile_updated` | |
+| `reconcile` | `resync` | `resync` |
+
+Every type and when it's sent: `internal/server/README.md`, "Event format".
 
 ## Rules and cases
 
@@ -336,9 +355,10 @@ Checked in this order:
 
 ## Tests
 - `tests/store_test.go`:
-  - restart reproduces memory exactly (`TestSurvivesRestart`): a started team of `teams.size`, a lobby whose leader left, and a deleted team, with `teams.size` + 4 users; needs `teams.size` ≥ 3 (`minRestartTeam`, a leader and two joiners in the lobby), else it skips
+  - restart reproduces memory exactly, versions aside, which restart at seq 0 in a new epoch (`TestSurvivesRestart`): a started team of `teams.size`, a lobby whose leader left, and a deleted team, with `teams.size` + 4 users; needs `teams.size` ≥ 3 (`minRestartTeam`, a leader and two joiners in the lobby), else it skips
   - reads work with the database closed (`TestReadsDoNotTouchDatabase`)
-  - a failed write leaves memory unchanged, and a hand-edited database is reconciled (`TestFailedWriteReconciles`)
+  - a failed write leaves memory unchanged, and a hand-edited database is reconciled (`TestFailedWriteReconciles`), published as `team: resync` one version on, with `no_team: resync` to the member Postgres dropped
+  - `TestVersionAndTypes`: create, join, ready, profile and start each publish their type at the next `version.seq` (1–5); a repeated ready and an unchanged profile publish nothing and keep it
   - `TestRefreshProfile`: a new name and avatar show in `ByID` and publish `team`; the same values again, and a user in no team, publish nothing
   - `TestStartCallsOnStart`: `Rules.OnStart` is called exactly once, with the started team, when it is already `IN_GAME` in `ByID` and its `IN_GAME` `team` event is already on a member's stream; a start before everyone is ready and a second start (`team_locked`) don't call it. Needs `teams.size` ≥ 2 (`minStartTeam`), else it skips
   - `BenchmarkForUser`: parallel `ForUser` reads of one full team; results summed into the `sinkMembers` sink

@@ -206,9 +206,11 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
   | game | `hub.Broadcast(ev)` | every open stream | future quizzes, quick-time events |
 
   Publish after apply and **while holding the entry lock** of the state the event shows, so one key's events stay in order. Read the recipients from memory at send time (or a cached roster, as teamstate does, dropped by the owner's hook whenever it changes: `RosterChanged`); never make clients resubscribe.
-- **Events are full snapshots,** never diffs, never one-off messages. A reconnecting client needs nothing replayed. A "notification" (a quiz opening, a spell starting) is the client noticing a change between snapshots: a new `id`, a status change, `selection` being set.
-- **Build each event once with `live.NewEvent`,** then send that value to every recipient: its wire bytes are shared, not re-encoded per stream.
-- **Name events after the resource,** in snake_case (`team`, `no_team`, `team_state`), with the same JSON as the matching GET route.
+- **Every event's data is the envelope `{"type": …, "message": …}`.** The SSE event name is the resource; `type` is why it was sent; `message` is the resource's **full** state, never a diff. A reconnecting client needs nothing replayed. Clients render from `message` and use `type` only for moments (an animation, a toast), so a missed event costs nothing.
+- **Types** (`live.EventType`) are snake_case causes, past tense where it reads naturally (`member_joined`, `spell_cast`). Declare them as exported constants in the use case that publishes them, documented with when they're sent. `snapshot` (on connect) and `resync` (after a reconcile) are reserved, declared in `platform/live`, and used by every resource. Never put state in `type`: it says what happened; `message` says what is. Adding or renaming a type is an API change: update the server README's type table and the `…Event` schema's enum in `openapi.yaml`.
+- **Build each event once with `live.NewEvent(name, type, message)`,** then send that value to every recipient: its wire bytes are shared, not re-encoded per stream. `live.MustNewEvent` only for constant messages.
+- **Name events after the resource,** in snake_case (`team`, `no_team`, `team_state`); `message` is the same JSON as the matching GET route.
+- **Versioned resources carry `version: live.Version`** (`team`, `team_state`), so clients keep the newest copy from the stream and from write responses alike. Every apply sets `next.Version = cur.Version.Next(epoch)` in its build step; a reconcile continues from the in-memory version (never back); no-ops and resends (`PublishTeam`) don't bump. `epoch` is one per process, set in `server.Build` and passed through `Rules.Epoch`. Version is memory-only: list it in the README's Memory ↔ Postgres table.
 - **Game-wide resources** send `null` when nothing is active, or an object with at least an `id`. A broadcast payload is identical for every viewer: anything that varies per player goes in that player's scope (a player's own answer), and a team's results go in `team_state` (§17).
 - **Hot events stay small.** Data that never changes while the backend runs (atlas content, game rules) comes from GET routes once and never rides in events.
 - **Never publish** on a rejection or no-op.
@@ -216,7 +218,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **The server owns time.** If a change is ever caused by time passing, the server publishes it when it happens (a timer). Clients never decide state from time. See §17. (The game has none today: no time limit.)
 - **`hello {server_time}` is the one way clients measure time against the game.** Every stream opens with it, so the offset (server time − the client's monotonic clock) is re-measured on every connect (`frontend/src/lib/game/serverClock.ts`). Anything a client shows relative to now ("scanned 2 min ago", a future countdown) uses it, so every phone agrees. `hello` carries nothing else; game rules come from `GET /api/game/shapes`.
 - **Admin-triggered game events** read the caller's role from `user.Get`, never from the token (roles in tokens can be stale): use an admin route (§7, `RequireAdmin`), then follow §6 with `Broadcast` as step 6.
-- **The wire-level reference** (endpoint, scopes, format, every event, triggers, ordering, heartbeat, reconnection, client integration) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
+- **The wire-level reference** (endpoint, scopes, the envelope, every event and type, triggers, ordering, versioning, heartbeat, reconnection, client integration) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
 
 ## 10. Configuration: no hard-coded constants
 - **Every tunable lives in `backend/config.toml`:** sizes, counts, durations, timeouts, limits, intervals. Never write `30 * time.Second` or `6` in a use case, a test, or a doc comment.
@@ -337,15 +339,16 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 ## 17. Team state is the gameplay loop
 Everything a team's players see about the game loop reaches them as **one struct**. Keep it that way.
 
-- **One struct, sent whole.** Per-team gameplay state lives in `teamstate.State`. Clients get it as one JSON object, the `View`, which is the `team_state` event. It's sent whole over the event stream on connect and after every change, and it's the response of every teamstate route (`GET /api/teams/me/state`, both selection routes, and `ScanResult.state` on a scan).
+- **One struct, sent whole.** Per-team gameplay state lives in `teamstate.State`. Clients get it as one JSON object, the `View`, which is the `team_state` event's `message`. It's sent whole over the event stream on connect and after every change, and it's the response of every teamstate route (`GET /api/teams/me/state`, both selection routes, and `ScanResult.state` on a scan).
 - **Clients never poll.** Everything the play screen shows about the team's game comes from the latest `View`. Its other inputs, and the only ones, are:
   - the static `GET /api/game/shapes` (rules and content, fetched once)
-  - `GET /api/teams/me/casts` (the cast log, fetched once on load; each new cast then arrives as `team_state.last_cast`, which the client prepends)
+  - `GET /api/teams/me/casts` (the cast log, fetched once on load; each new cast then arrives as `team_state.last_cast` with type `spell_cast`, which the client prepends, and `team_state.cast_count` tells it to re-fetch when it missed some)
   - the `team` event (the roster)
   - `hello` (the clock, §9)
   - **game-wide events** (§9): resources identical for every player, such as a quiz or a quick-time event, each its own game-scope event carrying `null` or an object with an `id`. They're the one deliberate exception to "one struct": something every player sees the same way is one broadcast, not a copy in every team's `team_state`. **What a team does with them** (its answers, its score from them) is per-team, so it goes in `team_state` like any other result.
 - **Static vs per-team.** Static definitions (waypoints, shapes, patterns, spell values) belong to `atlas`. Per-team gameplay state belongs in `State`.
-- **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them. The one exception is a **history** too long to resend on every change (the cast log): a read endpoint for the load, with each new entry carried live in `team_state` (`last_cast`).
+- **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them. The one exception is a **history** too long to resend on every change (the cast log): a read endpoint for the load, with each new entry carried live in `team_state` (`last_cast`), plus a count (`cast_count`) so a client knows when its copy is incomplete.
+- **`team_state` is versioned** (`version`, §9): every apply bumps it, so a client keeps the newest copy whether it came from the stream or a response. Each publish says why in its envelope `type` (`shape_selected`, `scan_added`, `wrong_scan`, `spell_cast`, …).
 - **Nothing changes with time alone.** There's no time limit. Clients use timestamps (`scanned_at`, `cast_at`) only for display, against server time estimated from `hello` (`serverClock.ts`, §9), never to change the state they show. If a time-driven change is ever added, the server publishes it (§9); clients never infer it.
 - **Rejected or no-op requests publish nothing** (§6, §9). That includes `409`s and clearing with nothing selected. A wrong scan is not a rejection: it's pushed and published.
 - **Spells are already in `team_state`.** Clients derive the spell lifecycle from it, with no event of its own: a spell **starts** when `selection` is set, members **finish their part** as `stack` grows (`stack[].user_id` says who, its length how many), and a spell **finishes** when `last_cast` changes (`cast_at`, `shape`, `cast_by`).
@@ -357,9 +360,9 @@ Everything a team's players see about the game loop reaches them as **one struct
 | 1 | `teamstate.State` (`read.go`) | the field, documented |
 | 2 | `View` (`read.go`) | its JSON field, built in `view` |
 | 3 | Postgres | persisted by the write-through and reloaded by `Load` (`stateOf`), or listed as memory-only in the teamstate README's Memory ↔ Postgres table, with why |
-| 4 | publish | every change to it publishes `team_state` (the write, or a timer) |
+| 4 | publish | every change to it publishes `team_state` with the right envelope `type` (an existing one, or a new constant in `teamstate/store.go`), and bumps `Version` in the build step |
 | 5 | `internal/server/openapi.yaml` | the field in the `TeamState` schema, with a description |
-| 6 | SSE reference | `internal/server/README.md`, "The event stream": the JSON example and the triggers table |
+| 6 | SSE reference | `internal/server/README.md`, "The event stream": the JSON example, the type table ("Event format") and the triggers table; a new type also goes in `TeamStateEvent`'s enum in `openapi.yaml` |
 | 7 | frontend type | `frontend/src/lib/types/Game.type.ts` (`TeamStateSchema`) |
 | 8 | tests | a store test, a restart test (JSON equal before and after), and a server or simulation test over HTTP and the stream (`internal/server/tests`) |
 | 9 | teamstate README | every section §12 lists that it touches |

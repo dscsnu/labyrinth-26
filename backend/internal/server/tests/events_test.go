@@ -14,9 +14,11 @@ import (
 	"labyrinth/internal/auth"
 )
 
-// sseEvent is one parsed server-sent event.
+// sseEvent is one parsed server-sent event: its name, the envelope's type,
+// and the envelope's message as data.
 type sseEvent struct {
 	name string
+	typ  string
 	data map[string]any
 }
 
@@ -29,10 +31,10 @@ type stream struct {
 	cancel context.CancelFunc
 
 	mu    sync.Mutex
-	names []string // every event's name, in arrival order; guarded by mu
+	names []string // every event as "name:type", in arrival order; guarded by mu
 }
 
-// seen returns the names of every event received so far, in order, across
+// seen returns every event received so far as "name:type", in order, across
 // all channels.
 func (s *stream) seen() []string {
 	s.mu.Lock()
@@ -78,12 +80,15 @@ func (e *env) openStreamAt(path string, auth func(*http.Request)) *stream {
 			case strings.HasPrefix(line, "event: "):
 				name = strings.TrimPrefix(line, "event: ")
 			case strings.HasPrefix(line, "data: "):
-				var data map[string]any
-				json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data)
+				var env struct {
+					Type    string         `json:"type"`
+					Message map[string]any `json:"message"`
+				}
+				json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &env)
 				s.mu.Lock()
-				s.names = append(s.names, name)
+				s.names = append(s.names, name+":"+env.Type)
 				s.mu.Unlock()
-				ev := sseEvent{name: name, data: data}
+				ev := sseEvent{name: name, typ: env.Type, data: env.Message}
 				switch name {
 				case "hello":
 					s.hellos <- ev
@@ -294,7 +299,7 @@ func TestStartPublishesTeamState(t *testing.T) {
 		if st.data["team_id"] != teamID || len(st.data["waypoints"].([]any)) != 0 || len(st.data["stack"].([]any)) != 0 || st.data["selection"] != nil {
 			t.Fatalf("member %d: team_state after start %v, want empty", i, st.data)
 		}
-		want := []string{"hello", "team", "team_state", "team", "team_state"}
+		want := []string{"hello:connected", "team:snapshot", "team_state:snapshot", "team:started", "team_state:game_started"}
 		if got := s.seen(); !slices.Equal(got, want) {
 			t.Fatalf("member %d: events %v, want %v", i, got, want)
 		}
@@ -313,8 +318,8 @@ func TestStreamStartsWithHello(t *testing.T) {
 	if err != nil || at.Before(before.Add(-time.Second)) || at.After(time.Now().Add(time.Second)) {
 		t.Fatalf("hello server_time %v (%v), want about now", h.data["server_time"], err)
 	}
-	if got := s.seen(); !slices.Equal(got, []string{"hello", "no_team"}) {
-		t.Fatalf("events %v, want [hello no_team]", got)
+	if got := s.seen(); !slices.Equal(got, []string{"hello:connected", "no_team:snapshot"}) {
+		t.Fatalf("events %v, want [hello:connected no_team:snapshot]", got)
 	}
 }
 
@@ -397,4 +402,133 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	if int(damage) != 65 {
 		t.Fatalf("expected damage 65 for pattern 1, got %v", damage)
 	}
+}
+
+// waitSeen fails unless s's events, as "name:type", become exactly want
+// within 3 s.
+func waitSeen(t *testing.T, what string, s *stream, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !slices.Equal(s.seen(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: events\n  got  %v\n  want %v", what, s.seen(), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestEventTypes walks teams through every publish site over HTTP and checks
+// the envelope type each stream gets, in order: create, join, leave (member,
+// leader, last), ready, start, select, scans (added, cast, wrong), clear, and
+// an admin's removals (member, leader). It also checks that team_state's
+// version.seq goes up by one per change in one epoch, and that cast_count
+// counts the cast.
+func TestEventTypes(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// 1012 is in no pattern, so it's wrong for every shape.
+	if _, err := e.db.Pool().Exec(context.Background(),
+		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart() // content is read at startup
+	if e.cfg.Settings.Teams.Size < 3 {
+		t.Skip("needs teams.size >= 3")
+	}
+	a, b, c := e.newPlayer("a"), e.newPlayer("b"), e.newPlayer("c")
+	admin := e.newPlayer("admin")
+	e.setRole(admin, "ADMIN")
+	sa, sb, sc := e.openStream(a), e.openStream(b), e.openStream(c)
+	open := []string{"hello:connected", "no_team:snapshot"}
+
+	// The lobby.
+	teamID := e.call("POST", "/api/teams", a, map[string]string{"name": "Types"}).payload["id"].(string)
+	join := func(p player) {
+		expect(t, "join", e.call("POST", "/api/teams/join", p, map[string]string{"team_id": teamID}), http.StatusOK, "")
+	}
+	join(b)
+	join(c)
+	expect(t, "c leaves", e.call("POST", "/api/teams/leave", c, nil), http.StatusOK, "")
+	join(c)
+	for _, p := range []player{b, c} {
+		expect(t, "ready", e.call("PUT", "/api/teams/me/ready", p, map[string]bool{"ready": true}), http.StatusOK, "")
+	}
+	lobby := []string{"team:created", "team:member_joined", "team:member_joined", "team:member_left", "team:member_joined", "team:ready_changed", "team:ready_changed"}
+	waitSeen(t, "a in the lobby", sa, append(slices.Clone(open), lobby...)...)
+	waitSeen(t, "c in the lobby", sc, append(slices.Clone(open),
+		"team:member_joined", "no_team:left", "team:member_joined", "team:ready_changed", "team:ready_changed")...)
+
+	// The game: start, a cast, a wrong scan, a clear.
+	scan := func(p player, w string) {
+		expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": w}), http.StatusOK, "")
+	}
+	sel := func() {
+		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", a, map[string]string{"shape": "square"}), http.StatusOK, "")
+	}
+	expect(t, "start", e.call("POST", "/api/teams/me/start", a, nil), http.StatusOK, "")
+	sel()
+	scan(a, "1001")
+	scan(b, "1002")
+	scan(c, "1007")
+	scan(a, "1008") // completes the square
+	sel()
+	scan(b, "1012") // wrong
+	expect(t, "clear", e.call("DELETE", "/api/teams/me/state/selection", c, nil), http.StatusOK, "")
+	game := []string{"team:started", "team_state:game_started", "team_state:shape_selected",
+		"team_state:scan_added", "team_state:scan_added", "team_state:scan_added", "team_state:spell_cast",
+		"team_state:shape_selected", "team_state:wrong_scan", "team_state:selection_cleared"}
+	waitSeen(t, "a in the game", sa, append(append(slices.Clone(open), lobby...), game...)...)
+
+	// team_state: one epoch, seq +1 per change, cast_count counting the cast.
+	var states []sseEvent
+	for len(sa.states) > 0 {
+		states = append(states, <-sa.states)
+	}
+	version := func(ev sseEvent) (epoch, seq float64) {
+		v := ev.data["version"].(map[string]any)
+		return v["epoch"].(float64), v["seq"].(float64)
+	}
+	epoch, first := version(states[0])
+	for i, ev := range states {
+		ep, seq := version(ev)
+		if ep != epoch || seq != first+float64(i) {
+			t.Fatalf("team_state %d (%s): version %v/%v, want %v/%v", i, ev.typ, ep, seq, epoch, first+float64(i))
+		}
+		casts := 0.0
+		if i >= 5 { // from spell_cast on (game_started, shape_selected, 3 scans, spell_cast)
+			casts = 1
+		}
+		if ev.data["cast_count"] != casts {
+			t.Fatalf("team_state %d (%s): cast_count %v, want %v", i, ev.typ, ev.data["cast_count"], casts)
+		}
+	}
+
+	// An admin removes a member, then the leader (naming b).
+	expect(t, "remove c", e.call("DELETE", removePath(teamID, c.id, ""), admin, nil), http.StatusOK, "")
+	expect(t, "remove a", e.call("DELETE", removePath(teamID, a.id, b.id), admin, nil), http.StatusOK, "")
+	waitSeen(t, "c removed", sc, append(append(slices.Clone(open),
+		"team:member_joined", "no_team:left", "team:member_joined", "team:ready_changed", "team:ready_changed"),
+		append(slices.Clone(game), "no_team:removed")...)...)
+	waitSeen(t, "a removed", sa, append(append(append(slices.Clone(open), lobby...), game...),
+		"team:member_removed", "no_team:removed")...)
+	// b sees c removed, then a removed with b leading.
+	deadline := time.Now().Add(3 * time.Second)
+	for got := sb.seen(); !slices.Equal(got[max(0, len(got)-2):], []string{"team:member_removed", "team:leader_changed"}); got = sb.seen() {
+		if time.Now().After(deadline) {
+			t.Fatalf("b's last events %v, want [team:member_removed team:leader_changed]", got[max(0, len(got)-2):])
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A lobby leader leaving hands over; the last member leaving deletes it.
+	x, y := e.newPlayer("x"), e.newPlayer("y")
+	sx, sy := e.openStream(x), e.openStream(y)
+	lobbyID := e.call("POST", "/api/teams", x, map[string]string{"name": "Gone"}).payload["id"].(string)
+	expect(t, "y joins", e.call("POST", "/api/teams/join", y, map[string]string{"team_id": lobbyID}), http.StatusOK, "")
+	expect(t, "x leaves", e.call("POST", "/api/teams/leave", x, nil), http.StatusOK, "")
+	expect(t, "y leaves", e.call("POST", "/api/teams/leave", y, nil), http.StatusOK, "")
+	waitSeen(t, "x", sx, append(slices.Clone(open), "team:created", "team:member_joined", "no_team:left")...)
+	waitSeen(t, "y", sy, append(slices.Clone(open), "team:member_joined", "team:leader_changed", "no_team:team_deleted")...)
 }
