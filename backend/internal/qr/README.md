@@ -126,11 +126,14 @@ there are no lock/validate/build/persist/apply/publish steps and no reconcile.
 | Case | Result |
 |---|---|
 | No `.` separator, empty waypoint, or non-numeric seconds | `ErrInvalid` → `400 invalid_qr`. |
+| Signature isn't canonical base64url: not base64url at all, or its last character has non-zero filler bits (see below) | `ErrInvalid`. |
 | Signature doesn't match (tampered, wrong waypoint's key, wrong secret) | `ErrInvalid`. |
 | Issued in the future | `ErrExpired` → `409 qr_expired`. |
 | Issued more than `window` ago | `ErrExpired`. |
 | Exactly at `expires_at` | `ErrExpired` (the window is `now < expires_at`). |
 | Signed and within the window | The waypoint ID. |
+
+**Why the signature is decoded strictly** (`base64.RawURLEncoding.Strict()`). The HMAC-SHA256 signature is 32 bytes, so 43 base64url characters: 42 carry 6 bits each, and the last carries the remaining 4 bits plus 2 filler bits that the canonical encoding leaves at zero. A lenient decoder ignores the filler, so a signature ending in `A`, `B`, `C` or `D` (`000000` to `000011`) decodes to the same bytes. That's no forgery (the bytes are the real signature) but it gives every token four spellings, and it made the old tamper test flaky: flipping the last character to `A` sometimes changed only filler bits, and the "tampered" token verified (about 1 run in 16). Strict decoding accepts only the canonical spelling. The `/qr` page encodes with `btoa` and strips the `=` padding, which always yields the canonical spelling.
 
 A resent verify is fine to repeat: it changes nothing.
 
@@ -172,6 +175,7 @@ a valid secret). Nothing else can fail: there is no database and no network.
 | Test | Covers |
 |---|---|
 | `TestSigningKeyAndVerify` | The returned key signs tokens `Verify` accepts; expiry boundary, tamper, wrong waypoint key, wrong secret, malformed. |
+| `TestVerifyRejectsNonCanonicalSignature` | The 3 spellings of a valid signature with filler bits set in its last character: each decodes leniently to the real bytes, and each is `ErrInvalid`; the canonical token still verifies. |
 | `TestSigningKeyUnknownWaypoint` | `SigningKey` of an unknown waypoint → `ErrUnknownWaypoint`. |
 | `TestQRGuard` (server) | Mint needs a token and a HELPER/ADMIN role (from the DB, not the token); a player gets `403 not_staff`. |
-| `TestQRVerify` (server) | `POST /api/qr/verify` over HTTP: valid, `invalid_qr`, `qr_expired`, `invalid_body`. |
+| `TestQRVerify` (server) | `POST /api/qr/verify` over HTTP: valid, `invalid_qr` (tampered by changing the signature's first character, all of whose bits are data, so it always changes the bytes), `qr_expired`, `invalid_body`. |
