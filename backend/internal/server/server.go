@@ -5,7 +5,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -45,6 +44,10 @@ type App struct {
 func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth.GoogleEndpoints, log *slog.Logger) (*App, error) {
 	set := cfg.Settings
 	hub := live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer)
+	// One epoch for the whole process: every live.Version this backend
+	// hands out (team, team_state) starts its seq again in it after a
+	// restart, so clients never mistake a restart for going back.
+	epoch := time.Now().UnixMilli()
 
 	users := user.New(db)
 	tokens := auth.NewTokens(cfg.JWTKey, set.Auth.TokenTTL.Duration)
@@ -72,6 +75,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		// An admin removing a member from a started team: team state stops
 		// sending to them and refuses their writes.
 		OnRosterChange: func(t teams.Team) { stateStore.RosterChanged(t.ID) },
+		Epoch:          epoch,
 	})
 	if err != nil {
 		return nil, err
@@ -83,6 +87,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
+		Epoch:            epoch,
 	})
 	if err != nil {
 		return nil, err
@@ -205,12 +210,14 @@ func (a *App) snapshot(userID uuid.UUID) []live.Event {
 	return evs
 }
 
-// hello is the "hello" event that opens every stream: the server's clock, so
-// clients can correct anything they show relative to now ("2 min ago") for
-// their own clock's offset.
+// helloConnected is the type of the "hello" event: the stream is open.
+const helloConnected live.EventType = "connected"
+
+// hello is the "hello" event that opens every stream, of type connected: the
+// server's clock, so clients can correct anything they show relative to now
+// ("2 min ago") for their own clock's offset.
 func hello(now time.Time) live.Event {
-	data, _ := json.Marshal(struct {
+	return live.MustNewEvent("hello", helloConnected, struct {
 		ServerTime time.Time `json:"server_time"`
 	}{now.UTC()}) // can't fail: a struct of one time
-	return live.NewEvent("hello", data)
 }

@@ -2,7 +2,6 @@ package teamstate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -97,6 +96,10 @@ type Rules struct {
 	// Clock is the store's time source; nil means the real one
 	// (systemClock). Tests pass a fake. Not in config.toml.
 	Clock Clock
+	// Epoch is the backend process's epoch for live.Version, the same for
+	// every use case: server.Build sets it once at startup. Not in
+	// config.toml.
+	Epoch int64
 }
 
 // Store is the team state use case: each team's selection, scan stack and
@@ -147,9 +150,10 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, t Teams, hub *live.Hub,
 }
 
 // emptyState is the state of a team that hasn't done anything: no progress,
-// no selection, and an empty stack of the configured capacity.
+// no selection, an empty stack of the configured capacity, and the first
+// version of this process's epoch (seq 0).
 func (s *Store) emptyState() State {
-	return State{Stack: NewStack(s.rules.MaxPatternPoints)}
+	return State{Stack: NewStack(s.rules.MaxPatternPoints), Version: live.Version{Epoch: s.rules.Epoch}}
 }
 
 // stateOf rebuilds a State from stored IDs, failing on any ID the atlas
@@ -236,8 +240,9 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 		}
 		var st State
 		if st, err = s.stateOf(rows); err == nil {
+			st.Version = e.cur.Load().Version.Next(s.rules.Epoch) // never back, even on a reload
 			e.cur.Store(&st)
-			s.publish(e, teamID, &st)
+			s.publish(e, teamID, &st, live.Resync)
 			return writeErr
 		}
 	}
@@ -249,7 +254,7 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 // caller holds e.mu. The roster comes from e's cache, filled from teams on
 // the first publish of an IN_GAME team, so a publish normally reads nothing
 // outside the entry.
-func (s *Store) publish(e *entry, teamID string, st *State) {
+func (s *Store) publish(e *entry, teamID string, st *State, typ live.EventType) {
 	members := e.members
 	if members == nil {
 		t, ok := s.teams.ByID(teamID)
@@ -264,7 +269,7 @@ func (s *Store) publish(e *entry, teamID string, st *State) {
 			e.members = members
 		}
 	}
-	ev, err := s.event(teamID, st)
+	ev, err := s.event(teamID, st, typ)
 	if err != nil {
 		s.log.Error("encode team state event", "team_id", teamID, "error", err)
 		return
@@ -274,11 +279,30 @@ func (s *Store) publish(e *entry, teamID string, st *State) {
 	}
 }
 
-// event encodes a team's state as a "team_state" live event.
-func (s *Store) event(teamID string, st *State) (live.Event, error) {
-	data, err := json.Marshal(s.view(teamID, *st))
-	if err != nil {
-		return live.Event{}, err
-	}
-	return live.NewEvent("team_state", data), nil
+// event encodes a team's state as a "team_state" live event of type typ;
+// its message is the same JSON as GET /api/teams/me/state.
+func (s *Store) event(teamID string, st *State, typ live.EventType) (live.Event, error) {
+	return live.NewEvent("team_state", typ, s.view(teamID, *st))
 }
+
+// The causes of "team_state" events (the envelope's type), besides
+// live.Snapshot and live.Resync. Each goes to every member after the change;
+// the message is always the whole state.
+const (
+	// GameStarted: the team just started; this is its state (empty for a new
+	// team), sent right after the "team" event of type started.
+	GameStarted live.EventType = "game_started"
+	// ShapeSelected: a member selected a shape (or reselected it), which
+	// purged the stack: a spell attempt starts.
+	ShapeSelected live.EventType = "shape_selected"
+	// SelectionCleared: a member cleared the selection, purging the stack.
+	SelectionCleared live.EventType = "selection_cleared"
+	// ScanAdded: a scan joined the stack; the attempt goes on.
+	ScanAdded live.EventType = "scan_added"
+	// WrongScan: a scan joined the stack marked wrong; the attempt is
+	// poisoned until a member selects again.
+	WrongScan live.EventType = "wrong_scan"
+	// SpellCast: a scan completed a pattern: last_cast is the new cast,
+	// cast_count went up, and the selection and stack were purged.
+	SpellCast live.EventType = "spell_cast"
+)

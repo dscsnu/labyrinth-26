@@ -186,9 +186,9 @@ The complete reference for the live stream: what it carries, what triggers each 
 1. `userID := identity.UserID(r)`.
 2. **`sub := a.Hub.Subscribe(userID)`**, then `defer sub.Close()`.
 3. **Initial snapshots** (`snapshot`), read from memory after subscribing:
-   - `hello`: `{"server_time": …}`, the server's clock: the one way clients measure time against the game (see [Client integration](#client-integration), step 4).
-   - `a.Teams.Snapshot(userID)`: `team` with the same JSON as `GET /api/teams/me`, or `no_team` with `{}` if the user is in no team (or the team failed to encode, which is logged).
-   - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` with the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged). Sent for a `LOBBY` team too (an empty state).
+   - `hello` of type `connected`: `{"server_time": …}`, the server's clock: the one way clients measure time against the game (see [Client integration](#client-integration), step 5).
+   - `a.Teams.Snapshot(userID)`: `team` of type `snapshot`, its message the same JSON as `GET /api/teams/me`; or `no_team` of type `snapshot` with `{}` if the user is in no team (or the team failed to encode, which is logged).
+   - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` of type `snapshot`, its message the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged). Sent for a `LOBBY` team too (an empty state).
    - Game-wide resources come last (none yet).
 4. `a.stream.Serve(w, r, sub, initial)` (`live.Streamer`): clears the read deadline, writes a `retry:` line and the initial events in one flush, then every event from `sub`, plus `: ping` after **25 s** (`live.heartbeat`) with no event. Returns when the client disconnects, a write fails or takes over **10 s** (`live.write_timeout`), the subscription is dropped or the hub closes.
 5. The deferred `sub.Close()` removes the subscription; the `/healthz` count drops.
@@ -209,9 +209,9 @@ Nobody picks a channel. The publisher decides who gets each event, at the moment
 - **Each event is encoded once** (`live.NewEvent`): the team's members, or every stream for a broadcast, share the same bytes.
 
 ### Wire format
-Each event is exactly `event: <name>\n` + `data: <compact JSON on one line>\n` + `\n` (data with a newline in it would be split into several `data:` lines, which the client joins back; compact JSON never has one). A heartbeat is the comment `: ping\n\n`, which `EventSource` ignores. The stream opens with `retry: <ms>\n\n`, a reconnect delay picked at random per stream between **1 s** (`live.retry_min`) and **6 s** (`live.retry_max`). No `id:` fields are sent. Events already queued when one is written go out with it in a single flush; every write has a **10 s** deadline (`live.write_timeout`).
+Each event is exactly `event: <name>\n` + `data: <envelope as compact JSON on one line>\n` + `\n`. The envelope is described in [Event format](#event-format). A heartbeat is the comment `: ping\n\n`, which `EventSource` ignores. The stream opens with `retry: <ms>\n\n`, a reconnect delay picked at random per stream between **1 s** (`live.retry_min`) and **6 s** (`live.retry_max`). No `id:` fields are sent. Events already queued when one is written go out with it in a single flush; every write has a **10 s** deadline (`live.write_timeout`).
 
-Byte-level example for a user in the lobby team `482913` with two members, from connect to the first ping (`␤` = `\n`):
+Byte-level example for a user in the lobby team `482913` with two members, from connect to the first ping (`␤` = `\n`; the epoch is the backend's start time):
 ```
 HTTP/1.1 200 OK
 Content-Type: text/event-stream
@@ -221,27 +221,67 @@ X-Accel-Buffering: no
 retry: 3412␤
 ␤
 event: hello␤
-data: {"server_time":"2026-10-17T11:58:30.123456Z"}␤
+data: {"type":"connected","message":{"server_time":"2026-10-17T11:58:30.123456Z"}}␤
 ␤
 event: team␤
-data: {"id":"482913","name":"Scanners","leader_id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","status":"LOBBY","created_at":"2026-10-17T11:50:00Z","started_at":null,"members":[{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","name":"Asha","avatar_url":null,"is_ready":false,"joined_at":"2026-10-17T11:50:00Z"},{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02","name":"Bilal","avatar_url":"https://example.com/b.png","is_ready":true,"joined_at":"2026-10-17T11:51:30Z"}]}␤
+data: {"type":"snapshot","message":{"id":"482913","name":"Scanners","leader_id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","status":"LOBBY","created_at":"2026-10-17T11:50:00Z","started_at":null,"members":[{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","name":"Asha","avatar_url":null,"is_ready":false,"joined_at":"2026-10-17T11:50:00Z"},{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02","name":"Bilal","avatar_url":"https://example.com/b.png","is_ready":true,"joined_at":"2026-10-17T11:51:30Z"}],"version":{"epoch":1760687400000,"seq":3}}}␤
 ␤
 event: team_state␤
-data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[],"poisoned":false}␤
+data: {"type":"snapshot","message":{"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[],"poisoned":false,"cast_count":0,"version":{"epoch":1760687400000,"seq":0}}}␤
 ␤
 : ping␤
 ␤
 ```
 
-### Events
-| Event | Data | Same JSON as | Schema (`openapi.yaml`) |
-|---|---|---|---|
-| `hello` | `{"server_time": …}`, the server's clock as the stream opened; clients re-measure their clock offset from it on every connect | none | `Hello` |
-| `team` | the user's team | `GET /api/teams/me` | `Team` |
-| `no_team` | `{}` | (`GET /api/teams/me` is `404 not_in_team`) | none |
-| `team_state` | the user's team's game state, the `View` | `GET /api/teams/me/state` | `TeamState` |
+### Event format
+**Every event's `data` is an envelope:**
+```json
+{"type": "spell_cast", "message": { …the full team_state… }}
+```
+- The SSE **`event:` name is the resource**: `hello`, `team`, `no_team`, `team_state` (and game-wide resources later). `EventSource` dispatches on it (`addEventListener("team_state", …)`).
+- **`type` is why it was sent**: the cause of the change (`member_joined`, `scan_added`, `spell_cast`, …), or one of the two types every resource shares: **`snapshot`** (the state a stream opens with, on every connect: not a change, the current truth) and **`resync`** (the state reloaded from Postgres after a write failed to persist: a correction, not an action).
+- **`message` is always the resource's whole state**, never a diff: the same JSON as its GET route. Whatever the type, the newest `message` of each event name is the whole truth, so a client that misses an event, or reconnects, loses nothing.
+- **How to use it:** a client that only renders state reads `message` and ignores `type`. A client that animates or notifies switches on `type` (a spell-cast animation on `spell_cast`, a "Bilal joined" toast on `member_joined`), and still renders from `message`. Never derive state from `type` alone.
+- Each envelope is a schema in `openapi.yaml`: `HelloEvent`, `TeamEvent`, `NoTeamEvent`, `TeamStateEvent`, with `type` as an enum, so client types can be generated from it.
 
-Every event is a **full snapshot**, never a diff: the newest event of each name is the whole truth.
+| Event | `type` | Sent when | To | A client might |
+|---|---|---|---|---|
+| `hello` | `connected` | every connect, first | that stream | re-measure its clock offset |
+| `team` | `snapshot` | connect | that stream | render the roster |
+| | `created` | the user created the team | the creator | open the lobby |
+| | `member_joined` | a player joined | members | toast "X joined" |
+| | `member_left` | a member left (not the leader) | remaining members | toast "X left" |
+| | `leader_changed` | the leader left, or an admin removed them; `leader_id` is the new leader | remaining members | toast "X now leads" |
+| | `member_removed` | an admin removed a member (not the leader) | remaining members | toast "X was removed" |
+| | `ready_changed` | a member's ready flag changed | members | update ready marks |
+| | `started` | the leader started; `status` is `IN_GAME` (its `team_state` of type `game_started` follows) | members | go to the game screen |
+| | `profile_updated` | a member signed in with a new name or avatar | members | re-render names |
+| | `resync` | reloaded after a failed write | members | render |
+| `no_team` | `snapshot` | connect, user in no team | that stream | show create/join |
+| | `left` | the user left; the team carries on | that user | back to create/join |
+| | `team_deleted` | the user was the last member, so leaving deleted the team | that user | back to create/join |
+| | `removed` | an admin removed the user | that user | explain, back to create/join |
+| | `resync` | a reload after a failed write found the user no longer in the team | that user | back to create/join |
+| `team_state` | `snapshot` | connect, user in a team | that stream | render the game |
+| | `game_started` | right after `team` of type `started`: the team's (empty) state | members | render the empty game |
+| | `shape_selected` | a member selected (or reselected) a shape; the stack was purged: a spell attempt starts | members | show the spell started |
+| | `selection_cleared` | a member cleared the selection | members | back to choosing |
+| | `scan_added` | a scan joined the stack | members | show who scanned (`stack[].user_id`) |
+| | `wrong_scan` | a scan joined the stack marked `wrong`; `poisoned` is `true` | members | tell the team, offer a reselect |
+| | `spell_cast` | a scan completed a pattern: `last_cast` is the new cast, `cast_count` went up, selection and stack purged | members | play the cast, prepend `last_cast` to the log |
+| | `resync` | reloaded after a failed write | members | render |
+
+`no_team` of any type means: clear both the team and its team state.
+
+### Events
+| Event | `message` | Same JSON as | Envelope schema (`openapi.yaml`) |
+|---|---|---|---|
+| `hello` | `{"server_time": …}`, the server's clock as the stream opened; clients re-measure their clock offset from it on every connect | none | `HelloEvent` (`Hello`) |
+| `team` | the user's team | `GET /api/teams/me` | `TeamEvent` (`Team`) |
+| `no_team` | `{}` | (`GET /api/teams/me` is `404 not_in_team`) | `NoTeamEvent` |
+| `team_state` | the user's team's game state, the `View` | `GET /api/teams/me/state` | `TeamStateEvent` (`TeamState`) |
+
+The JSON below is each event's `message`.
 
 **`team`**, an `IN_GAME` team of **6** (`teams.size`), members in join order (field meanings: `internal/teams/README.md`):
 ```json
@@ -259,14 +299,15 @@ Every event is a **full snapshot**, never a diff: the newest event of each name 
     {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b04", "name": "Divya",  "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:53:00Z"},
     {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b05", "name": "Emeka",  "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:54:45Z"},
     {"id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b06", "name": "Farah",  "avatar_url": null, "is_ready": true, "joined_at": "2026-10-17T11:56:20Z"}
-  ]
+  ],
+  "version": {"epoch": 1760687400000, "seq": 12}
 }
 ```
 The leader can't set `is_ready`, and start ignores the leader's flag. Emails are never included.
 
-**`no_team`**: always the data `{}`. The user is in no team: on connect, after leaving, or when their team was deleted.
+**`no_team`**: always `{}`. The user is in no team; its `type` says why.
 
-**`team_state`**, the same team after it cast the square `1001 1002 1007 1008` at 12:00:12 (Divya's scan), selected `square` again at 12:05:00 (Farah), and scanned `1001` (Asha, 12:05:10), `1002` (Asha again, 12:05:20: one member may scan any number) and `1004` (Bilal, 12:09:40), which fits no square with the other two:
+**`team_state`**, the same team after it cast the square `1001 1002 1007 1008` at 12:00:12 (Divya's scan), selected `square` again at 12:05:00 (Farah), and scanned `1001` (Asha, 12:05:10), `1002` (Asha again, 12:05:20: one member may scan any number) and `1004` (Bilal, 12:09:40), which fits no square with the other two. This one arrived with type `wrong_scan`:
 ```json
 {
   "team_id": "482913",
@@ -287,7 +328,9 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     {"waypoint_id": "1002", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:20Z", "wrong": false},
     {"waypoint_id": "1004", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "scanned_at": "2026-10-17T12:09:40Z", "wrong": true}
   ],
-  "poisoned": true
+  "poisoned": true,
+  "cast_count": 1,
+  "version": {"epoch": 1760687400000, "seq": 9}
 }
 ```
 | Field | Meaning |
@@ -297,45 +340,69 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
 | `patterns` | every completed pattern, each as its sorted waypoint IDs |
 | `shapes` | every shape with at least one completed pattern, in atlas index order |
 | `selection` | the shape being attempted, who selected it and when; `null` if none |
-| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, `already_completed` (the team had cast that pattern before, so progress didn't grow), and `damage` (what the cast spell deals). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`). The full log is `GET /api/teams/me/casts`, which is never pushed: a client loads it once and prepends each new `last_cast` |
+| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, `already_completed` (the team had cast that pattern before, so progress didn't grow), and `damage` (what the cast spell deals). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`) |
 | `stack` | the attempt's scans, bottom (oldest) first, until it casts or the team selects again. No time limit: nothing leaves it with time |
 | `stack[].wrong` | the scan's waypoint, with the scans below it, can't be part of any pattern of the selected shape. At most one, always the top |
 | `poisoned` | a scan in `stack` is `wrong`: further scans are refused with `409 selection_poisoned` until someone selects again, which purges the stack |
+| `cast_count` | how many casts the team's log holds, repeats included (see [Versioning](#versioning-and-the-cast-log)) |
+| `version` | orders this team's `team_state` snapshots (see [Versioning](#versioning-and-the-cast-log)) |
 
 Every field, rule and case: `internal/teamstate/README.md`, "API".
+
+### Versioning and the cast log
+`team` and `team_state` each carry **`version: {epoch, seq}`** (`live.Version`, schema `Version`). It exists because a client gets copies of the same resource from two places, the stream and the responses to its own writes, on different connections, so they can arrive in either order; and because, on connect, a change queued while the snapshot was read can arrive just after it (see [Ordering](#ordering)).
+
+**The rule, per resource** (compare a team's `team` only with its `team`, its `team_state` only with its `team_state`):
+- keep the incoming copy if its `epoch` differs from the one you hold (the backend restarted: the snapshot after a reconnect is the truth);
+- otherwise keep it only if its `seq` is higher;
+- an equal version is the same state (a snapshot, or a write response matching its event): ignore it.
+
+**How it moves:**
+- `seq` goes up by one on every change: every type except `snapshot`, plus `resync`, which continues the sequence (a reload never goes back). `game_started` repeats the state's current version (it resends, it doesn't change).
+- Rejections and no-ops leave it alone: they publish nothing.
+- `epoch` is the backend process's start time, in Unix milliseconds, the same for every resource. Version is memory-only: after a restart every resource starts again at `seq` 0 in the new epoch, which the first rule handles.
+- Two numbers rather than one, because JavaScript can't hold integers above 2^53 exactly.
+- The write responses carry it too: every teams route that returns a team, and every teamstate route (`GET` state, both selection routes, `ScanResult.state`).
+
+**The cast log.** `team_state` carries only the newest cast (`last_cast`); the whole log is `GET /api/teams/me/casts`, newest first, because it grows all day and would otherwise ride on every scan. `cast_count` tells a client when its copy is incomplete:
+1. Load the log once (`GET /api/teams/me/casts`).
+2. On each `team_state` of type `spell_cast` (or a scan response with `pattern_completed`), prepend `last_cast` if it isn't already there (match on `cast_at`).
+3. Whenever `cast_count` is more than the log's length (it missed casts while disconnected, or between loading the log and connecting), fetch the log again.
+
+**Why `team` and `team_state` stay separate.** Different use cases own them (teams, teamstate), under different locks, and they change at different times: the roster in the lobby, gameplay in the game. Merging them would resend the roster on every scan, the hottest path, and make teams depend on teamstate (AGENTS.md §4). A client keeps both and joins them by the team ID (`team.id` = `team_state.team_id`).
 
 ### What publishes what
 Every event below goes to **every open stream** of each listed user. "Members" means the team's members after the change. Each is published after the change is applied, while the writer still holds the entry lock.
 
-| Trigger | Event | To |
+| Trigger | Event: `type` | To |
 |---|---|---|
-| **Connect** (`GET /api/events`) | `hello`, then `team` (or `no_team`), then `team_state` if in a team | that stream only |
-| teams `POST /api/teams` (create) | `team` | the creator (its only member) |
-| teams `POST /api/teams/join` | `team` | members, the joiner included |
-| teams `POST /api/teams/leave`, others remain | `team` (new `leader_id` if the leader left) | the remaining members |
-| | `no_team` | the user who left |
-| teams `POST /api/teams/leave`, last member | `no_team` | the user who left (the team is deleted) |
-| teams `PUT /api/teams/me/ready`, flag changed | `team` | members |
+| **Connect** (`GET /api/events`) | `hello: connected`, then `team: snapshot` (or `no_team: snapshot`), then `team_state: snapshot` if in a team | that stream only |
+| teams `POST /api/teams` (create) | `team: created` | the creator (its only member) |
+| teams `POST /api/teams/join` | `team: member_joined` | members, the joiner included |
+| teams `POST /api/teams/leave`, others remain | `team: member_left`, or `team: leader_changed` if the leader left (new `leader_id`) | the remaining members |
+| | `no_team: left` | the user who left |
+| teams `POST /api/teams/leave`, last member | `no_team: team_deleted` | the user who left (the team is deleted) |
+| teams `PUT /api/teams/me/ready`, flag changed | `team: ready_changed` | members |
 | teams `PUT /api/teams/me/ready`, flag already that value | nothing (no-op) | |
-| teams `POST /api/teams/me/start` | `team` (`status` `IN_GAME`, `started_at` set), then `team_state` (the team's state, empty: no selection, stack `[]`, no progress) through the start hook (`OnStart` → `teamstate.PublishTeam`) | members |
-| admin `DELETE /api/admin/teams/{team_id}/members/{user_id}` | `team` (one fewer member; new `leader_id` if the leader was removed) | the remaining members |
-| | `no_team` | the removed user; for a started team, the roster hook (`OnRosterChange` → `teamstate.RosterChanged`) then stops `team_state` reaching them. It publishes nothing itself |
-| Sign-in (`onSignIn` → `teams.RefreshProfile`), name or avatar changed | `team` | members |
+| teams `POST /api/teams/me/start` | `team: started` (`status` `IN_GAME`, `started_at` set), then `team_state: game_started` (the team's state, empty: no selection, stack `[]`, no progress) through the start hook (`OnStart` → `teamstate.PublishTeam`) | members |
+| admin `DELETE /api/admin/teams/{team_id}/members/{user_id}` | `team: member_removed`, or `team: leader_changed` if the leader was removed (new `leader_id`) | the remaining members |
+| | `no_team: removed` | the removed user; for a started team, the roster hook (`OnRosterChange` → `teamstate.RosterChanged`) then stops `team_state` reaching them. It publishes nothing itself |
+| Sign-in (`onSignIn` → `teams.RefreshProfile`), name or avatar changed | `team: profile_updated` | members |
 | Sign-in, nothing changed or not in a team | nothing | |
-| teams write fails to persist (`reconcile`) | `team` reloaded from Postgres | its members |
-| | `no_team` | users no longer in it (all old members if the team is gone) |
-| teamstate `PUT /api/teams/me/state/selection` (select, reselect) | `team_state` (stack purged) | members |
-| teamstate `DELETE /api/teams/me/state/selection`, something selected | `team_state` (selection `null`, stack `[]`) | members |
+| teams write fails to persist (`reconcile`) | `team: resync`, reloaded from Postgres | its members |
+| | `no_team: resync` | users no longer in it (all old members if the team is gone) |
+| teamstate `PUT /api/teams/me/state/selection` (select, reselect) | `team_state: shape_selected` (stack purged) | members |
+| teamstate `DELETE /api/teams/me/state/selection`, something selected | `team_state: selection_cleared` (selection `null`, stack `[]`) | members |
 | teamstate `DELETE …/selection`, nothing selected | nothing (no-op) | |
-| teamstate `POST /api/teams/me/state/scans`, `scan_added` | `team_state` | members |
-| teamstate `POST …/scans`, `wrong_scan` | `team_state` (the scan marked `wrong`, `poisoned` `true`) | members |
-| teamstate `POST …/scans`, `pattern_completed` (a cast) | `team_state` (selection `null`, stack `[]`, new `last_cast`) | members |
-| teamstate write fails to persist (`reconcile`) | `team_state` reloaded from Postgres (nothing if the reload fails too) | members |
+| teamstate `POST /api/teams/me/state/scans`, outcome `scan_added` | `team_state: scan_added` | members |
+| teamstate `POST …/scans`, outcome `wrong_scan` | `team_state: wrong_scan` (the scan marked `wrong`, `poisoned` `true`) | members |
+| teamstate `POST …/scans`, outcome `pattern_completed` (a cast) | `team_state: spell_cast` (selection `null`, stack `[]`, new `last_cast`, `cast_count` + 1) | members |
+| teamstate write fails to persist (`reconcile`) | `team_state: resync`, reloaded from Postgres (nothing if the reload fails too) | members |
 | Any rejection (`4xx`) or `500` before persisting | nothing | |
 
 Nothing is published because time passed: there's no time limit, so every `team_state` follows a request (or a start, or a reconcile).
 
-The HTTP response to a write carries the same JSON as its event (`ScanResult.state` for a scan), but on a different connection: a client may see either first.
+The HTTP response to a write carries the same JSON as its event's `message` (`ScanResult.state` for a scan), with the same `version`, but on a different connection: a client may see either first, and keeps the one with the higher version (equal: the same state).
 
 ### Ordering
 - **One stream is FIFO.** `Hub.Send` and `Hub.Broadcast` put events on the subscription's one channel, and `Serve` writes them in that order.
@@ -345,7 +412,7 @@ The HTTP response to a write carries the same JSON as its event (`ScanResult.sta
 
 **Why subscribe first.** A change published between reading the snapshot and subscribing would be lost. Subscribing first means any change after the snapshot is also queued. The cost: a change that lands between subscribing and reading the snapshot is delivered **twice** (once inside the snapshot, once queued). Events are full snapshots, so a repeat is harmless.
 
-**A brief step back is possible.** Writers apply a change before publishing it. If change X is published (queued) and change Y is applied before the snapshot is read, the client sees Y (snapshot), then X (queued), then Y (queued once published). The final state is always the newest, because each publish happens after subscribing. `team` and `team_state` snapshots are read separately, so they may also disagree briefly on connect; the change's own events follow and correct it.
+**A brief step back is possible, and `version` hides it.** Writers apply a change before publishing it. If change X is published (queued) and change Y is applied before the snapshot is read, the client sees Y (snapshot), then X (queued), then Y (queued once published). The final state is always the newest, because each publish happens after subscribing; a client that follows the [version rule](#versioning-and-the-cast-log) drops X and never shows the step back. `team` and `team_state` snapshots are read separately, so they may also disagree briefly on connect; the change's own events follow and correct it.
 
 ### Heartbeat
 After **25 s** (`live.heartbeat`) with no event, `Serve` writes `: ping\n\n` and flushes, so mobile networks and proxies don't drop the idle connection. Every event resets the timer, so a busy stream gets no pings. The first ping comes 25 s after the initial events. Keep `live.heartbeat` under any proxy's idle timeout.
@@ -366,20 +433,59 @@ A client that stops reading (a phone that lost signal without closing the connec
 
 ### Never sent
 - Anything for a **rejection** (every `4xx`) or a **no-op** (ready unchanged, clear with nothing selected, a sign-in that changes nothing).
-- The **cast log**: `team_state` carries only `last_cast`; the log is `GET /api/teams/me/casts`.
-- **Diffs**, event IDs, or one-off notifications: a "notification" (a quiz opening) is the client seeing a snapshot change.
+- The **cast log**: `team_state` carries only `last_cast` and `cast_count`; the log is `GET /api/teams/me/casts` (see [Versioning and the cast log](#versioning-and-the-cast-log)).
+- **Diffs**, event IDs, or payload-less notifications: every event, whatever its `type`, carries the full state in `message`.
 - Another team's state, or any member's email.
 - `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load. Static data never goes in events (AGENTS.md §9).
 
 ### Client integration
-What a client must do to use the stream as designed. The frontend does steps 2–6 today (it opens `/api/events` directly and measures time with `hello`); step 1, one shared connection instead of one per page (`/team`, `/play`), is still to do.
+What a client must do to use the stream as designed.
 
-1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect.
-2. **Register events by name.** Keep a map from event name to its zod schema (`hello`, `team`, `no_team`, `team_state`, and each game-wide event as it's added), and keep the newest parsed snapshot of each. `no_team` clears both `team` and `team_state`. A game-wide event whose data is `null` means nothing is active.
-3. **Derive notifications from transitions.** Compare each snapshot with the one before it. Game-wide: a new `id`, or a status change. Spells, from `team_state`: `selection` set (a spell started), `stack` growing (another member scanned; `stack[].user_id` says who), `poisoned` turning `true` (a scan didn't fit: offer a restart), `last_cast.cast_at` changing (a spell finished; prepend it to the cast log).
-4. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`; `/play` already does this). On every `hello`: offset = `Date.parse(server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead, and the phone's own clock error cancels out. The game has no time limit; `/play` uses the clock for "scanned 2 min ago" labels. A future countdown (a quiz's `closes_at`) would be a deadline in server time from a state timestamp, and would never change state itself: the server would publish the change when the time comes.
-5. **Open `/api/events` on the frontend's origin.** In production the shared domain's reverse proxy routes it to the backend, which reads the `labyrinth_token` cookie; in dev, Vite's proxy does (`frontend/vite.config.ts`). Done: `/team` and `/play` do this.
-6. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots. The responses to writes (`ScanResult.state`) may arrive before or after the matching event; both are full snapshots.
+> **Breaking change (envelope, version, `cast_count`).** Every event's `data` is now `{"type", "message"}`. The frontend still parses `data` as the bare payload, so it breaks until it reads `.message`:
+> - `frontend/src/routes/team/+page.svelte:23`: `TeamSchema.parse(JSON.parse(e.data))` → `.parse(JSON.parse(e.data).message)` (`no_team` at :26 ignores its data: unaffected)
+> - `frontend/src/routes/play/+page.svelte:49-50`: `hello` reads `JSON.parse(e.data).server_time` → `.message.server_time`
+> - `frontend/src/routes/play/+page.svelte:53`: `team`, and `:54`: `team_state` → parse `.message`
+>
+> The new `version` and `cast_count` fields don't break `TeamSchema` / `TeamStateSchema` (plain `z.object`s ignore unknown keys), but steps 3 and 4 below use them.
+
+1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect. (Not done yet: `/team` and `/play` each open their own.)
+2. **Register events by name, unwrap the envelope.** One zod schema per event: `type` as an enum, `message` as the payload's schema. Keep the newest `message` of each. `no_team` clears both `team` and `team_state`. Game-wide events (later) carry `message: null` when nothing is active.
+3. **Keep the newest copy by `version`**, for `team` and for `team_state` separately, whether it came from the stream or a write response ([the rule](#versioning-and-the-cast-log)).
+4. **Use `type` for moments, `message` for state.** Play the cast on `spell_cast`, toast on `member_joined`, offer a reselect on `wrong_scan`; render everything from `message`. On `spell_cast`, prepend `last_cast` to the cast log; when `cast_count` exceeds the log's length, re-fetch `GET /api/teams/me/casts`.
+5. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`). On every `hello`: offset = `Date.parse(message.server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead. The game has no time limit; `/play` uses the clock for "scanned 2 min ago" labels.
+6. **Open `/api/events` on the frontend's origin.** In production the shared domain's reverse proxy routes it to the backend, which reads the `labyrinth_token` cookie; in dev, Vite's proxy does (`frontend/vite.config.ts`).
+7. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots (type `snapshot`), and step 3 sorts out anything that arrives out of order.
+
+**Example** (TypeScript with zod; `TeamSchema`, `TeamStateSchema` from `frontend/src/lib/types`):
+```ts
+import { z } from "zod";
+
+const Version = z.object({ epoch: z.number(), seq: z.number() });
+type Version = z.infer<typeof Version>;
+
+// One envelope schema per event: why it was sent, and the full payload.
+const envelope = <T extends z.ZodTypeAny, K extends [string, ...string[]]>(types: K, message: T) =>
+    z.object({ type: z.enum(types), message });
+
+const TeamEvent = envelope(["snapshot", "created", "member_joined", "member_left", "leader_changed",
+    "member_removed", "ready_changed", "started", "profile_updated", "resync"], TeamSchema);
+const TeamStateEvent = envelope(["snapshot", "game_started", "shape_selected", "selection_cleared",
+    "scan_added", "wrong_scan", "spell_cast", "resync"], TeamStateSchema);
+
+// Keep an incoming copy if the backend restarted (new epoch) or it's newer.
+const newer = (incoming: Version, held?: Version) =>
+    !held || incoming.epoch !== held.epoch || incoming.seq > held.seq;
+
+const events = new EventSource("/api/events");
+events.addEventListener("team_state", (e) => {
+    const { type, message } = TeamStateEvent.parse(JSON.parse(e.data));
+    if (!newer(message.version, state?.version)) return; // stale or repeated
+    state = message;                                     // render from message
+    if (type === "spell_cast") playCast(message.last_cast!);
+    if (message.cast_count > casts.length) refetchCasts();
+});
+events.addEventListener("no_team", () => { team = null; state = null; });
+```
 
 ## API
 | Method | Path | Auth | Response |
@@ -546,9 +652,9 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 
 ### `openStream(p)` (`tests/events_test.go`)
 - Opens `GET /api/events` with `p`'s Bearer token on a cancellable context (cancelled at cleanup), through `openStreamAt(path, auth)`, which takes any path and lets `auth` set the credentials (a cookie, for instance). Fails unless `200` and `Content-Type: text/event-stream`.
-- A goroutine scans lines: `event: X` sets the name; `data: {...}` is parsed as JSON and routed by name: `hello` to `hellos`, `team_state` to `states`, anything else to `events`. Comment lines (`: ping`) and `retry:` are ignored. The channels hold 64 and close when the body ends.
+- A goroutine scans lines: `event: X` sets the name; `data: {...}` is parsed as the envelope, giving `sseEvent{name, typ, data}` with `data` the envelope's `message` (so assertions read the payload directly), and routed by name: `hello` to `hellos`, `team_state` to `states`, anything else to `events`. Comment lines (`: ping`) and `retry:` are ignored. The channels hold 64 and close when the body ends.
 - `stream.next(t, what)`: the next `team` or `no_team` event, failing after 3 s or if the stream closed. `stream.nextState(t, what)` likewise for the next `team_state`.
-- `stream.seen()`: the names of every event received so far, across all channels, in arrival order (for checking order between `hello`, `team` and `team_state`).
+- `stream.seen()`: every event received so far as `name:type` (`team_state:spell_cast`), across all channels, in arrival order. `waitSeen(t, what, s, want...)` waits up to 3 s for it to equal `want`.
 - `expectTeam(t, what, ev, n)`: fails unless `ev` is `team` with `n` members; returns its data. `expectNoTeam` likewise for `no_team`. `memberReady(team, id)` reads a member's `is_ready`.
 - `stream.cancel()` disconnects, which is how cleanup is tested.
 
@@ -596,10 +702,11 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSimWrongScanReachesEveryone` | `tests/simulation_test.go` | after `1001`, one player scans `1004` (in no square with it) while a teammate scans `1002`: the first gets `wrong_scan`, the other either `200` (it landed first) or `409 selection_poisoned`; every phone sees `poisoned`; a reselect clears it on every phone |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
 | `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
-| `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello`, its `server_time` within a second of now, then `no_team` |
+| `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello:connected`, its `server_time` within a second of now, then `no_team:snapshot` |
+| `TestEventTypes` | `tests/events_test.go` | every publish site over HTTP gets its envelope type, per stream and in order: created, member_joined, member_left / no_team:left, ready_changed, started + game_started, shape_selected, scan_added ×3, spell_cast, wrong_scan, selection_cleared; an admin's removals (member_removed / leader_changed / no_team:removed); a lobby leader leaving (leader_changed / left) and the last member (team_deleted). Also: team_state's `version.seq` up by one per change in one epoch, and `cast_count` 0 until the cast, then 1 |
 | `TestStreamCookieAndAlias` | `tests/events_test.go` | `/api/events` accepts the `labyrinth_token` cookie; `GET /api/teams/me` and the alias refuse it (`401`), as does `/api/events` with a bad cookie; the alias with Bearer serves `hello`, `no_team` |
 | `TestStreamIncludesTeamState` | `tests/events_test.go` | `team_state` follows `team` on connect; `GET /api/teams/me/state` works, and is `404 not_in_team` without a team |
-| `TestStartPublishesTeamState` | `tests/events_test.go` | a full, ready team with every member's stream open: when the leader starts, each stream gets the `IN_GAME` `team`, then an empty `team_state`, in that order (events seen: `hello`, `team`, `team_state`, `team`, `team_state`), without reconnecting |
+| `TestStartPublishesTeamState` | `tests/events_test.go` | a full, ready team with every member's stream open: when the leader starts, each stream gets the `IN_GAME` `team`, then an empty `team_state`, in that order (events seen: `hello:connected`, `team:snapshot`, `team_state:snapshot`, `team:started`, `team_state:game_started`), without reconnecting |
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 

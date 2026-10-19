@@ -106,7 +106,7 @@ func BenchmarkBroadcastFanout(b *testing.B) {
 		time.Sleep(time.Millisecond)
 	}
 
-	ev := live.NewEvent("quiz", []byte(`{"id":"q1","status":"open"}`))
+	ev := event("quiz", `{"id":"q1","status":"open"}`)
 	var all []time.Duration
 	for b.Loop() {
 		r := &fanoutRound{lat: make([]time.Duration, 0, n)}

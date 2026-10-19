@@ -142,6 +142,7 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	rules := teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
+		Epoch:            1, // a restart in a test passes another
 	}
 	if o.rules != nil {
 		o.rules(&rules)
@@ -590,9 +591,18 @@ func TestRestartRestoresEverything(t *testing.T) {
 	f.scanAt(t, later+f.tick(1), 5, "1004")
 	f.clock.at(later + f.tick(2))
 
-	before := pgtest.Must(json.Marshal(f.view(t)))
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
-	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.ForUser(f.users[0]))))
+	beforeView := f.view(t)
+	rules := f.rules
+	rules.Epoch = 2 // a new process
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, rules))
+	afterView := pgtest.Must(restarted.ForUser(f.users[0]))
+	// Version is memory-only: a restart starts again at seq 0, in the new
+	// epoch. Everything else reloads exactly.
+	if afterView.Version != (live.Version{Epoch: 2}) {
+		t.Fatalf("version after restart %+v, want seq 0 in epoch 2", afterView.Version)
+	}
+	beforeView.Version, afterView.Version = live.Version{}, live.Version{}
+	before, after := pgtest.Must(json.Marshal(beforeView)), pgtest.Must(json.Marshal(afterView))
 	if string(after) != string(before) {
 		t.Fatalf("state changed across restart\nbefore: %s\nafter:  %s", before, after)
 	}
@@ -655,8 +665,15 @@ func TestFailedWriteReconciles(t *testing.T) {
 	}
 	conn.Close(ctx)
 
+	sub := f.hub.Subscribe(f.users[0])
+	defer sub.Close()
+	seq := f.view(t).Version.Seq
 	if _, err := f.state.ClearSelection(ctx, f.users[1]); err == nil {
 		t.Fatal("clearing a selection deleted from Postgres should fail")
+	}
+	// The reload is published as resync, one version on: never back.
+	if typ, pub := nextState(t, sub); typ != live.Resync || pub.Version.Seq != seq+1 {
+		t.Fatalf("reload published %s at seq %d, want resync at %d", typ, pub.Version.Seq, seq+1)
 	}
 	v := f.view(t)
 	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"1001"}) {
@@ -693,16 +710,8 @@ func TestStateIsPublished(t *testing.T) {
 
 	f.selectAt(t, 0, 0, "square")
 	f.scanAt(t, f.tick(1), 0, "1010")
-	var sel, scanned teamstate.View
-	for _, v := range []*teamstate.View{&sel, &scanned} {
-		ev := <-sub.C
-		if ev.Name() != "team_state" {
-			t.Fatalf("event %q", ev.Name())
-		}
-		if err := json.Unmarshal(ev.Data(), v); err != nil {
-			t.Fatal(err)
-		}
-	}
+	_, sel := nextState(t, sub)
+	_, scanned := nextState(t, sub)
 	if sel.Selection == nil || sel.Selection.Shape != "square" || !slices.Equal(stackWaypoints(scanned), []string{"1010"}) {
 		t.Fatalf("events: %+v / %+v", sel, scanned)
 	}
@@ -722,7 +731,7 @@ func TestPublishTeam(t *testing.T) {
 
 	f.state.PublishTeam(f.teamID)
 	for i, sub := range subs {
-		v := nextState(t, sub)
+		_, v := nextState(t, sub)
 		if v.TeamID != f.teamID || v.Selection != nil || len(v.Stack) != 0 || len(v.Waypoints) != 0 {
 			t.Fatalf("member %d: state after start %+v, want empty", i, v)
 		}
@@ -731,7 +740,7 @@ func TestPublishTeam(t *testing.T) {
 	f.selectAt(t, 0, 0, "square")
 	nextState(t, subs[0]) // the selection's own event
 	f.state.PublishTeam(f.teamID)
-	if v := nextState(t, subs[0]); v.Selection == nil || v.Selection.Shape != "square" {
+	if _, v := nextState(t, subs[0]); v.Selection == nil || v.Selection.Shape != "square" {
 		t.Fatalf("republished state %+v, want the square selected", v)
 	}
 	if got, _ := json.Marshal(f.view(t)); f.loggedScans(t) != 0 || !strings.Contains(string(got), `"square"`) {
@@ -752,24 +761,30 @@ func TestPublishTeam(t *testing.T) {
 	}
 }
 
-// nextState waits briefly for the next team_state event on sub and decodes
-// it, failing if none arrives.
-func nextState(t *testing.T, sub *live.Subscription) teamstate.View {
+// nextState waits briefly for the next team_state event on sub and returns
+// its type and its message decoded, failing if none arrives.
+func nextState(t *testing.T, sub *live.Subscription) (live.EventType, teamstate.View) {
 	t.Helper()
 	select {
 	case ev := <-sub.C:
 		if ev.Name() != "team_state" {
 			t.Fatalf("event %q, want team_state", ev.Name())
 		}
-		var v teamstate.View
-		if err := json.Unmarshal(ev.Data(), &v); err != nil {
+		var env struct {
+			Type    live.EventType `json:"type"`
+			Message teamstate.View `json:"message"`
+		}
+		if err := json.Unmarshal(ev.Data(), &env); err != nil {
 			t.Fatal(err)
 		}
-		return v
+		if env.Type != ev.Type() {
+			t.Fatalf("data type %q, event type %q", env.Type, ev.Type())
+		}
+		return env.Type, env.Message
 	case <-time.After(time.Second):
 		t.Fatal("no team_state event")
 	}
-	return teamstate.View{}
+	return "", teamstate.View{}
 }
 
 // TestCastLog checks that every cast is logged in memory and in team_cast,
@@ -812,5 +827,72 @@ func TestCastLog(t *testing.T) {
 	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.CastsForUser(f.users[2]))))
 	if string(before) != string(after) {
 		t.Fatalf("cast log across restart\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// TestVersionAndTypes checks the type of every team_state publish and its
+// version: PublishTeam (game_started) resends the current version; select,
+// scans (added, wrong, cast) and clear each go up by one; a rejected scan and
+// a clear with nothing selected publish nothing and keep it; cast_count
+// counts the cast.
+func TestVersionAndTypes(t *testing.T) {
+	f := started(t)
+	ctx := context.Background()
+	sub := f.hub.Subscribe(f.users[0])
+	defer sub.Close()
+
+	var seq uint64
+	want := func(what string, typ live.EventType, step uint64, casts int) {
+		t.Helper()
+		seq += step
+		gotTyp, v := nextState(t, sub)
+		if gotTyp != typ || v.Version != (live.Version{Epoch: f.rules.Epoch, Seq: seq}) || v.CastCount != casts {
+			t.Fatalf("%s: %s %+v cast_count %d, want %s seq %d cast_count %d", what, gotTyp, v.Version, v.CastCount, typ, seq, casts)
+		}
+	}
+	quiet := func(what string) {
+		t.Helper()
+		select {
+		case ev := <-sub.C:
+			t.Fatalf("%s published %s:%s", what, ev.Name(), ev.Type())
+		default:
+		}
+		if v := f.view(t); v.Version.Seq != seq {
+			t.Fatalf("%s: version %+v, want seq %d", what, v.Version, seq)
+		}
+	}
+
+	f.state.PublishTeam(f.teamID)
+	want("publish team", teamstate.GameStarted, 0, 0)
+	f.selectAt(t, 0, 0, "square")
+	want("select", teamstate.ShapeSelected, 1, 0)
+	for i, w := range square[:3] {
+		f.scanAt(t, f.tick(float64(i+1)), i, w)
+		want("scan "+w, teamstate.ScanAdded, 1, 0)
+	}
+	if err := f.scanErrAt(f.tick(4), 0, square[0]); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
+		t.Fatalf("rescan: %v", err)
+	}
+	quiet("rejected rescan")
+	f.scanAt(t, f.tick(5), 3, square[3])
+	want("completing scan", teamstate.SpellCast, 1, 1)
+	if _, err := f.state.ClearSelection(ctx, f.users[0]); err != nil {
+		t.Fatal(err)
+	}
+	quiet("clear with nothing selected")
+	f.selectAt(t, f.tick(6), 0, "square")
+	want("reselect", teamstate.ShapeSelected, 1, 1)
+	f.scanAt(t, f.tick(7), 0, "1001")
+	want("scan", teamstate.ScanAdded, 1, 1)
+	f.scanAt(t, f.tick(7), 1, "1002")
+	want("scan", teamstate.ScanAdded, 1, 1)
+	f.scanAt(t, f.tick(8), 2, "1003") // in no square with 1001 and 1002: wrong
+	want("wrong scan", teamstate.WrongScan, 1, 1)
+	if _, err := f.state.ClearSelection(ctx, f.users[0]); err != nil {
+		t.Fatal(err)
+	}
+	want("clear", teamstate.SelectionCleared, 1, 1)
+	if got, _ := f.state.Snapshot(f.users[0]); got.Type() != live.Snapshot {
+		t.Fatalf("snapshot type %q", got.Type())
 	}
 }

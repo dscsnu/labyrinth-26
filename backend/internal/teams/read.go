@@ -43,6 +43,10 @@ type Team struct {
 	CreatedAt time.Time  `json:"created_at"`
 	StartedAt *time.Time `json:"started_at"`
 	Members   []Member   `json:"members"`
+	// Version orders this team's snapshots (see live.Version): Seq goes up
+	// with every change to the team. Memory-only; it starts again, in a new
+	// Epoch, after a restart.
+	Version live.Version `json:"version"`
 }
 
 // ErrNotInTeam means the user isn't in any team.
@@ -91,17 +95,17 @@ func (s *Store) ByID(teamID string) (Team, bool) {
 	return *e.cur.Load(), true
 }
 
-// Snapshot is userID's current team as a live event (team or no_team), sent
-// first on a new event stream.
+// Snapshot is userID's current team as a live event (team or no_team, of
+// type snapshot), sent first on a new event stream.
 func (s *Store) Snapshot(userID uuid.UUID) live.Event {
 	t, err := s.ForUser(userID)
 	if err != nil {
-		return noTeamEvent
+		return noTeamSnapshot
 	}
-	ev, err := teamEvent(&t)
+	ev, err := teamEvent(&t, live.Snapshot)
 	if err != nil {
 		s.log.Error("encode team event", "error", err)
-		return noTeamEvent
+		return noTeamSnapshot
 	}
 	return ev
 }
