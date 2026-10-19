@@ -152,6 +152,8 @@ Full request and response shapes and every error code: **http://localhost:3000/d
 | POST | `/api/teams/leave` | Bearer | Leave your team (lobby only) |
 | PUT | `/api/teams/me/ready` | Bearer | `{"ready": bool}` → the team (non-leaders, lobby only) |
 | POST | `/api/teams/me/start` | Bearer | Leader only: `LOBBY` → `IN_GAME` → the team. Every member's stream gets the `IN_GAME` `team`, then the team's empty `team_state` |
+| GET | `/api/admin/teams` | Bearer + `ADMIN` | Every team, sorted by ID. The role is read from Postgres on each request, not from the token (`403 not_admin`) |
+| DELETE | `/api/admin/teams/{team_id}/members/{user_id}` | Bearer + `ADMIN` | Remove a member from a team in any status (lobby or started). Removing the leader needs `?new_leader=<user id>`, a remaining member; the only member can't be removed (`409 last_member`). The removed player gets `no_team` and can create or join a team; their scans and casts stay with the team |
 | GET | `/api/game/shapes` | Bearer | The selectable shapes (`id`, `name`, `patterns` count, distinct `points` sizes) and `max_pattern_points`; the same for every user, static while running |
 | GET | `/api/teams/me/state` | Bearer | Your team's state (`TeamState`, the same JSON as the `team_state` event): visited waypoints, completed patterns and shapes, selection, `last_cast` (the newest cast, or `null`), the scan stack (each scan marked `wrong` or not) and `poisoned` |
 | GET | `/api/teams/me/casts` | Bearer | Your team's cast log: every completed pattern, repeats included (`already_completed`), with its `damage`, newest first |

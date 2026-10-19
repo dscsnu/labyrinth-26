@@ -73,6 +73,13 @@ type Rules struct {
 	// doesn't import teamstate). It must not call back into this team's
 	// writes. Not in config.toml.
 	OnStart func(Team)
+	// OnRosterChange, if not nil, is called by RemoveMember when it removes a
+	// member from a team that has started, once the team is in memory and
+	// published, with the team's lock still held. server.Build passes
+	// teamstate's RosterChanged, so team state stops sending to the removed
+	// user and refuses their writes. Same constraints as OnStart. Not in
+	// config.toml.
+	OnRosterChange func(Team)
 }
 
 // lockRetries bounds lockUsersTeam's retries when the user changes team
@@ -114,6 +121,24 @@ func (s *Store) persist(ctx context.Context, write func(context.Context) error) 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.rules.WriteTimeout)
 	defer cancel()
 	return write(wctx)
+}
+
+// lockTeam finds teamID and locks it; the caller unlocks e.mu.
+// ErrTeamNotFound if there's no such team, or it was deleted between lookup
+// and lock.
+func (s *Store) lockTeam(teamID string) (*entry, *Team, error) {
+	s.mu.RLock()
+	e := s.teams[teamID]
+	s.mu.RUnlock()
+	if e == nil {
+		return nil, nil, ErrTeamNotFound
+	}
+	e.mu.Lock()
+	if e.gone {
+		e.mu.Unlock()
+		return nil, nil, ErrTeamNotFound
+	}
+	return e, e.cur.Load(), nil
 }
 
 // lockUsersTeam finds userID's team and locks it; the caller unlocks e.mu.

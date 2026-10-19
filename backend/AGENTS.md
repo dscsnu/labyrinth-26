@@ -30,7 +30,7 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 
 **The players' journey:**
 1. **Sign in** with Google (an `snu.edu.in` account) through the SvelteKit frontend.
-2. **Form a team** in the lobby: one player creates it and shares its 6-digit code; others join. Up to `teams.size` (6) players, one leader. Members mark themselves ready, and the leader starts with however many there are (1 or more). From then on the roster is locked.
+2. **Form a team** in the lobby: one player creates it and shares its 6-digit code; others join. Up to `teams.size` (6) players, one leader. Members mark themselves ready, and the leader starts with however many there are (1 or more). From then on the roster is locked to players: nobody joins or leaves. **An admin** can still remove a member from any team, lobby or started (naming the new leader when removing the leader; never the last member), on `/admin`; the removed player is teamless and free to join again.
 3. **Play:**
    - The team **selects a shape type** (square, triangle, …). Each type has many precomputed valid patterns: sets of 1–6 waypoints.
    - Members **scan waypoints**. There's **no time limit**, and any member may scan any number of the points.
@@ -121,7 +121,7 @@ internal/<usecase>/
 - **A use case may import:**
   - `internal/platform/...`
   - another use case's **read API**, through a small interface it declares itself (teamstate's `Teams`, and its `Atlas`, which `*atlas.Atlas` satisfies). Plain types in that API may be used directly (teamstate's `State` holds `atlas.WaypointSet`; it reads `teams.Team`)
-- **A use case never imports** another's `db.go` types or writes. If a write in one must update another's memory or publish another's state, `server.Build` passes a callback (auth's `onSignIn` → `teams.RefreshProfile`; teams' `Rules.OnStart` → `teamstate.PublishTeam`, which sends a started team its `team_state`).
+- **A use case never imports** another's `db.go` types or writes. If a write in one must update another's memory or publish another's state, `server.Build` passes a callback (auth's `onSignIn` → `teams.RefreshProfile`; teams' `Rules.OnStart` → `teamstate.PublishTeam`, which sends a started team its `team_state`; teams' `Rules.OnRosterChange` → `teamstate.RosterChanged`, which drops teamstate's cached roster after an admin removes a member from a started team).
 - **No import cycles.** Shared pieces move into `platform/` (that's why `platform/identity` sits between auth and everything else).
 - **`platform/` never imports a use case.**
 - **`internal/server/server.go` is the only place** that constructs use cases and registers routes, in dependency order. `server.Build` loads the atlas first (every game use case reads it), then teams, then teamstate.
@@ -151,7 +151,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 // 6. publish   live events, still holding the entry lock
 ```
 **Allowed variations**, and only these. Each keeps its step numbers, and its comment says which variation and why (`// 4. persist, before 3. build: Postgres sets joined_at`):
-- **(a) Lock-free checks first.** Checks that need no lock may run as `2. validate` before `1. lock`: static content, and an `IN_GAME` team's roster and status (frozen). Checks against the entry's snapshot still run under the lock, labelled `2. validate` again (teamstate's `Select`, `ClearSelection`, `Scan`).
+- **(a) Lock-free checks first.** Checks that need no lock may run as `2. validate` before `1. lock`: static content, and an `IN_GAME` team's status (it never goes back). **Not the roster:** an admin can remove a member from a started team, so a write that acts for a member checks membership again under its lock (teamstate's `isMember`). Checks against the entry's snapshot still run under the lock, labelled `2. validate` again (teamstate's `Select`, `ClearSelection`, `Scan`).
 - **(b) Persist before build.** When the database generates part of the new value (a `joined_at`, `started_at`, `created_at`, or a generated key), `4. persist` may come before `3. build`, so the snapshot is built from what was stored (teams' `Create`, `Join`, `Start`). Still nothing is applied before persist succeeds.
 - **(c) Nothing to lock on create.** A write that makes a new entry has nothing to lock until it exists. Its comment says `1. lock: none` and names what guards the race instead, usually a unique constraint (teams' `Create`: `teammember.user_id`).
 - **`persist`** detaches from the request context and is capped at `storage.write_timeout`, so a client disconnecting can't leave a commit's outcome unknown.
@@ -167,6 +167,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 ## 7. API conventions (`api.go`)
 - `type API struct`, `NewAPI(...)`, and `Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler)`. Use method patterns: `"POST /api/teams/join"`.
 - **Who's calling** comes from `identity.UserID(r)`. Never trust an ID from the body for "who am I".
+- **Admin routes** live under `/api/admin/…`, registered by the owning use case's `AdminRoutes(mux, admin)`. `server.Build`'s `admin` wraps a handler as `authAPI.RequireAuth(userAPI.RequireAdmin(h))`: `RequireAdmin` reads the role from Postgres (`user.Get`) on **every** request, never from the token (up to `auth.token_ttl` stale), and answers `403 not_admin` otherwise. Log every admin write with the admin's ID. An admin acting on a player takes IDs from the path (`/api/admin/teams/{team_id}/members/{user_id}`), not the body.
 - **Auth middleware:** every route uses `authAPI.Authed` / `RequireAuth` (Bearer header only). `RequireStreamAuth`, which also accepts the `labyrinth_token` cookie, is for `GET /api/events` **only**: a browser's `EventSource` can't send headers. Never put it on a route that changes anything, or on any other route: a cookie is sent by the browser automatically, so a cookie-authenticated write could be triggered by another site (CSRF). `TestStreamCookieAuth` checks that reads and writes elsewhere refuse the cookie.
 - **Bodies:** `httpx.DecodeJSON` (rejects unknown fields). The server caps every body at `server.max_body_bytes`. Use pointer fields for required booleans.
 - **OpenAPI:** every route, request body, response schema and error code is in `internal/server/openapi.yaml`. Add or change it in the same change as the route. List a response's error codes in its `description` as ``Codes: `a`, `b` ``: `internal/server/tests/openapi_test.go` fails if a registered route or a sent code/status pair is missing from the spec, or the spec has one the code doesn't. It can't check schemas field by field, so keep them in step with the Go types yourself.
@@ -203,7 +204,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
   | team | `hub.Send` for each current member | the team's members | `team`, `team_state` |
   | game | `hub.Broadcast(ev)` | every open stream | future quizzes, quick-time events |
 
-  Publish after apply and **while holding the entry lock** of the state the event shows, so one key's events stay in order. Read the recipients from memory at send time (or a frozen roster you cache, as teamstate does); never make clients resubscribe.
+  Publish after apply and **while holding the entry lock** of the state the event shows, so one key's events stay in order. Read the recipients from memory at send time (or a cached roster, as teamstate does, dropped by the owner's hook whenever it changes: `RosterChanged`); never make clients resubscribe.
 - **Events are full snapshots,** never diffs, never one-off messages. A reconnecting client needs nothing replayed. A "notification" (a quiz opening, a spell starting) is the client noticing a change between snapshots: a new `id`, a status change, `selection` being set.
 - **Build each event once with `live.NewEvent`,** then send that value to every recipient: its wire bytes are shared, not re-encoded per stream.
 - **Name events after the resource,** in snake_case (`team`, `no_team`, `team_state`), with the same JSON as the matching GET route.
@@ -213,7 +214,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **A new event that must arrive on connect** needs a snapshot on the use case (`Snapshot(userID)`, or `Snapshot()` for game scope), added to `server.snapshot` in its place: `hello`, then user and team events, then game-wide ones.
 - **The server owns time.** If a change is ever caused by time passing, the server publishes it when it happens (a timer). Clients never decide state from time. See §17. (The game has none today: no time limit.)
 - **`hello {server_time}` is the one way clients measure time against the game.** Every stream opens with it, so the offset (server time − the client's monotonic clock) is re-measured on every connect (`frontend/src/lib/game/serverClock.ts`). Anything a client shows relative to now ("scanned 2 min ago", a future countdown) uses it, so every phone agrees. `hello` carries nothing else; game rules come from `GET /api/game/shapes`.
-- **Admin-triggered game events** read the caller's role from `user.Get`, never from the token (roles in tokens can be stale), then follow §6 with `Broadcast` as step 6.
+- **Admin-triggered game events** read the caller's role from `user.Get`, never from the token (roles in tokens can be stale): use an admin route (§7, `RequireAdmin`), then follow §6 with `Broadcast` as step 6.
 - **The wire-level reference** (endpoint, scopes, format, every event, triggers, ordering, heartbeat, reconnection, client integration) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
 
 ## 10. Configuration: no hard-coded constants

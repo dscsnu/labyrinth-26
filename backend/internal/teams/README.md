@@ -1,6 +1,6 @@
 # teams
 
-Teams of up to **6** (`teams.size`) players with a leader, from forming in the lobby to starting the game.
+Teams of up to **6** (`teams.size`) players with a leader, from forming in the lobby to starting the game, plus an admin's removal of a member at any time.
 
 Every number below that comes from `config.toml` is shown with its current value and its key, e.g. **6** (`teams.size`). Change the file, not the code.
 
@@ -25,8 +25,9 @@ Every number below that comes from `config.toml` is shown with its current value
 | Term | Meaning |
 |---|---|
 | **Team** | Up to **6** (`teams.size`) players, identified by a random 6-digit **code** (`"482913"`) that players type to join. |
-| **Leader** | The creator. Starts the game. Doesn't ready up. If the leader leaves the lobby, the longest-standing member takes over. |
-| **Status** | `LOBBY` (forming) → `IN_GAME` (started; roster frozen) → `FINISHED` (nothing sets it yet). |
+| **Leader** | The creator. Starts the game. Doesn't ready up. If the leader leaves the lobby, the longest-standing member takes over; if an admin removes the leader, the admin names the new one. |
+| **Status** | `LOBBY` (forming) → `IN_GAME` (started; locked to players: nobody joins or leaves) → `FINISHED` (nothing sets it yet). |
+| **Admin removal** | An `ADMIN` (role read from the database on each request) removes a member from a team in any status. The only way a started team's roster changes, and it can only shrink. |
 | **Ready** | A non-leader member's "I'm set" flag. The leader can start once every other member is ready, with any number of members from 1 (the leader alone) to **6** (`teams.size`). |
 | **Join order** | Members are kept in the order they joined. It decides who becomes leader next. |
 
@@ -35,18 +36,25 @@ Every number below that comes from `config.toml` is shown with its current value
 2. **Share the code.** The leader tells teammates the code (out of band: in person, chat).
 3. **Join.** Each teammate sends `POST /api/teams/join {"team_id"}` until the team has **6** (`teams.size`). Members are kept in join order.
 4. **Ready.** Each non-leader sends `PUT /api/teams/me/ready {"ready": true}`. They can un-ready, leave and rejoin while in the lobby.
-5. **Start.** The leader sends `POST /api/teams/me/start`. With any number of members (1 to **6**, `teams.size`), all non-leaders ready, the team becomes `IN_GAME` and its roster is frozen. From here `teamstate` takes over: right after the `IN_GAME` `team` event, every member gets the team's (empty) `team_state` through `Rules.OnStart`.
+5. **Start.** The leader sends `POST /api/teams/me/start`. With any number of members (1 to **6**, `teams.size`), all non-leaders ready, the team becomes `IN_GAME` and its roster is locked to players (only an admin can remove a member, step 7). From here `teamstate` takes over: right after the `IN_GAME` `team` event, every member gets the team's (empty) `team_state` through `Rules.OnStart`.
 6. **Live updates.** Every member's event stream (`GET /api/events`) gets the whole team after every change, and `no_team` when they leave.
+7. **Admin removal (any time).** An admin sends `DELETE /api/admin/teams/{team_id}/members/{user_id}`, adding `?new_leader=<user id>` when removing the leader. The removed player gets `no_team` and is free to create or join a team; their past scans and casts stay with the team. A started team keeps playing with the rest. For a started team, teams then calls `Rules.OnRosterChange`, so teamstate stops sending to the removed player and refuses their writes.
 
 - **Why the leader doesn't ready up.** Starting is the leader's "ready". A separate flag would only add a state that can disagree with pressing start.
 - **Why join order decides the next leader.** It's stable, visible to everyone, and survives a restart (`joined_at`, ties broken by `user_id`).
-- **Why the roster freezes at start.** `teamstate` reads the team without its lock and relies on the members never changing once `IN_GAME`.
+- **Why players can't join or leave a started team.** A team's game is the team's: a player hopping teams mid-game would carry nothing and confuse everyone. So once `IN_GAME`, only an admin can change the roster, and only by removing someone (someone went home, or was put in the wrong team).
+- **Why admin removal can't empty a team.** Removing the last member would delete the team, and a started team's progress with it (`team_scan`, `team_cast` cascade). Deleting a team is a separate, bigger action that doesn't exist yet; `last_member` refuses it.
+- **Why the admin names the new leader.** The admin knows who is still there; join order (what `Leave` uses) may pick someone who also went home.
+- **Why `OnRosterChange` exists.** teamstate reads a started team without teams' lock, caches its roster for publishing, and accepts writes from whoever the roster says. When an admin removes someone it must drop that cache and stop accepting their writes; teams can't import teamstate (AGENTS.md §4), so `server.Build` wires it like `OnStart`.
 - **Why `OnStart` is a callback.** A start must also send the team's `team_state` (AGENTS.md §17: everything about the game loop reaches clients through it), but teams may not import teamstate (AGENTS.md §4: teamstate imports teams). So `server.Build` passes `OnStart`, the same way it passes auth's `onSignIn` → `RefreshProfile`.
 
 ## How each file works
 
 ### `api.go`: routes
 - **`Routes`** registers six routes behind the auth middleware. The live stream is registered by `internal/server`, because it carries events from several use cases.
+- **`AdminRoutes`** registers the two admin routes behind `admin`, which `server.Build` builds as auth middleware plus `user.API.RequireAdmin` (role from the database, `403 not_admin` otherwise):
+  - **`all`**: `GET /api/admin/teams`, `Store.All()`.
+  - **`removeMember`**: `DELETE /api/admin/teams/{team_id}/members/{user_id}[?new_leader=<uuid>]`. Checks `team_id` against `teamIDPattern` (`400 invalid_team_id`), parses `user_id` and `new_leader` as UUIDs (`400 invalid_user_id` for either), calls `RemoveMember`, and logs `admin removed team member` with `admin_id`, `team_id`, `user_id` and `new_leader`.
 - Each handler decodes and checks the body, calls one `Store` method with the caller's ID (`identity.UserID`), and writes the result in the envelope.
 - **`create`** trims the name (`strings.TrimSpace`); then **`validName`** enforces 1 to **32** (`teams.name_max_length`) characters (counted as runes) with no control characters. **`teamIDPattern`** requires exactly 6 digits.
 - **`fail`** maps rule errors to a status and code via `errorCodes`; anything else is logged and becomes `500`.
@@ -61,8 +69,9 @@ Every number below that comes from `config.toml` is shown with its current value
   - `Store.Size()`: the method returning **6** (`teams.size`), the team size from `Rules`. Used by tests.
 
 ### `write.go`: writes, each written through
-- **`Create`**, **`Join`**, **`Leave`**, **`SetReady`** and **`Start`** each follow the [write-through](#the-write-through) steps, numbered in the code.
+- **`Create`**, **`Join`**, **`Leave`**, **`SetReady`**, **`Start`** and **`RemoveMember`** each follow the [write-through](#the-write-through) steps, numbered in the code.
 - **`Start`**, after step 6 publishes the `IN_GAME` `team`, calls **`Rules.OnStart(team)`** if it's set, still holding the team's entry lock, so each member's stream gets `team` before whatever the hook publishes. `server.Build` sets it to `teamstate.Store.PublishTeam`, which publishes the team's `team_state`. A rejected start, or one whose persist fails, never calls it.
+- **`RemoveMember(ctx, teamID, userID, newLeader)`** is the admin's removal. Locks the team by ID (`lockTeam`), validates (member? last member? new leader required, a remaining member, and only when removing the leader), builds the team without the member (and with the new leader), persists with `removeMember(…, deleteTeam=false)`, applies (drops the user from `userTeam`), publishes `team` to the rest and `no_team` to the removed user, then, if the team isn't `LOBBY`, calls **`Rules.OnRosterChange(team)`** still holding the lock. Returns the team after the removal.
 - **`RefreshProfile(userID, name, avatarURL)`** updates a member's `Name` and `AvatarURL` in memory and publishes `team`. Called by auth's sign-in hook (wired in `server.Build`) after every successful sign-in, with the user as `userprofile` now stores it. Steps: 1 lock (`lockUsersTeam`), 2 validate (anything changed?), 3 build (clone `Members`, set the two fields), 5 apply, 6 publish. **No persist:** the user use case has already saved `userprofile`, and teams reads names and avatars from it at load. A no-op when the user is in no team or nothing changed. Returns nothing.
 - **`equalPtr(a, b)`**: both `nil`, or both pointing to equal strings. Compares avatars.
 - The rule errors are declared here.
@@ -78,10 +87,11 @@ Every number below that comes from `config.toml` is shown with its current value
   - `mapMemberInsertErr` maps the `teammember_user_id_key` violation to `errUserInTeam`.
 
 ### `store.go`: the in-memory layout
-- **`Rules`**: the settings `server.Build` passes in. `Size` (`teams.size`), `NameMaxLength` (`teams.name_max_length`), `WriteTimeout` (`storage.write_timeout`), `CodeAttempts` (`teams.code_attempts`), and `OnStart func(Team)`, not from config.toml: the start hook (see `write.go`). `nil` means no hook (the teams tests, `cmd/loadtest`).
+- **`Rules`**: the settings `server.Build` passes in. `Size` (`teams.size`), `NameMaxLength` (`teams.name_max_length`), `WriteTimeout` (`storage.write_timeout`), `CodeAttempts` (`teams.code_attempts`), and two hooks not from config.toml: `OnStart func(Team)`, the start hook, and `OnRosterChange func(Team)`, called by `RemoveMember` for a started team (see `write.go`). `nil` means no hook (the teams tests, `cmd/loadtest`). `server.Build` wires them to teamstate's `PublishTeam` and `RosterChanged`.
 - **`Load`** builds memory at startup.
 - **`persist`** runs a write detached from the request, capped at **5 s** (`storage.write_timeout`).
 - **`lockUsersTeam`** finds and locks a user's team, retrying if the user moved team between lookup and lock.
+- **`lockTeam`** finds and locks a team by ID (`RemoveMember`): `ErrTeamNotFound` if there's none, or it was deleted (`gone`) while waiting for the lock.
 - **`reconcile`** reloads a team after a failed write.
 - **`publish`** and **`teamEvent`** send events. **`randomTeamID`** picks codes from 100000–999999.
 
@@ -147,7 +157,7 @@ Had A left at step 2 (lobby, B–F present), B, the earliest joiner, would have 
 
 ## The write-through
 Every function in `write.go`, marked in the code:
-1. **lock** the team's entry (`lockUsersTeam`, or the entry by code for `Join`)
+1. **lock** the team's entry (`lockUsersTeam`, or the entry by code for `Join` and `RemoveMember`)
 2. **validate** the rules against the snapshot
 3. **build** the next snapshot
 4. **persist** via `db.go`, detached from the request, capped at **5 s** (`storage.write_timeout`)
@@ -161,12 +171,13 @@ Every function in `write.go`, marked in the code:
 | `Leave` | 1–6 | `removeMember` | |
 | `SetReady` | 1–6 | `updateReady` | |
 | `Start` | 1, 2, 4, 3, 5, 6 (6 also calls `Rules.OnStart`) | `updateStarted` | (b) Postgres sets `started_at` |
+| `RemoveMember` | 1–6 (6 also calls `Rules.OnRosterChange` for a started team) | `removeMember` (never deletes the team) | |
 | `RefreshProfile` | 1, 2, 3, 5, 6 (no 4) | none | memory-only: `user` already saved `userprofile` |
 
 **On a failed persist:** `reconcile` reloads the team from Postgres, re-indexes its members, publishes, and the caller gets `500`. **SetReady** to the current value returns before step 4. **RefreshProfile** skips step 4 entirely (the data is already in `userprofile`), so it can't fail and never reconciles.
 
 ## API
-All routes need `Authorization: Bearer <token>` (`401` without).
+All routes need `Authorization: Bearer <token>` (`401` without). The `/api/admin` routes also need the `ADMIN` role as stored in `userprofile` (`403 not_admin`).
 
 | Method | Path | Body | Success |
 |---|---|---|---|
@@ -176,6 +187,8 @@ All routes need `Authorization: Bearer <token>` (`401` without).
 | POST | `/api/teams/leave` | none | `200`, no payload |
 | PUT | `/api/teams/me/ready` | `{"ready": true}` | `200` team |
 | POST | `/api/teams/me/start` | none | `200` team |
+| GET | `/api/admin/teams` | none | `200` every team, sorted by ID (admin) |
+| DELETE | `/api/admin/teams/{team_id}/members/{user_id}[?new_leader=<user id>]` | none | `200` the team after the removal (admin) |
 
 **Team JSON** (payload, and the `team` event's data):
 ```json
@@ -189,7 +202,7 @@ All routes need `Authorization: Bearer <token>` (`401` without).
 ```
 Emails are never included. **Error body:** `{"success": false, "code": "team_full", "message": "team is full"}`.
 
-**Live events** on `GET /api/events` (team scope, sent to each member with `Hub.Send`): `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar. On a start, `team` is followed by the team's `team_state` (sent by teamstate through `Rules.OnStart`).
+**Live events** on `GET /api/events` (team scope, sent to each member with `Hub.Send`): `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar. On a start, `team` is followed by the team's `team_state` (sent by teamstate through `Rules.OnStart`). On an admin removal, the rest get `team` and the removed player gets `no_team`; from then on they get no `team_state` (teamstate's `RosterChanged`).
 
 ## Rules and cases
 
@@ -247,7 +260,26 @@ Checked in this order:
 | Caller isn't the leader (even after the start) | `403 not_leader` |
 | Team not `LOBBY` (already started) | `409 team_locked` |
 | Any non-leader not ready | `409 not_all_ready` |
-| Success | `IN_GAME`, `started_at` = Postgres `now()`; roster frozen; `team` to all members, then `Rules.OnStart(team)` (in the server: `team_state` to all members) |
+| Success | `IN_GAME`, `started_at` = Postgres `now()`; locked to players; `team` to all members, then `Rules.OnStart(team)` (in the server: `team_state` to all members) |
+
+### Remove a member (admin): `DELETE /api/admin/teams/{team_id}/members/{user_id}`
+Checked in this order:
+
+| Case | Result |
+|---|---|
+| No token | `401 missing_token` |
+| Caller's role in `userprofile` isn't `ADMIN` (whatever the token says) | `403 not_admin` |
+| `team_id` not exactly 6 digits | `400 invalid_team_id` |
+| `user_id`, or `new_leader` if given, not a UUID | `400 invalid_user_id` |
+| No such team, or deleted while waiting for the lock | `404 team_not_found` |
+| User isn't in that team | `404 not_a_member` |
+| User is the team's only member | `409 last_member` (with or without `new_leader`) |
+| User leads the team, no `new_leader` | `409 new_leader_required` |
+| User leads the team, `new_leader` is the user or not in the team | `409 invalid_new_leader` |
+| User doesn't lead the team, `new_leader` given | `409 invalid_new_leader` |
+| Success, any status (`LOBBY`, `IN_GAME`, `FINISHED`) | `200` with the team; member removed (others keep their ready flags), leader moved if named, in one transaction; the rest get `team`, the removed user `no_team`; logged with the admin's ID |
+| Success, team started | Also `Rules.OnRosterChange(team)`: teamstate drops its cached roster and refuses the removed user's writes (`404 not_in_team`). Their scans and casts stay |
+| After success | The removed user is teamless: they may create or join a (`LOBBY`) team |
 
 ### Refresh a profile: `RefreshProfile` (no route; after each sign-in)
 Checked in this order:
@@ -272,6 +304,8 @@ Checked in this order:
 - **The leader starts while a member leaves:** either the start wins (the leave gets `team_locked`) or the leave wins and the smaller team starts; the team is always consistent (`TestConcurrentStartAndLeave`).
 - **A user creates and joins at once:** the unique constraint on `teammember.user_id` lets only one through.
 - **`lockUsersTeam`** re-checks membership after taking the lock, and retries up to 3 times if the user moved team.
+- **An admin removal is a normal team write:** it takes the same `entry.mu`, so it's ordered with joins, leaves, readies and starts. A removal racing the user's own leave (lobby only): if the removal wins, the leave gets `not_in_team`; if the leave wins, the removal gets `not_a_member` (or `team_not_found` if the leave emptied the team).
+- **The roster hook runs under the team's lock,** like `OnStart`, after apply: teamstate's `RosterChanged` takes teamstate's entry lock (same order: teams `entry.mu` → teamstate entry). A game write by the removed user either finishes before the hook gets teamstate's lock (it ran before the removal) or re-checks membership under that lock after the removal is visible and is refused (`TestAdminRemoveRacesScan`).
 - **The start hook runs under the team's lock.** `OnStart` is called holding `entry.mu`, after apply, so the team is already `IN_GAME` in memory (`ByID` and `ForUser` see it) and its `team` event is queued first. The hook must not call back into a write on the same team (it would deadlock); teamstate's `PublishTeam` only reads teams (`ByID`, which takes `Store.mu` briefly) and takes teamstate's own entry lock. Lock order across the two: teams `entry.mu` → teamstate entry.
 - **A sign-in during a team write:** `RefreshProfile` takes the same entry lock, so it applies before or after the write, never in between.
 - **A sign-in racing the same user's create or join** can leave the old name in memory. If `insertMember` (or `insertTeam`) read `userprofile` before the sign-in's upsert committed, and the hook runs before that write's apply step adds the user to `userTeam`, `RefreshProfile` finds no team and does nothing. The new name shows after the user's next sign-in or a restart. Postgres is never wrong: it's only memory.
@@ -296,7 +330,8 @@ Checked in this order:
 ## Not decided yet
 - **A sign-in racing the same user's create or join can leave the old name in memory** (see [Concurrency and locking](#concurrency-and-locking)). The team shows the old name or avatar until that user's next sign-in, or a restart. Postgres is right; only memory lags. Not fixed: it needs the sign-in hook and the team write to agree on an order, and the effect is cosmetic.
 - **`FINISHED` is never set.** Nothing ends a game yet; when it does, decide whether a finished team's members may form new teams.
-- **No way to kick a member or rename a team.** The leader can only start; a player who won't ready blocks the start until they leave.
+- **Only admins can remove a member, and nobody can rename a team.** The leader can only start; a player who won't ready blocks the start until they leave or an admin removes them.
+- **No admin route deletes a team** or adds a player to a started team.
 - **Team names aren't moderated.** Any name within the length and character rules is accepted.
 
 ## Tests
@@ -309,4 +344,9 @@ Checked in this order:
   - `BenchmarkForUser`: parallel `ForUser` reads of one full team; results summed into the `sinkMembers` sink
 - `internal/server/tests/teams_test.go`: every rule and error code in order; leadership handover and deletion; name validation; both races. Team size and name length come from `config.toml`, not repeated numbers.
 - `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile`: signing in again with a new name and no picture shows the new name and the old avatar in `GET /api/teams/me`.
+- `internal/server/tests/admin_test.go`:
+  - `TestAdminGuard`: no token `401`; a player `403 not_admin`; promoted in the database (token still says `PLAYER`) is let in; demoted is refused on the next request
+  - `TestAdminRemoveFromLobby`: every code in the table above in order; the removed player gets `no_team` and a member gets the smaller `team`; removing the leader with a new leader; the list route; `last_member`; the removed player creates a team
+  - `TestAdminRemoveFromStartedTeam`: the removed player's stream gets `no_team` and no further `team_state`; their scan, selection and state read get `not_in_team`; the rest complete a square with the removed player's earlier scan; the removed player joins a lobby team; a restart keeps the smaller roster
+  - `TestAdminRemoveRacesScan`: a member's scan racing their removal, for every non-leader: the removal always succeeds, and the scan is accepted (stays in the stack) or refused with `not_in_team`, never accepted after
 - `internal/server/tests/events_test.go`: `team`/`no_team` events, stream auth and cleanup; `TestStartPublishesTeamState`: on a start every open stream gets `team` then `team_state`.

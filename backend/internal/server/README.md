@@ -34,6 +34,8 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Unrouted request** | One no route pattern matches: an unknown path, or a known path with the wrong method. `envelopeUnrouted` answers it in the JSON envelope. |
 | **Sign-in hook** | The `onSignIn` function `Build` gives auth: after every sign-in it calls `teams.Store.RefreshProfile`, so a renamed user shows the new name in their team at once. |
 | **Start hook** | The `teams.Rules.OnStart` function `Build` gives teams: after a team starts (and its `team` event is published) it calls `teamstate.Store.PublishTeam`, so every member's open stream gets the team's (empty) `team_state` at once. teams can't import teamstate (AGENTS.md §4), hence the callback. |
+| **Roster hook** | The `teams.Rules.OnRosterChange` function `Build` gives teams: after an admin removes a member from a started team (and its `team`/`no_team` events are published) it calls `teamstate.Store.RosterChanged`, which drops teamstate's cached roster so `team_state` stops reaching the removed player. Same reason for a callback as the start hook. |
+| **Admin route** | A route wrapped by `Build`'s `admin` helper: `authAPI.RequireAuth(userAPI.RequireAdmin(h))`. The token proves who the caller is; `RequireAdmin` reads their role from Postgres on every request (`403 not_admin` unless `ADMIN`). |
 
 ## Startup and shutdown
 `main.go`'s `run` does these steps in order. Any error returned is logged as `fatal` and the process exits with status `1`.
@@ -91,7 +93,7 @@ Every number below that comes from `config.toml` is shown with its current value
   4. `auth.NewLoginCodes(db, auth.login_code_ttl)`.
   5. `auth.NewGoogle(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, PUBLIC_URL + "/auth/google/callback", google)`.
   6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`.
-  7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start before `Build` returns and routes are served.
+  7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart, OnRosterChange})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `OnRosterChange` is `func(t) { stateStore.RosterChanged(t.ID) }`, the roster hook. `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start, and no admin can remove anyone, before `Build` returns and routes are served.
   8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
   9. `teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas. It needs the atlas (through its `Atlas` interface) and `teamStore` (through its `Teams` interface), so it runs after steps 6 and 7.
   10. The `App` (with `Atlas: theAtlas`, and a `live.Streamer` from `live.heartbeat`, `live.write_timeout`, `live.retry_min` and `live.retry_max`), then a `http.ServeMux` with, in this order:
@@ -99,6 +101,7 @@ Every number below that comes from `config.toml` is shown with its current value
      - `GET /openapi.yaml` and `GET /docs` (no auth; see [API docs](#api-docs-openapi))
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
      - `user`, `teams`, `teamstate`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
+     - the admin routes: `admin := func(h) { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }`, then `teamsAPI.AdminRoutes(mux, admin)` (`GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}`)
      - `GET /api/events`, wrapped in `authAPI.RequireStreamAuth` (Bearer or the `labyrinth_token` cookie)
   11. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
 - **`envelopeUnrouted(mux)`** wraps the mux. For each request it asks `mux.Handler(r)` for the matching pattern:
@@ -315,6 +318,8 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 | teams `PUT /api/teams/me/ready`, flag changed | `team` | members |
 | teams `PUT /api/teams/me/ready`, flag already that value | nothing (no-op) | |
 | teams `POST /api/teams/me/start` | `team` (`status` `IN_GAME`, `started_at` set), then `team_state` (the team's state, empty: no selection, stack `[]`, no progress) through the start hook (`OnStart` → `teamstate.PublishTeam`) | members |
+| admin `DELETE /api/admin/teams/{team_id}/members/{user_id}` | `team` (one fewer member; new `leader_id` if the leader was removed) | the remaining members |
+| | `no_team` | the removed user; for a started team, the roster hook (`OnRosterChange` → `teamstate.RosterChanged`) then stops `team_state` reaching them. It publishes nothing itself |
 | Sign-in (`onSignIn` → `teams.RefreshProfile`), name or avatar changed | `team` | members |
 | Sign-in, nothing changed or not in a team | nothing | |
 | teams write fails to persist (`reconcile`) | `team` reloaded from Postgres | its members |
@@ -391,6 +396,7 @@ Routes registered here but owned by use cases (see their READMEs):
 | `auth` | `GET /auth/google/login`, `GET /auth/google/callback`, `POST /auth/token` | none |
 | `user` | `GET /api/me` (`401 user_not_found` if the token's user was deleted) | Bearer |
 | `teams` | `GET /api/teams/me`, `POST /api/teams`, `POST /api/teams/join`, `POST /api/teams/leave`, `PUT /api/teams/me/ready`, `POST /api/teams/me/start` | Bearer |
+| `teams` (admin) | `GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}[?new_leader=<uuid>]` | Bearer + `ADMIN` in Postgres (`403 not_admin`) |
 | `teamstate` | `GET /api/game/shapes`, `GET /api/teams/me/state`, `GET /api/teams/me/casts` (the cast log, newest first), `PUT` and `DELETE /api/teams/me/state/selection`, `POST /api/teams/me/state/scans` | Bearer |
 
 `/healthz` is the only route that touches Postgres on every call. `streams` counts every open subscription (all users, all tabs).
@@ -456,6 +462,8 @@ Any other path or method:
 - **One process per database** is enforced by the instance lock, which the stores' "memory is the truth" design relies on. Its watcher goroutine checks it every **5 s** (`storage.instance_lock_check`) on the lock's own connection.
 - **The sign-in hook** runs in the callback's goroutine and takes the user's team entry lock like any team write.
 - **The start hook** runs inside `teams.Start`, holding the team's teams entry lock, and takes the team's teamstate entry lock (`PublishTeam`). So the lock order across the two use cases is teams entry → teamstate entry. teamstate never takes a teams entry lock (it reads teams through `ByID`/`ForUser`, which take only teams' index lock, briefly), so this can't deadlock.
+- **The roster hook** runs inside `teams.RemoveMember`, holding the team's teams entry lock, and takes the team's teamstate entry lock (`RosterChanged`): the same order as the start hook. A game write by the removed player either finishes under the teamstate lock before the hook gets it, or re-checks membership under that lock after the removal and gets `404 not_in_team` (`TestAdminRemoveRacesScan`).
+- **The admin guard** reads `userprofile` on every admin request (`users.Get`): no memory, so nothing to race.
 
 ## Failure and recovery
 | Case | Result |
@@ -530,6 +538,9 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `members(r)` | `tests/teams_test.go` | The `members` array of a team payload |
 | `fullTeam(prefix)` | `tests/teams_test.go` | `teams.size` players; `[0]` creates, the rest join |
 | `startedTeam(prefix)` | `tests/teamstate_test.go` | `fullTeam`, everyone but the leader ready, leader starts |
+| `newAdmin(name)` | `tests/admin_test.go` | `newPlayer`, then `UPDATE userprofile SET role = 'ADMIN'`: the token still says `PLAYER` |
+| `setRole(p, role)` | `tests/admin_test.go` | Sets `p`'s role in Postgres |
+| `removePath(teamID, userID, newLeader)` | `tests/admin_test.go` | `/api/admin/teams/{team_id}/members/{user_id}`, plus `?new_leader=` if given |
 
 ### `openStream(p)` (`tests/events_test.go`)
 - Opens `GET /api/events` with `p`'s Bearer token on a cancellable context (cancelled at cleanup), through `openStreamAt(path, auth)`, which takes any path and lets `auth` set the credentials (a cookie, for instance). Fails unless `200` and `Content-Type: text/event-stream`.
@@ -570,6 +581,10 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestConcurrentJoinsRespectTeamSize` | `tests/teams_test.go` | 2 × (`teams.size` − 1) = 10 concurrent joins into a team of 1: exactly `teams.size − 1` succeed, the rest `team_full` |
 | `TestConcurrentStartAndLeave` | `tests/teams_test.go` | 10 rounds of start racing a leave: either started with `teams.size` (6) and the leave `team_locked`, or the leave won and the start then started a team of `teams.size` − 1 (any size may start) |
 | `TestStartWithAnySize` | `tests/teams_test.go` | a leader alone starts (`IN_GAME`, 1 member); a team of 3 is `409 not_all_ready` until both non-leaders are ready, then starts. Needs `teams.size` ≥ 3, else the second half skips |
+| `TestAdminGuard` | `tests/admin_test.go` | admin routes: no token `401 missing_token`; a player `403 not_admin` (list and remove); promoted by SQL with a `PLAYER` token is let in; demoted is refused on the next request |
+| `TestAdminRemoveFromLobby` | `tests/admin_test.go` | `invalid_team_id`, `invalid_user_id` (path and `new_leader`), `team_not_found`, `not_a_member`, `new_leader_required`, `invalid_new_leader` (self, outsider, non-leader with one); a removal sends `no_team` to the removed and `team` to a member; removing the leader with a new leader; `GET /api/admin/teams`; `last_member` with and without `new_leader`; the removed player creates a team |
+| `TestAdminRemoveFromStartedTeam` | `tests/admin_test.go` | seed + `restart`; removing a started team's member: `no_team` and no more `team_state` for them; their scan, select and state read `404 not_in_team`; the rest complete a square using the removed player's earlier scan; the removed player joins a lobby team; after `restart` the roster is still smaller and the removed player's scan gets `not_in_game` (they're in a lobby team) |
+| `TestAdminRemoveRacesScan` | `tests/admin_test.go` | each non-leader's scan racing their removal: removal `200`; the scan `200` with a one-scan stack or `404 not_in_team` with an empty one, never accepted after the removal |
 | `TestUnroutedRequestsUseEnvelope` | `tests/teams_test.go` | `GET /api/nope` with and without a token → `404 not_found`; `DELETE /api/teams` → `405 method_not_allowed` |
 | `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), one member scanning a second waypoint (`200`), `pattern_completed`; state after; reselect; clear; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `wrong_scan` with `stack[0].wrong` and `poisoned` `true`, a teammate's next scan `409 selection_poisoned`, and a reselect making scans work again |
 | `TestCastLogRoute` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/teams/me/casts` is `404 not_in_team` without a team, `[]` before any cast; after the same square twice, two casts newest first, the newer `already_completed`, shape `square`, `damage` > 0 |

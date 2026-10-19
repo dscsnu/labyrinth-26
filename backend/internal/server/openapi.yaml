@@ -37,6 +37,10 @@ tags:
     description: Selecting a type and scanning (see internal/teamstate/README.md)
   - name: live
     description: Server-sent events
+  - name: admin
+    description: >-
+      Admin-only routes. Every one needs a token and the ADMIN role as stored in the database (read on every
+      request, never from the token, which can be up to `auth.token_ttl` stale): `403 not_admin` otherwise.
 
 security:
   - bearer: []
@@ -262,6 +266,54 @@ paths:
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`, `not_all_ready`" }
+
+  /api/admin/teams:
+    get:
+      tags: [admin]
+      summary: Every team
+      description: Every team in memory, sorted by ID, with its members, leader and status. For the admin panel.
+      responses:
+        "200":
+          description: Every team.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: array
+                        items: { $ref: "#/components/schemas/Team" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+
+  /api/admin/teams/{team_id}/members/{user_id}:
+    delete:
+      tags: [admin]
+      summary: Remove a member from a team
+      description: |
+        Works on a team in any status: lobby, or started (an admin is the only way a started team's roster
+        changes). If the member leads the team, `new_leader` must name a remaining member, who becomes leader;
+        otherwise `new_leader` must be absent. The team's only member can't be removed (`last_member`): this
+        never deletes a team.
+
+        The team's members get the new `team` event; the removed player gets `no_team` and stops getting the
+        team's `team_state`. Their game writes are refused (`404 not_in_team`) from the moment the removal is
+        visible; a write already holding the team's lock finishes first. Their past scans and casts stay with
+        the team. They're free to create or join a team. Logged with the admin's ID.
+      parameters:
+        - { name: team_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{6}$" }, example: "482913" }
+        - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: new_leader, in: query, required: false, schema: { type: string, format: uuid }, description: Required when removing the leader; a remaining member. }
+      responses:
+        "200": { $ref: "#/components/responses/Team" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`, `invalid_user_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`, `not_a_member`" }
+        "409":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `last_member`, `new_leader_required`, `invalid_new_leader`"
 
   /api/game/shapes:
     get:
