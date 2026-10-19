@@ -121,7 +121,7 @@ func New(src Source, rules Rules) (*Atlas, error) {
 			return nil, fmt.Errorf("pattern %d has %d waypoints; game.max_pattern_points is %d", p.ID, set.Len(), rules.MaxPatternPoints)
 		}
 		if p.Damage <= 0 {
-			return nil, fmt.Errorf("pattern %d: damage must be positive, got %d", p.ID, p.Damage)
+			return nil, fmt.Errorf("pattern %d: damage must be positive, got %d (run cmd/spells, then `go run . seed`, with the backend stopped)", p.ID, p.Damage)
 		}
 		if other, dup := a.patternBySet[set]; dup {
 			return nil, fmt.Errorf("patterns %d and %d use the same waypoints", a.patterns[other].ID, p.ID)

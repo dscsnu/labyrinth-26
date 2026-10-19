@@ -648,7 +648,7 @@ func TestOutOfOrderScanning(t *testing.T) {
 func TestSinglePointPattern(t *testing.T) {
 	f := started(t, fixtureOptions{sql: `
 		INSERT INTO shape (id, name) VALUES ('dot', 'Dot');
-		INSERT INTO pattern (id, shape_id) VALUES (1001, 'dot');
+		INSERT INTO pattern (id, shape_id, damage) VALUES (1001, 'dot', 15);
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES (1001, '1011');`})
 	f.selectAt(t, 0, 0, "dot")
 	res := f.scanAt(t, f.tick(1), 0, "1011")
@@ -664,7 +664,7 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 	hex := []string{"1003", "1004", "1005", "1006", "1009", "1010"}
 	f := started(t, fixtureOptions{sql: `
 		INSERT INTO shape (id, name) VALUES ('hexagon', 'Hexagon');
-		INSERT INTO pattern (id, shape_id) VALUES (1002, 'hexagon');
+		INSERT INTO pattern (id, shape_id, damage) VALUES (1002, 'hexagon', 150);
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
 			(1002, '1003'), (1002, '1004'), (1002, '1005'), (1002, '1006'), (1002, '1009'), (1002, '1010');`})
 	if f.rules.MaxPatternPoints != len(hex) {

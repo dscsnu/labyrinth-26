@@ -378,7 +378,7 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 
 	// Pattern 1 has waypoints 1001, 1003, 1004.
 	scan := func(p player, waypoint string) {
-		r := e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint": waypoint})
+		r := e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": waypoint})
 		expect(t, "scan "+waypoint, r, http.StatusOK, "")
 	}
 	scan(ps[0], "1001")

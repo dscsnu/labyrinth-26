@@ -309,3 +309,25 @@ func BenchmarkLookups(b *testing.B) {
 		}
 	})
 }
+
+// TestLoadRefusesMissingDamage checks, against a real Postgres, that a pattern
+// with no damage (NULL, as after migration 0008 without the spells seed) makes
+// Load fail with a message naming the pattern, rather than a scan error.
+func TestLoadRefusesMissingDamage(t *testing.T) {
+	ctx := context.Background()
+	db := pgtest.Open(t, pgtest.URL(t, "atlas_test"))
+	if err := db.SeedDev2025(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool().Exec(ctx, "UPDATE pattern SET damage = NULL WHERE id = 7"); err != nil {
+		t.Fatal(err)
+	}
+	limit := configtest.Settings(t).Game.MaxPatternPoints
+	if limit < seedMaxPoints {
+		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
+	}
+	_, err := atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})
+	if err == nil || !strings.Contains(err.Error(), "pattern 7: damage must be positive") {
+		t.Fatalf("got %v, want an error naming pattern 7's missing damage", err)
+	}
+}
