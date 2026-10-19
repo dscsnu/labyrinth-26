@@ -122,11 +122,13 @@ The offline generator lives in `backend/cmd/spells/main.go`.
 - Spell coefficients in `config.toml` (`[spell]`) are changed.
 
 ### How to run:
-Stop the backend process and run:
+Run it from `backend/` (it refuses anywhere else), with the backend stopped. It reads `DATABASE_URL` from the environment or `.env`, and `config.toml` (or `$CONFIG_FILE`) for `[spell]`:
 ```bash
 cd backend
-DATABASE_URL="postgres://user:pass@localhost:5432/labyrinth" go run ./cmd/spells
+go run ./cmd/spells        # rewrites internal/platform/postgres/seeds/dev_2025_spells.sql
+go run . seed              # applies it to the database
 ```
+Commit the regenerated seed file: the drift test compares it against a fresh computation.
 
 ### What it does:
 1. Connects to `DATABASE_URL`.

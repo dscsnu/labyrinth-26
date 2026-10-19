@@ -244,7 +244,8 @@ What completing a pattern casts: the team's reward for it. **One per pattern**, 
 
 ### How it works
 - **Stored in Postgres:** `pattern.damage` (INTEGER, CHECK > 0, added in migration `0008_pattern_damage.sql`).
-- **Loaded once at startup:** `db.selectAtlas` selects `p.damage`, scanning it into `PatternSource.Damage`. `atlas.New` validates that `Damage > 0` (failing startup with an error naming the pattern if missing or non-positive) and stores it in `Pattern.Spell.Damage`.
+- **Loaded once at startup:** `db.selectAtlas` selects `COALESCE(p.damage, 0)`, scanning it into `PatternSource.Damage`; a missing (`NULL`) damage reads as 0. `atlas.New` validates that `Damage > 0`, failing startup with `pattern N: damage must be positive, got 0 (run cmd/spells, then go run . seed, …)`, and stores it in `Pattern.Spell.Damage`.
+- **After migration 0008, reseed.** The migration adds the column empty, so an existing database refuses to start until `go run . seed` (backend stopped) fills it from `seeds/dev_2025_spells.sql`. Tested by `TestLoadRefusesMissingDamage`.
 - **Zero runtime or startup computation:** The backend never runs geometric algorithms, tours, or formula math while serving or loading.
 - **Offline math and generator:** All geometric modeling (equirectangular projection around waypoints' mean, Traveling Salesperson closed loop tour, Andrew's monotone chain convex hull, and damage calibration) lives in `internal/spells/`. The offline CLI `cmd/spells` reads waypoints and patterns from Postgres and generates `seeds/dev_2025_spells.sql`.
 - **Seed execution:** `SeedDev2025` runs `seeds/dev_2025.sql` followed by `seeds/dev_2025_spells.sql`, ensuring freshly seeded databases have damage populated.
@@ -410,6 +411,7 @@ No races to resolve: the atlas is built once before `Load` returns and never mod
 | `TestMixedSizesAllowedWhenNotNested` | a shape may mix 2- and 3-point patterns when none is inside another |
 | `TestFitsShape` | one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
 | `TestDevSeedLoads` | real Postgres (`TEST_DATABASE_URL`, schema `atlas_test`): the 2025 seed loads through `Load` with config.toml's rules: 11 waypoints, 5 shapes, 359 patterns; square `1001 1002 1007 1008` is found as a `square`; waypoint 0 is `1001` with coordinates; seeding again succeeds (idempotent) |
+| `TestLoadRefusesMissingDamage` | real Postgres: a seeded pattern's damage set to `NULL` (migration 0008 without the spells seed) makes `Load` fail with `pattern 7: damage must be positive`, not a scan error |
 | `BenchmarkLookups` | `FitsShape`, `PatternFor` and `WaypointIndex`+`Has` on the fixture (not the seed), results kept in package-level sinks (`sinkBool`, `sinkInt`). On an i7-12650H: about 1 ns, 2 ns and 6 ns |
 
 Run `go test -bench . ./internal/atlas/` for the benchmark. Not tested here: `Load`'s `load atlas:` error path (no database fault injection). Teamstate's tests (`internal/teamstate/README.md`) exercise the atlas through `teamstate.Atlas` on the seed, including a 1-point and a 6-point pattern added by SQL.

@@ -15,7 +15,10 @@ type db struct {
 	pool *pgxpool.Pool
 }
 
-// selectAtlas reads every waypoint, shape and pattern as a Source.
+// selectAtlas reads every waypoint, shape and pattern as a Source. A pattern
+// with no damage yet (migration 0008 ran but the spells seed didn't) reads as
+// damage 0, so New can refuse it with a message naming the pattern instead of
+// the scan failing on NULL.
 func (d db) selectAtlas(ctx context.Context) (Source, error) {
 	var c Source
 
@@ -44,7 +47,7 @@ func (d db) selectAtlas(ctx context.Context) (Source, error) {
 	rows, err = d.pool.Query(ctx, `
 		SELECT p.id, p.shape_id, COALESCE(array_agg(pw.waypoint_id ORDER BY pw.waypoint_id)
 		                                  FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}'),
-		       p.damage
+		       COALESCE(p.damage, 0)
 		FROM pattern p
 		LEFT JOIN pattern_waypoint pw ON pw.pattern_id = p.id
 		GROUP BY p.id, p.damage

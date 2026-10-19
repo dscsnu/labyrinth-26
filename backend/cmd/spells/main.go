@@ -2,7 +2,7 @@
 // Postgres, computes calibrated damage values using internal/spells, and writes
 // the seed SQL file backend/internal/platform/postgres/seeds/dev_2025_spells.sql.
 //
-// Usage:
+// Usage, from backend/ like every other command, with the backend stopped:
 //
 //	go run ./cmd/spells
 package main
@@ -31,6 +31,9 @@ func main() {
 	}
 }
 
+// seedPath is the generated seed file, relative to backend/.
+const seedPath = "internal/platform/postgres/seeds/dev_2025_spells.sql"
+
 // patternRow holds a pattern's database ID and its waypoint IDs.
 type patternRow struct {
 	// id is pattern.id.
@@ -48,19 +51,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return fmt.Errorf("DATABASE_URL is required to generate spells seed from database")
 	}
 
-	configPath := config.SettingsPath()
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Try looking in repo root if running from backend/ or cmd/
-		candidates := []string{"config.toml", "../config.toml", "../../config.toml"}
-		for _, c := range candidates {
-			if _, err := os.Stat(c); err == nil {
-				configPath = c
-				break
-			}
-		}
+	if _, err := os.Stat(filepath.Dir(seedPath)); err != nil {
+		return fmt.Errorf("run from backend/: %s not found", filepath.Dir(seedPath))
 	}
-
-	settings, err := config.LoadSettings(configPath)
+	settings, err := config.LoadSettings(config.SettingsPath())
 	if err != nil {
 		return fmt.Errorf("load settings: %w", err)
 	}
@@ -92,6 +86,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return fmt.Errorf("no waypoints found in database")
 	}
 
+	// The same pattern query as atlas's selectAtlas (internal/atlas/db.go),
+	// without damage, which this command produces.
 	pRows, err := conn.Query(ctx, `
 		SELECT p.id, COALESCE(array_agg(pw.waypoint_id ORDER BY pw.waypoint_id)
 		                      FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}')
@@ -139,24 +135,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 		b.WriteString(fmt.Sprintf("UPDATE pattern SET damage = %d WHERE id = %d;\n", damage, p.id))
 	}
 
-	seedPath := findSeedPath("internal/platform/postgres/seeds/dev_2025_spells.sql")
 	if err := os.WriteFile(seedPath, []byte(b.String()), 0o644); err != nil {
 		return fmt.Errorf("write seed file: %w", err)
 	}
 
 	log.Info("generated spells seed", "patterns", len(patterns), "output", seedPath)
 	return nil
-}
-
-// findSeedPath resolves the relative target path for seeds/dev_2025_spells.sql
-// regardless of whether the command was executed from repo root or backend/.
-func findSeedPath(rel string) string {
-	candidates := []string{rel, filepath.Join("backend", rel), filepath.Join("..", rel)}
-	for _, c := range candidates {
-		dir := filepath.Dir(c)
-		if _, err := os.Stat(dir); err == nil {
-			return c
-		}
-	}
-	return rel
 }
