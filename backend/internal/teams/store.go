@@ -3,7 +3,6 @@ package teams
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,6 +72,10 @@ type Rules struct {
 	// doesn't import teamstate). It must not call back into this team's
 	// writes. Not in config.toml.
 	OnStart func(Team)
+	// Epoch is the backend process's epoch for live.Version, the same for
+	// every use case: server.Build sets it once at startup. Not in
+	// config.toml.
+	Epoch int64
 	// OnRosterChange, if not nil, is called by RemoveMember when it removes a
 	// member from a team that has started, once the team is in memory and
 	// published, with the team's lock still held. server.Build passes
@@ -103,6 +106,7 @@ func Load(ctx context.Context, pg *postgres.DB, hub *live.Hub, log *slog.Logger,
 		userTeam: make(map[uuid.UUID]string),
 	}
 	for i := range all {
+		all[i].Version = live.Version{Epoch: rules.Epoch}
 		e := &entry{}
 		e.cur.Store(&all[i])
 		s.teams[all[i].ID] = e
@@ -200,6 +204,7 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 		for _, m := range fresh.Members {
 			s.userTeam[m.ID] = teamID
 		}
+		fresh.Version = old.Version.Next(s.rules.Epoch) // never back, even on a reload
 		e.cur.Store(&fresh)
 	}
 	s.mu.Unlock()
@@ -210,34 +215,81 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 			removed = append(removed, m.ID)
 		}
 	}
-	if e.gone {
-		for _, id := range removed {
-			s.hub.Send(id, noTeamEvent)
-		}
-	} else {
-		s.publish(&fresh, removed...)
+	if !e.gone {
+		s.publish(&fresh, live.Resync)
 	}
+	s.sendNoTeam(noTeamResync, removed...)
 	return writeErr
 }
 
-// noTeamEvent tells a user they're not in a team (they left, or it was
-// deleted). Its counterpart, "team", carries the full team.
-var noTeamEvent = live.NewEvent("no_team", []byte("{}"))
+// The causes of "team" events (the envelope's type), besides live.Snapshot
+// and live.Resync. Each is published to the team's members after the
+// change; the message is always the whole team.
+const (
+	// TeamCreated: the team was created; its creator is the only member.
+	TeamCreated live.EventType = "created"
+	// TeamMemberJoined: a player joined.
+	TeamMemberJoined live.EventType = "member_joined"
+	// TeamMemberLeft: a member left; the leader didn't change.
+	TeamMemberLeft live.EventType = "member_left"
+	// TeamLeaderChanged: the leader left, or an admin removed them, and
+	// another member now leads (leader_id).
+	TeamLeaderChanged live.EventType = "leader_changed"
+	// TeamMemberRemoved: an admin removed a member who wasn't the leader.
+	TeamMemberRemoved live.EventType = "member_removed"
+	// TeamReadyChanged: a member's ready flag changed.
+	TeamReadyChanged live.EventType = "ready_changed"
+	// TeamStarted: the leader started the game; the team is IN_GAME.
+	TeamStarted live.EventType = "started"
+	// TeamProfileUpdated: a member signed in with a new name or avatar.
+	TeamProfileUpdated live.EventType = "profile_updated"
+)
 
-// teamEvent encodes t as a "team" live event, same JSON as GET /api/teams/me.
-func teamEvent(t *Team) (live.Event, error) {
-	data, err := json.Marshal(t)
-	if err != nil {
-		return live.Event{}, err
-	}
-	return live.NewEvent("team", data), nil
+// The causes of "no_team" events, besides live.Snapshot and live.Resync.
+// Each goes to the one user who is no longer in a team.
+const (
+	// NoTeamLeft: the user left; the team carries on without them.
+	NoTeamLeft live.EventType = "left"
+	// NoTeamDeleted: the user was the last member, so leaving deleted the
+	// team.
+	NoTeamDeleted live.EventType = "team_deleted"
+	// NoTeamRemoved: an admin removed the user from their team.
+	NoTeamRemoved live.EventType = "removed"
+)
+
+// The "no_team" events, one per type. Their message is always {}, so each is
+// encoded once.
+var (
+	// noTeamSnapshot opens the stream of a user in no team.
+	noTeamSnapshot = noTeamEvent(live.Snapshot)
+	// noTeamResync goes to users a reload after a failed write found
+	// outside the team.
+	noTeamResync = noTeamEvent(live.Resync)
+	// noTeamLeft goes to a user who left a team that carries on.
+	noTeamLeft = noTeamEvent(NoTeamLeft)
+	// noTeamDeleted goes to the last member, whose leaving deleted the team.
+	noTeamDeleted = noTeamEvent(NoTeamDeleted)
+	// noTeamRemoved goes to a user an admin removed.
+	noTeamRemoved = noTeamEvent(NoTeamRemoved)
+)
+
+// noTeamEvent builds the "no_team" event of type typ: the user is in no
+// team. Its counterpart, "team", carries the full team.
+func noTeamEvent(typ live.EventType) live.Event {
+	return live.MustNewEvent("no_team", typ, struct{}{})
 }
 
-// publish sends t to its members and no_team to users who just left. Called
+// teamEvent encodes t as a "team" live event of type typ; its message is the
+// same JSON as GET /api/teams/me.
+func teamEvent(t *Team, typ live.EventType) (live.Event, error) {
+	return live.NewEvent("team", typ, t)
+}
+
+// publish sends t to its members as a "team" event of type typ. Called
 // after a write is applied, with the team's lock held, so each team's events
 // go out in order.
-func (s *Store) publish(t *Team, removed ...uuid.UUID) {
-	ev, err := teamEvent(t)
+func (s *Store) publish(t *Team, typ live.EventType) {
+	ev, err := teamEvent(t, typ)
 	if err != nil {
 		s.log.Error("encode team event", "team_id", t.ID, "error", err)
 		return
@@ -245,8 +297,13 @@ func (s *Store) publish(t *Team, removed ...uuid.UUID) {
 	for _, m := range t.Members {
 		s.hub.Send(m.ID, ev)
 	}
-	for _, id := range removed {
-		s.hub.Send(id, noTeamEvent)
+}
+
+// sendNoTeam sends the "no_team" event ev to each of users, who just stopped
+// being in a team. Called with the team's lock held, like publish.
+func (s *Store) sendNoTeam(ev live.Event, users ...uuid.UUID) {
+	for _, id := range users {
+		s.hub.Send(id, ev)
 	}
 }
 

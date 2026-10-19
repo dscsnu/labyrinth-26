@@ -38,6 +38,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Poisoned** | The stack holds a wrong scan (`State.Poisoned()`, `poisoned: true` in JSON). The attempt can't cast, and every further scan is refused with `409 selection_poisoned` until someone selects again (which purges the stack). See [Wrong scans and poisoned attempts](#wrong-scans-and-poisoned-attempts). |
 | **Cast** | A completion: the moment the stack becomes exactly a pattern of the selected shape. The client calls it casting a spell. Every cast is logged, repeats included: in memory (`State.Casts`) and in `team_cast`. `team_pattern` keeps only the first completion of each pattern. |
 | **Cast log** | `State.Casts`: every cast the team has made, oldest first, loaded from `team_cast` at startup. `GET /api/teams/me/casts` returns it newest first. |
+| **Version** | `State.Version`, `version` in JSON (`live.Version`, `{epoch, seq}`): orders the team's snapshots so a client keeps the newest copy, from the stream or a response. Every apply sets the next one; memory-only. |
+| **Cast count** | `cast_count` in JSON: `len(State.Casts)`. A client holding the log re-fetches it when this is more than it has. |
 | **Last cast** | `State.LastCast()`, `last_cast` in JSON: the cast log's newest entry (pattern, shape, who, when, whether the pattern was already completed, damage). Kept until the next cast; a new selection or a clear doesn't remove it. |
 | **Spell lifecycle** | What the client shows as a spell, read from `team_state` alone, with no event of its own: it **starts** when `selection` is set, members **add their points** as `stack` grows (`stack[].user_id` says who scanned each), it **fails** when `poisoned` turns true, and it **finishes** when `last_cast` changes (a new `cast_at`). |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection, wrong scans included. |
@@ -104,7 +106,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `ForTeam(teamID)` → `State` (the empty state for a team with no entry)
   - `ForUser(userID)` → `View`, or `ErrNotInTeam`
   - `CastsForUser(userID)` → `[]CastView`, newest first, or `ErrNotInTeam`; `[]` before the first cast
-  - `Snapshot(userID)`: the live event for a new stream
+  - `Snapshot(userID)`: the live event for a new stream, of type `snapshot`
 - **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast()` (`null` when the log is empty), lists every stack scan with its `wrong` flag, and sets `poisoned` from `State.Poisoned()`.
 - **`castView`** turns one `Cast` into a `CastView`, the shape being the pattern's `Shape` and `damage` the pattern's precomputed `Spell.Damage` (from `pattern.damage`, loaded by the atlas). Used by `view` and `CastsForUser`.
 
@@ -155,9 +157,11 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
 - **`stateOf(teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes. Every `team_cast` row becomes a `Cast` in `State.Casts`, oldest first (`cast: unknown pattern N` if the atlas lacks it). Stack rows are pushed oldest first, with their `wrong` flag.
 - **`lockTeam`** gets or creates a team's entry and locks it.
 - **`persist`** runs a `db.go` write detached from the request, capped at **5 s** (`storage.write_timeout`).
-- **`reconcile`** reloads one team's state from Postgres after a failed write and publishes it. If the reload fails too, memory stays as it was.
-- **`publish(e, teamID, st)`**, called with `e.mu` held, sends `team_state` to every member. The recipients are **`e.members`**, the team's roster cached on the first publish that finds the team `IN_GAME` (its roster then only changes by an admin's removal, and `RosterChanged` drops the cache when it does). Until then, and after a drop, it reads the roster through `Teams.ByID`. So a publish reads nothing outside the entry: no index lock, no lookup.
-- **`event`** encodes the `View` once as a `live.NewEvent("team_state", …)`; every member's stream gets the same bytes.
+- **`reconcile`** reloads one team's state from Postgres after a failed write, sets its `Version` to the in-memory one's `Next` (a reload never goes back), and publishes it as type `resync`. If the reload fails too, memory stays as it was.
+- **`publish(e, teamID, st, typ)`**, called with `e.mu` held, sends `team_state` of type `typ` to every member. The recipients are **`e.members`**, the team's roster cached on the first publish that finds the team `IN_GAME` (its roster then only changes by an admin's removal, and `RosterChanged` drops the cache when it does). Until then, and after a drop, it reads the roster through `Teams.ByID`. So a publish reads nothing outside the entry: no index lock, no lookup.
+- **`event(teamID, st, typ)`** encodes the envelope once, `live.NewEvent("team_state", typ, view)`; every member's stream gets the same bytes.
+- **The type constants** (`GameStarted`, `ShapeSelected`, `SelectionCleared`, `ScanAdded`, `WrongScan`, `SpellCast`) are declared beside `event`; `live.Snapshot` and `live.Resync` come from `platform/live`. `Scan` picks its type from its outcome: `scan_added` → `ScanAdded`, `wrong_scan` → `WrongScan`, `pattern_completed` → `SpellCast`.
+- **`Rules.Epoch`** is the process's epoch (from `server.Build`). `emptyState` starts a team at `{epoch, 0}`; `Select`, `ClearSelection` and `Scan` set `next.Version = cur.Version.Next(epoch)` in their build step. `PublishTeam` resends the current version.
 - **`now`** returns `clock.Now()`: UTC, truncated to microseconds (Postgres's precision), so a restart reproduces times exactly.
 
 ## Data model: memory
@@ -246,7 +250,9 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 | (none: built from the atlas and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
 | (none: memory-only, from teams) | `entry.members`, the roster cache: refilled from `Teams.ByID` on each team's first publish after a restart. teams reloads rosters from `teammember` (an admin's removal deleted the row), and `RosterChanged` drops the cache on every removal, so the cache always matches |
 
-**Nothing else is held only in memory.** There are no timers and nothing changes with time, so a restart reproduces memory exactly: `TestRestartRestoresEverything` and `TestCastLog` compare the JSON before and after.
+| (none: memory-only) | `State.Version`: `Load` starts every team at seq 0 in the new process's epoch, which clients treat as newer than anything from the old process, so nothing needs storing |
+
+**Nothing else is held only in memory.** There are no timers and nothing changes with time, so a restart reproduces memory exactly, versions aside: `TestRestartRestoresEverything` and `TestCastLog` compare the JSON before and after.
 
 **Casts before migration `0007` aren't logged**, so a team whose only casts predate it reloads with an empty log and `last_cast: null` although its `patterns` are non-empty. Every cast since is logged, in the same order memory appended it (`id` is an identity column, and casts for one team are written under its entry lock), so a restart reproduces the log exactly.
 
@@ -371,7 +377,9 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:02Z", "wrong": false},
     {"waypoint_id": "1003", "user_id": "e5f6…", "scanned_at": "2026-10-17T12:00:03Z", "wrong": true}
   ],
-  "poisoned": true
+  "poisoned": true,
+  "cast_count": 0,
+  "version": {"epoch": 1760702400000, "seq": 4}
 }
 ```
 - `selection` is `null` when nothing is selected.
@@ -431,10 +439,20 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | `ErrSelectionPoisoned` | 409 | `selection_poisoned` |
 | a body that doesn't decode | 400 | `invalid_body` |
 
-**Live events:** `team_state` with the `View`, sent:
-- to every member after every change: select, clear, accepted scan (wrong included), cast, and `reconcile` (never after a rejection or no-op)
-- to every member right after the `IN_GAME` `team` event when the leader starts (`PublishTeam`, through teams' `Rules.OnStart`): the empty state
-- right after `team` when a member connects to `GET /api/events`
+**Live events:** `team_state`, its data the envelope `{"type", "message"}` with the `View` as `message`, sent:
+
+| When | `type` | To |
+|---|---|---|
+| a member connects to `GET /api/events` (right after `team`) | `snapshot` | that stream |
+| the leader starts (`PublishTeam`, through teams' `Rules.OnStart`, right after `team: started`): the empty state | `game_started` | members |
+| `Select` (a spell attempt starts; the stack is purged) | `shape_selected` | members |
+| `ClearSelection` | `selection_cleared` | members |
+| `Scan`, outcome `scan_added` | `scan_added` | members |
+| `Scan`, outcome `wrong_scan` | `wrong_scan` | members |
+| `Scan`, outcome `pattern_completed` (a cast: new `last_cast`, `cast_count` + 1) | `spell_cast` | members |
+| `reconcile` | `resync` | members |
+
+Never after a rejection or no-op. Every change bumps `version.seq` by one; `snapshot` and `game_started` repeat the current version. The responses (`GET` state, both selection routes, `ScanResult.state`) carry the same `version`, so a client keeps whichever copy is newest.
 
 Nothing is ever published with nobody acting: there are no timers. Every trigger, the ordering guarantees and the wire format: [`internal/server/README.md`, "The event stream"](../server/README.md#the-event-stream).
 
@@ -605,9 +623,10 @@ Checked in this order:
   | `TestSixPointPatternAtCapacity` | a 6-point pattern (`game.max_pattern_points`) completes on the sixth scan |
   | `TestCompletingAgain` | `already_completed`, progress counted once |
   | `TestClearSelection` | clear with and without a selection; waypoints kept |
-  | `TestRestartRestoresEverything` | restart reproduces the JSON view exactly; rescans still rejected |
+  | `TestRestartRestoresEverything` | restart reproduces the JSON view exactly, except `version`, which restarts at seq 0 in the new epoch; rescans still rejected |
   | `TestConcurrentScans` | two members at one waypoint (one accepted); one member at two waypoints (both accepted) |
-  | `TestFailedWriteReconciles` | reload after a hand-edited database |
+  | `TestFailedWriteReconciles` | reload after a hand-edited database, published as `resync` one version on |
+  | `TestVersionAndTypes` | each publish's type (`game_started`, `shape_selected`, `scan_added`, `spell_cast`, `wrong_scan`, `selection_cleared`) and version: `PublishTeam` repeats it, every change adds one, a rejected scan and a no-op clear publish nothing and keep it; `cast_count` 0 until the cast, then 1; `Snapshot` is of type `snapshot` |
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
   | `TestPublishTeam` | `PublishTeam` sends the empty state to every member of a started team; after a selection it sends the current state (square selected) without changing it; nothing for an unknown team or a lobby team |

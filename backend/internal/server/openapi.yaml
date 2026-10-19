@@ -506,42 +506,51 @@ paths:
         team's, and game-wide). On connect: a `retry:` line (a random reconnect delay between `live.retry_min`
         and `live.retry_max`, 1–6 s, so a restart doesn't bring every client back at once), then `hello`, then
         `team` (or `no_team`), then `team_state` if you're in a team, then game-wide resources (none yet). Then
-        one event per change, each a full snapshot (never a diff), and a `: ping` comment after
-        `live.heartbeat` (25 s) with no event. A client that falls `live.subscriber_buffer` (16) events behind,
-        or can't take a write within `live.write_timeout` (10 s), is dropped and should reconnect (EventSource
-        does this itself); the first events after a reconnect are full snapshots.
+        one event per change, and a `: ping` comment after `live.heartbeat` (25 s) with no event. A client that
+        falls `live.subscriber_buffer` (16) events behind, or can't take a write within `live.write_timeout`
+        (10 s), is dropped and should reconnect (EventSource does this itself).
+
+        **Every event's `data` is an envelope**, `{"type": …, "message": …}`. The SSE `event:` name is the
+        resource (`team`, `team_state`, …); `type` is why it was sent (`spell_cast`, `member_joined`, …, or
+        `snapshot` on connect, `resync` after a failed write was reloaded); `message` is the resource's
+        **full** state, never a diff: the same JSON as its GET route. A client that only renders state reads
+        `message` and ignores `type`; one that animates or notifies switches on `type`. Each envelope is a
+        schema here: `HelloEvent`, `TeamEvent`, `NoTeamEvent`, `TeamStateEvent`.
+
+        `team` and `team_state` carry a `version` (`Version`): keep an incoming copy only if its `epoch`
+        differs from the one you hold, or the epoch matches and `seq` is higher. Write responses carry the same
+        `version`, so a response and its event can arrive in either order. `team_state.cast_count` says how
+        many casts the log (`GET /api/teams/me/casts`) holds: re-fetch it when it's more than you have.
 
         Nobody subscribes to channels: the server routes each event by user ID, to one user, to a team's
-        current members, or to every stream.
+        current members, or to every stream. Rejections and no-ops publish nothing. Nothing changes with time
+        alone. The full reference (every type and when it's sent, ordering, versioning, reconnection, and a
+        client example) is `backend/internal/server/README.md`, "The event stream".
 
-        `team_state` is published to every member when the leader starts (the empty state, right after the
-        `IN_GAME` `team`), and after every accepted selection, clear, scan (wrong ones included) and cast.
-        Nothing changes with time alone. It carries `last_cast`, the team's newest cast (the full log is
-        `GET /api/teams/me/casts`). Rejections and no-ops publish nothing. The full reference (every
-        trigger, ordering, heartbeat, reconnection, and what clients must do) is
-        `backend/internal/server/README.md`, "The event stream".
+        Game-wide events (quizzes, quick-time events; none yet) will use the same envelope, with `message` `null`
+        when nothing is active, or an object with at least an `id`. Their schemas are not final.
 
-        Game-wide events (quizzes, quick-time events; none yet) will each carry `null` when nothing is active,
-        or an object with at least an `id`. Their schemas are not final.
-
-        | event | scope | data |
-        |---|---|---|
-        | `hello` | stream | `Hello` |
-        | `team` | team | `Team` |
-        | `no_team` | user | `{}` |
-        | `team_state` | team | `TeamState` |
+        | event | scope | data | `type` values |
+        |---|---|---|---|
+        | `hello` | stream | `HelloEvent` | `connected` |
+        | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `resync` |
+        | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `resync` |
 
         ```
         retry: 3412
 
         event: hello
-        data: {"server_time":"2026-10-18T12:00:00.123456Z"}
+        data: {"type":"connected","message":{"server_time":"2026-10-18T12:00:00.123456Z"}}
 
         event: team
-        data: {"id":"482913","name":"Scanners",…}
+        data: {"type":"snapshot","message":{"id":"482913","name":"Scanners",…,"version":{"epoch":1760788800000,"seq":7}}}
 
         event: team_state
-        data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[],"poisoned":false}
+        data: {"type":"snapshot","message":{"team_id":"482913",…,"cast_count":0,"version":{"epoch":1760788800000,"seq":0}}}
+
+        event: team_state
+        data: {"type":"spell_cast","message":{"team_id":"482913",…,"last_cast":{…},"cast_count":1,"version":{"epoch":1760788800000,"seq":5}}}
 
         : ping
         ```
@@ -599,6 +608,62 @@ components:
                   payload: { $ref: "#/components/schemas/TeamState" }
 
   schemas:
+    HelloEvent:
+      type: object
+      description: The data of a `hello` event.
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [connected] }
+        message: { $ref: "#/components/schemas/Hello" }
+    TeamEvent:
+      type: object
+      description: |
+        The data of a `team` event, sent to the team's members; `message` is the whole team. Types:
+        `snapshot` (on connect), `created` (the creator), `member_joined`, `member_left` (a member left, the
+        leader didn't change), `leader_changed` (the leader left, or an admin removed them; see `leader_id`),
+        `member_removed` (an admin removed a non-leader), `ready_changed`, `started` (now `IN_GAME`; its
+        `team_state` of type `game_started` follows), `profile_updated` (a member's name or avatar), `resync`
+        (reloaded after a failed write).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, created, member_joined, member_left, leader_changed, member_removed, ready_changed, started, profile_updated, resync] }
+        message: { $ref: "#/components/schemas/Team" }
+    NoTeamEvent:
+      type: object
+      description: |
+        The data of a `no_team` event, sent to one user who is in no team; `message` is always `{}`. Types:
+        `snapshot` (on connect), `left` (they left, the team carries on), `team_deleted` (they were the last
+        member, so the team is gone), `removed` (an admin removed them), `resync` (a reload after a failed
+        write found them no longer in it). Clear both the team and its team state.
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, left, team_deleted, removed, resync] }
+        message: { type: object, maxProperties: 0 }
+    TeamStateEvent:
+      type: object
+      description: |
+        The data of a `team_state` event, sent to the team's members; `message` is the whole state. Types:
+        `snapshot` (on connect), `game_started` (right after the `team` event of type `started`),
+        `shape_selected` (a spell attempt starts; the stack was purged), `selection_cleared`, `scan_added`,
+        `wrong_scan` (the attempt is now `poisoned`), `spell_cast` (`last_cast` is the new cast, `cast_count`
+        went up, the selection and stack were purged), `resync` (reloaded after a failed write).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, resync] }
+        message: { $ref: "#/components/schemas/TeamState" }
+    Version:
+      type: object
+      description: |
+        Orders one resource's snapshots (one team's `team`, or its `team_state`), compared only against the
+        same resource. Keep an incoming copy if `epoch` differs from the one you hold, or `epoch` matches and
+        `seq` is higher; otherwise drop it. `seq` goes up by one on every change; `epoch` is the backend
+        process, so after a restart `seq` starts again in a new epoch. A repeat of the same version (a
+        snapshot, or a write response matching its event) is the same state. Two numbers, because JavaScript
+        can't hold integers above 2^53 exactly.
+      required: [epoch, seq]
+      properties:
+        epoch: { type: integer, format: int64, description: The backend process's start time, Unix milliseconds., example: 1760788800000 }
+        seq: { type: integer, format: int64, minimum: 0, description: Changes since the process started; 0 for a resource unchanged since then., example: 5 }
     Hello:
       type: object
       description: |
@@ -645,7 +710,7 @@ components:
 
     Team:
       type: object
-      required: [id, name, leader_id, status, created_at, started_at, members]
+      required: [id, name, leader_id, status, created_at, started_at, members, version]
       properties:
         id: { type: string, pattern: "^[0-9]{6}$", description: The 6-digit join code., example: "482913" }
         name: { type: string, example: Scanners }
@@ -657,6 +722,7 @@ components:
           type: array
           description: In join order (decides who leads if the leader leaves).
           items: { $ref: "#/components/schemas/Member" }
+        version: { $ref: "#/components/schemas/Version" }
     Member:
       type: object
       required: [id, name, avatar_url, is_ready, joined_at]
@@ -693,7 +759,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, cast_count, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
@@ -729,6 +795,15 @@ components:
         poisoned:
           type: boolean
           description: A scan in the stack is wrong; scans are refused (`selection_poisoned`) until a reselect.
+        cast_count:
+          type: integer
+          minimum: 0
+          description: >-
+            How many casts the team's log holds, repeats included. A client holding the log
+            (`GET /api/teams/me/casts`) adds each new `last_cast` it sees; when `cast_count` is more than its
+            log's length, it missed some (a reconnect) and re-fetches the log.
+          example: 1
+        version: { $ref: "#/components/schemas/Version" }
     Cast:
       type: object
       required: [pattern, shape, cast_by, cast_at, already_completed, damage]

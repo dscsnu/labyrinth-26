@@ -225,9 +225,17 @@ Server-sent events. Use cases publish full snapshots through the `Hub`, to one u
 ### Data model
 ```
 Event                                   one server-sent event, encoded once; immutable
-  name   string                         event name: "hello", "team", "no_team", "team_state"
-  data   []byte                         the payload (compact JSON); shared, never modified
+  name   string                         event name, the resource: "hello", "team", "no_team", "team_state"
+  typ    EventType                      why it was sent: "spell_cast", "member_joined", "snapshot", …
+  data   []byte                         the envelope {"type","message"} as compact JSON; shared, never modified
   frame  []byte                         the wire bytes "event: …\ndata: …\n\n", built by NewEvent
+
+EventType string                        the envelope's "type"; Snapshot and Resync are declared here,
+                                        the causes by the use case that publishes them
+
+Version                                 orders one resource's snapshots (team, team_state)
+  Epoch  int64                          the backend process's start time, Unix ms (one per process)
+  Seq    uint64                         changes since then; Next(epoch) is the following version
 
 Hub
   shards  []shard                       live.hub_shards (64); a user's streams all live in one shard
@@ -255,10 +263,15 @@ Streamer                                built once in server.Build, shared by ev
 - **A set per user,** so every tab gets every event.
 - **Sharded,** so publishers for different users rarely wait on each other, and a broadcast never holds the whole hub.
 - An empty set is deleted from `subs`, so each map holds only users with open streams.
-- **An `Event` is encoded once.** `frame` is shared by every stream it's sent to; `Serve` only copies bytes. Its fields are unexported so it can't be changed after `NewEvent`; read them with `Name()` and `Data()`.
+- **An `Event` is encoded once.** `frame` is shared by every stream it's sent to; `Serve` only copies bytes. Its fields are unexported so it can't be changed after `NewEvent`; read them with `Name()`, `Type()` and `Data()`.
+- **Every event's data is the envelope** `{"type": …, "message": …}`: `type` is why it was sent, `message` the resource's full state. The format and every type are in `internal/server/README.md`, "Event format".
+- **`Version` lives here** because both teams and teamstate put it in their payloads and neither may import the other (AGENTS.md §4). Its doc comment states the client rule: keep a copy if its epoch differs, or the epoch matches and seq is higher.
 
 ### Functions
-- **`NewEvent(name, data)`**: builds the frame. Each line of `data` becomes its own `data:` line (the client joins them back with newlines), so any payload round-trips; compact JSON is one line. The zero `Event` has an empty frame, which `Serve` skips.
+- **`NewEvent(name, typ, message)`**: encodes the envelope `{"type": typ, "message": message}` with `encoding/json` (a `json.RawMessage` is passed through, compacted), once, and builds the frame. JSON from `encoding/json` is compact, so it's always one `data:` line. Fails only if `message` can't be encoded. The zero `Event` has an empty frame, which `Serve` skips.
+- **`MustNewEvent(name, typ, message)`**: `NewEvent` for a constant message known to encode (`no_team`'s `{}`, `hello`); panics otherwise.
+- **`Snapshot`, `Resync`**: the two `EventType`s every resource uses: the state a stream opens with, and the state reloaded after a failed write.
+- **`Version.Next(epoch)`**: the version after this one, in `epoch`.
 - **`NewHub(shards, buffer)`**: an empty hub with `shards` shards (panics below 1: a programming error, since config validation already refuses it).
 - **`Subscribe(userID)`**: makes a channel of capacity `buffer`, then under the user's shard lock adds it to the user's set. If the hub is closed, closes the channel and returns it unregistered: the caller's `Serve` returns at once. **Subscribe before reading the state you send first** (see `internal/server/README.md`).
 - **`Subscription.Close()`**: `dropLocked` under its shard's lock. Safe to call any number of times, and after `Hub.Close`.
@@ -296,28 +309,28 @@ Nothing is lost, because every event is a full snapshot, never a diff. Only the 
 `conn` holds the writer, its `ResponseController` and the first error, so a batch of writes is checked once, at its flush.
 
 ### Wire format
-Each event is exactly `event: <name>\ndata: <data>\n\n` (one `data:` line per line of data). A heartbeat is `: ping\n\n`, an SSE comment that `EventSource` ignores. The stream opens with `retry: <ms>\n\n`. No `id:` fields are sent, so nothing is replayed.
+Each event is exactly `event: <name>\ndata: <envelope>\n\n`, the envelope on one line. A heartbeat is `: ping\n\n`, an SSE comment that `EventSource` ignores. The stream opens with `retry: <ms>\n\n`. No `id:` fields are sent, so nothing is replayed.
 
 A member of team `482913` connects, nothing happens for 25 s, then a teammate readies. Byte for byte, after the headers (`␤` = `\n`):
 ```
 retry: 3412␤
 ␤
 event: hello␤
-data: {"server_time":"2026-10-17T12:00:00.123456Z"}␤
+data: {"type":"connected","message":{"server_time":"2026-10-17T12:00:00.123456Z"}}␤
 ␤
 event: team␤
-data: {"id":"482913","name":"Live","leader_id":"6f1c…","status":"LOBBY","created_at":"2026-10-17T12:00:00Z","started_at":null,"members":[…]}␤
+data: {"type":"snapshot","message":{"id":"482913","name":"Live","leader_id":"6f1c…","status":"LOBBY","created_at":"2026-10-17T12:00:00Z","started_at":null,"members":[…],"version":{"epoch":1760702400000,"seq":2}}}␤
 ␤
 event: team_state␤
-data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[]}␤
+data: {"type":"snapshot","message":{"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":null,"last_cast":null,"stack":[],"poisoned":false,"cast_count":0,"version":{"epoch":1760702400000,"seq":0}}}␤
 ␤
 : ping␤
 ␤
 event: team␤
-data: {"id":"482913",…,"members":[…,{"id":"9a2b…","name":"b","avatar_url":null,"is_ready":true,"joined_at":"2026-10-17T12:00:05Z"}]}␤
+data: {"type":"ready_changed","message":{"id":"482913",…,"members":[…,{"id":"9a2b…","name":"b","avatar_url":null,"is_ready":true,"joined_at":"2026-10-17T12:00:05Z"}],"version":{"epoch":1760702400000,"seq":3}}}␤
 ␤
 ```
-A user in no team gets `event: no_team␤data: {}␤␤` instead of `team` and `team_state`. Every event, what triggers it and the ordering guarantees: `internal/server/README.md`, "The event stream".
+A user in no team gets `event: no_team␤data: {"type":"snapshot","message":{}}␤␤` instead of `team` and `team_state`. Every event, what triggers it and the ordering guarantees: `internal/server/README.md`, "The event stream".
 
 ### Cases
 | Case | Result |
@@ -363,7 +376,9 @@ The fan-out benchmark runs the 10,000 clients on the same machine as the server,
 | `TestHubSendsOnlyToThatUser` | An event for one user doesn't reach another |
 | `TestHubBroadcastReachesEveryStream` | 200 users with two streams each, across every shard, get every broadcast; a slow stream gets exactly 16 then is dropped; `Count` is right |
 | `TestHubConcurrentUse` | `Subscribe`, `Send`, `Broadcast` and `Close` side by side (meaningful under `-race`) |
-| `TestServeWritesFrames` | Exact bytes: the `retry:` line, then each event, a two-line payload as two `data:` lines, an empty payload as one empty `data:` line |
+| `TestServeWritesFrames` | Exact bytes: the `retry:` line, then each event as one `event:` and one `data:` line holding the envelope, for a struct, a `json.RawMessage` (compacted) and an empty-object message |
+| `TestNewEvent` | `Name`, `Type` and `Data` (the envelope); a message that can't be encoded is an error |
+| `TestVersionNext` | `Next` counts up from 1 in its epoch |
 | `TestServeRetryWithinRange` | 20 streams with a 1–3 s range each send a delay within it |
 | `TestServeCoalescesQueuedEvents` | Three events queued before `Serve` starts go out in one flush, in order |
 | `TestServeStalledClientTimesOut` | A client that never accepts a write ends `Serve` at the 50 ms write deadline |
