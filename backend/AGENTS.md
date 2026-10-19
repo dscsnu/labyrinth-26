@@ -75,7 +75,7 @@ backend/
   cmd/docaudit/             checks every declaration has a doc comment (§11)
   cmd/loadtest/             10k-player load test against a bench database
   internal/
-    atlas/ auth/ user/ teams/ teamstate/   use cases (§3)
+    atlas/ auth/ user/ teams/ teamstate/ qr/   use cases (§3)
     server/                 wires use cases together; cross-cutting routes
     platform/               shared plumbing, no business rules:
       config/ httpx/ identity/ live/ postgres/
@@ -94,6 +94,7 @@ Every feature belongs to exactly one **use case**: one package under `internal/`
 | `teams` | teams, membership, ready, start | memory, written through |
 | `teamstate` | selection, scan stack, completions | memory, written through |
 | `atlas` | static content: waypoints, shapes, patterns, spells | memory, read-only, loaded once |
+| `qr` | rotating waypoint QR tokens: mint (staff) and verify | none (stateless; derived from the secret and the clock) |
 
 **Files**, the same in every use case:
 ```

@@ -18,6 +18,9 @@ name_max_length = 32
 code_attempts = 10
 [game]
 max_pattern_points = 6
+[qr]
+rotate = "5s"
+tolerance = "5s"
 [spell]
 per_point = 15
 per_100m = 2
@@ -70,6 +73,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 ||
+		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
 		t.Fatalf("decoded %+v", s)
@@ -91,6 +95,8 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"team too big":                      {"size = 6", "size = 17", "teams.size"},
 		"name longer than the database":     {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
 		"pattern bigger than the stack":     {"max_pattern_points = 6", "max_pattern_points = 16", "max_pattern_points"},
+		"zero qr rotate":                    {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
+		"zero qr tolerance":                 {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
 		"zero per_point":                    {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},
 		"negative per_100m":                 {"per_100m = 2", "per_100m = -1", "spell.per_100m must not be negative"},
 		"walkability under 1.0":             {"walkability = 1.5", "walkability = 0.5", "spell.walkability must be at least 1.0"},

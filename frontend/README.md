@@ -41,6 +41,8 @@ Apart from the event stream (`/api/events`, above), the browser never calls the 
 | `POST /play/scan` `{"waypoint_id"}` (`src/routes/play/scan/+server.ts`) | `POST /api/teams/me/state/scans` |
 | `PUT /play/selection` `{"shape"}` (`src/routes/play/selection/+server.ts`) | `PUT /api/teams/me/state/selection` |
 | `DELETE /play/selection` (same file) | `DELETE /api/teams/me/state/selection` |
+| `GET /qr/{waypoint_id}` (`src/routes/qr/[waypoint]/+server.ts`) | `GET /api/qr/{waypoint_id}` |
+| `POST /qr/verify` `{"qr"}` (`src/routes/qr/verify/+server.ts`) | `POST /api/qr/verify` |
 
 ## The `/admin` page
 For organisers: removing a member from a team. The home page links to it when the session's role is `ADMIN`, but the link is only a convenience. **The backend decides who's an admin**, from the role in Postgres on every request (`403 not_admin` otherwise), because the session's role is as of sign-in and may be stale.
@@ -55,3 +57,17 @@ For organisers: removing a member from a team. The home page links to it when th
 - The form uses `use:enhance`; its submit function asks `confirm()` first and calls `cancel()` on "no". After a removal SvelteKit reloads the page's data, so the list is current. The page doesn't listen to events: it shows the teams as of the last load or action.
 
 What the removal does to players: the removed player's stream gets `no_team` (so `/team` shows "No team" and `/play` sends them to `/team`); the rest get the smaller `team`, and a started team keeps playing. See [`backend/internal/teams/README.md`, "Remove a member (admin)"](../backend/internal/teams/README.md#remove-a-member-admin-delete-apiadminteamsteam_idmembersuser_id).
+
+## The `/qr` display page
+
+For staff: a screen at a waypoint showing its rotating QR. `src/routes/qr/+page.svelte`:
+
+1. Enter a 4-digit waypoint ID. The page fetches `GET /qr/{waypoint_id}` **once**, which the backend answers with the waypoint-scoped HMAC signing key and timing rules (`key`, `rotate_ms`, `window_ms`, `server_time`) — see `backend/internal/qr/README.md`.
+2. It signs `"<waypoint>:<unix seconds>"` locally with Web Crypto (`crypto.subtle`, HMAC-SHA256), base64url-encodes the signature, and renders the token as a QR (`qrcode`), re-signing every `rotate_ms`. `server_time` corrects the display's own clock before signing.
+3. No further requests: the QR rotates from the one key, offline except for the initial fetch.
+
+`src/routes/qr/+page.server.ts` gates the page to staff: it checks the backend role via `GET /api/me` (HELPER/ADMIN), matching the backend route `GET /api/qr/{waypoint_id}` (`403 not_staff`). The page is handed a signing key, so it must not be reachable by players.
+
+## The `/test-scan` page
+
+A dev/test harness for the QR flow. `src/routes/test-scan/+page.svelte` opens the camera (`getUserMedia`), decodes a QR every ~250 ms (`jsqr`), and posts the token to `POST /qr/verify`; the backend verifies the signature and freshness and returns the waypoint, or `invalid_qr` / `qr_expired`. It changes nothing (no team state), so it's usable by any signed-in user.

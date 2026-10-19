@@ -74,6 +74,28 @@ func (a *API) RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// ErrNotStaff means the caller's role is neither HELPER nor ADMIN.
+var ErrNotStaff = errors.New("only staff can do this")
+
+// RequireStaff wraps next so it only runs for a HELPER or ADMIN. Like
+// RequireAdmin, it must run after the auth middleware and reads the role from
+// the database on every request, never the token. 403 not_staff otherwise;
+// 401 user_not_found if the user no longer exists.
+func (a *API) RequireStaff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, err := a.users.Get(r.Context(), identity.UserID(r))
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		if u.Role != RoleHelper && u.Role != RoleAdmin {
+			httpx.ErrorCode(w, http.StatusForbidden, "not_staff", ErrNotStaff.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // me handles GET /api/me: it returns the signed-in user, read from the
 // database so the role is current even if it changed since sign-in. 401
 // user_not_found if the token's user no longer exists.

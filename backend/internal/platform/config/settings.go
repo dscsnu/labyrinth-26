@@ -30,6 +30,8 @@ type Settings struct {
 	Teams TeamSettings `toml:"teams"`
 	// Game are the scanning rules.
 	Game GameSettings `toml:"game"`
+	// QR are the rotating-QR rules.
+	QR QRSettings `toml:"qr"`
 	// Spell are the coefficients for pattern damage calculation.
 	Spell SpellSettings `toml:"spell"`
 	// Auth are the sign-in and token timings.
@@ -66,6 +68,14 @@ type TeamSettings struct {
 type GameSettings struct {
 	// MaxPatternPoints is the most waypoints in a pattern.
 	MaxPatternPoints int `toml:"max_pattern_points"`
+}
+
+// QRSettings is config.toml's [qr] table.
+type QRSettings struct {
+	// Rotate is how often a waypoint's rotating QR changes.
+	Rotate Duration `toml:"rotate"`
+	// Tolerance is how much longer than rotate a scan stays accepted.
+	Tolerance Duration `toml:"tolerance"`
 }
 
 // AuthSettings is config.toml's [auth] table.
@@ -185,6 +195,8 @@ func (s Settings) validate() []error {
 	check(s.Teams.CodeAttempts >= 1, "teams.code_attempts must be at least 1")
 	check(s.Game.MaxPatternPoints >= 1 && s.Game.MaxPatternPoints <= MaxPatternPoints,
 		"game.max_pattern_points must be 1-%d", MaxPatternPoints)
+	check(s.QR.Rotate.Duration > 0, "qr.rotate must be positive")
+	check(s.QR.Tolerance.Duration > 0, "qr.tolerance must be positive")
 	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")
 	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
 	check(s.Spell.Walkability >= 1.0, "spell.walkability must be at least 1.0")
