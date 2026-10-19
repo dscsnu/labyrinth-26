@@ -112,7 +112,9 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 - **`Select`**, **`ClearSelection`** and **`Scan`** each follow the [write-through](#the-write-through) steps, numbered in the code.
 - **Lock-free checks first** (§6 variation (a)): `Select` resolves the shape with `Atlas.ShapeIndex`, `Scan` the waypoint with `Atlas.WaypointIndex`, both before the team and the lock.
 - **`Scan`'s checks**, in order, under the lock: no selection → `ErrNoShapeSelected`; `cur.Poisoned()` → `ErrSelectionPoisoned`; the waypoint already in the stack → `ErrWaypointAlreadyScanned`. Then `Atlas.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (pushed, marked `Wrong`, outcome `wrong_scan`). Completion is `!wrong` and `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, and the new `Cast{Pattern: p, By: caller, At: now, AlreadyCompleted}` is appended to the log **copy-on-write**: `append(slices.Clip(cur.Casts), cast)`. `Clip` sets the slice's capacity to its length, so `append` always allocates a new backing array and the current snapshot's slice is never written to.
-- **`inGameTeam`** fetches the caller's team and requires `IN_GAME`.
+- **`inGameTeam`** fetches the caller's team and requires `IN_GAME` (lock-free: a started team's status never goes back).
+- **`isMember(teamID, userID)`** reads the team's current roster through `Teams.ByID` (lock-free) and reports whether the user is in it. `Select`, `ClearSelection` and `Scan` call it **again under the entry lock**, right after `1. lock`, and refuse with `ErrNotInTeam` (`404 not_in_team`) if an admin removed the caller since `inGameTeam` looked them up. A started team's roster can shrink (teams' `RemoveMember`), so the lock-free lookup alone isn't enough.
+- **`RosterChanged(teamID)`** is teams' `Rules.OnRosterChange` (wired in `server.Build`): an admin removed a member from a started team. It locks the entry (`lockTeam`) and drops `entry.members`, the roster cache, so the next publish re-reads the roster from teams and no longer reaches the removed player. **Memory-only** (AGENTS.md §6): the roster is teams' data, already saved. **Publishes nothing:** the team's `State` didn't change (the removed player's scans and casts stay), and teams has already sent the rest `team` and the removed player `no_team`.
 - **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team). Not a write: no build, persist or apply. It takes the entry lock so its event is ordered with the team's writes.
 - **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrSelectionPoisoned`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
 
@@ -154,7 +156,7 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
 - **`lockTeam`** gets or creates a team's entry and locks it.
 - **`persist`** runs a `db.go` write detached from the request, capped at **5 s** (`storage.write_timeout`).
 - **`reconcile`** reloads one team's state from Postgres after a failed write and publishes it. If the reload fails too, memory stays as it was.
-- **`publish(e, teamID, st)`**, called with `e.mu` held, sends `team_state` to every member. The recipients are **`e.members`**, the team's roster cached on the first publish that finds the team `IN_GAME` (its roster is frozen from then on, so the cache can't go stale). Until then it reads the roster through `Teams.ByID` each time. So a publish reads nothing outside the entry: no index lock, no lookup.
+- **`publish(e, teamID, st)`**, called with `e.mu` held, sends `team_state` to every member. The recipients are **`e.members`**, the team's roster cached on the first publish that finds the team `IN_GAME` (its roster then only changes by an admin's removal, and `RosterChanged` drops the cache when it does). Until then, and after a drop, it reads the roster through `Teams.ByID`. So a publish reads nothing outside the entry: no index lock, no lookup.
 - **`event`** encodes the `View` once as a `live.NewEvent("team_state", …)`; every member's stream gets the same bytes.
 - **`now`** returns `clock.Now()`: UTC, truncated to microseconds (Postgres's precision), so a restart reproduces times exactly.
 
@@ -175,9 +177,10 @@ Store
 entry
   mu          sync.Mutex             writers to this team queue here
   cur         atomic.Pointer[State]  the current snapshot; readers load it lock-free
-  members     []uuid.UUID            the user IDs events go to: the frozen roster,
-                                     cached by publish once the team is IN_GAME;
-                                     nil until then. Guarded by mu
+  members     []uuid.UUID            the user IDs events go to: the roster, cached
+                                     by publish once the team is IN_GAME, dropped
+                                     by RosterChanged on an admin's removal; nil
+                                     until the next publish refills it. Guarded by mu
 
 State                                (never modified once stored)
   Waypoints  atlas.WaypointSet  uint64      visited waypoints, bit i = waypoint index i
@@ -241,7 +244,7 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 | every `team_cast` row, `ORDER BY team_id, id` | `State.Casts`, oldest first; `last_cast` is its last element |
 | newest **7** (`game.max_pattern_points` + 1) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag, so `poisoned` comes back too) |
 | (none: built from the atlas and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
-| (none: memory-only, from teams) | `entry.members`, the roster cache: refilled from `Teams.ByID` on each team's first publish after a restart. teams reloads rosters from `teammember`, and an `IN_GAME` roster never changes, so the cache always matches |
+| (none: memory-only, from teams) | `entry.members`, the roster cache: refilled from `Teams.ByID` on each team's first publish after a restart. teams reloads rosters from `teammember` (an admin's removal deleted the row), and `RosterChanged` drops the cache on every removal, so the cache always matches |
 
 **Nothing else is held only in memory.** There are no timers and nothing changes with time, so a restart reproduces memory exactly: `TestRestartRestoresEverything` and `TestCastLog` compare the JSON before and after.
 
@@ -323,8 +326,8 @@ F selects `square`. D scans `1001`, `1002`, `1007`, `1008` in turn: `scan_added`
 Every write in `write.go` (`Select`, `ClearSelection`, `Scan`) runs these steps, marked in the code (`PublishTeam` is not a write; see the table):
 1. **lock** the team's entry (`lockTeam`)
 2. **validate**:
-   - first the atlas lookup (shape or waypoint ID) and the team, **before** the lock (an `IN_GAME` team's status and roster never change). This is AGENTS.md §6 variation (a); the code labels it `2. validate, before 1. lock`
-   - then the `State`, under the lock (`2. validate (state)`)
+   - first the atlas lookup (shape or waypoint ID) and the team, **before** the lock (an `IN_GAME` team's status never goes back). This is AGENTS.md §6 variation (a); the code labels it `2. validate, before 1. lock`
+   - then, under the lock, membership again (`isMember`: an admin may have removed the caller since the lookup) and the `State` (`2. validate (state)`)
 3. **build** the next `State` (a copy; the cast log copy-on-write)
 4. **persist**: one `db.go` call (`insertScan`, `insertCompletingScan`, `upsertSelection` or `deleteSelection`), detached from the request and capped at **5 s** (`storage.write_timeout`)
 5. **apply**: `entry.cur.Store(&next)`
@@ -543,7 +546,12 @@ Checked in this order:
 - **Readers of the cast log** load a snapshot and range over its `Casts` slice with no lock: a writer never writes into a slice a snapshot holds (copy-on-write), so readers can't see a half-appended log.
 - **Lock order:** `entry.mu`, then `Store.mu` (only to create an entry). `Store.mu` is never held during I/O.
 - **The start hook.** `PublishTeam` runs inside teams' `Start`, which holds the team's teams entry lock; it takes this team's `entry.mu`. So the lock order across the two use cases is teams entry → teamstate entry. teamstate never takes a teams entry lock (`ByID` and `ForUser` take only teams' index lock, briefly), so this can't deadlock. Holding teams' lock is what makes the start's `team` arrive before its `team_state`. A write that slips in between teams' apply and the hook (a member who scans before seeing the start) publishes its own `team_state` first; the hook then publishes the same, current state again.
-- **The team itself is read** through `Teams` without the team's lock. That's safe because writes need `IN_GAME`, after which a team's status and roster are frozen.
+- **The team itself is read** through `Teams` without the team's lock. Its status is safe to read that way: writes need `IN_GAME`, which never goes back. Its roster isn't frozen: an admin can remove a member (teams' `RemoveMember`), so membership is checked again under `entry.mu` (`isMember`).
+- **An admin's removal versus the removed player's write.** teams applies the removal (the roster in `ByID` no longer has them), publishes, then calls `RosterChanged`, which takes this team's `entry.mu`. A write by the removed player either:
+  - holds `entry.mu` and passed `isMember` before the removal was applied: it finishes first and counts (it happened before the removal), and `RosterChanged` waits for it; or
+  - checks `isMember` after the removal was applied: refused, `404 not_in_team`.
+
+  So no write by a removed player is accepted once the removal is visible, and none is half-applied. Their earlier scans stay in the stack and still count toward a pattern (`TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`). After `RosterChanged`, publishes go to the remaining members only. Lock order is the same as the start hook's: teams entry → teamstate entry.
 - **The memory checks are the only enforcement** of the stack rules (one scan per waypoint per attempt, nothing after a wrong scan): they depend on the selection's `after_scan_id` window, which a unique constraint can't express. They all run under `entry.mu`, and Postgres has one writer (the instance lock in `platform/postgres`).
 
 ## Failure and recovery
@@ -621,5 +629,12 @@ Checked in this order:
   | `TestSimTeamCompletesUnderLatency` | four players scan the square at once with delays up to 150 ms each way: exactly one `pattern_completed`; every screen ends with an empty stack and the square completed |
   | `TestSimRaceSameWaypoint` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every screen converges on a one-scan stack |
   | `TestSimWrongScanReachesEveryone` | a wrong scan racing a teammate's correct one: the wrong one gets `wrong_scan`, the other is accepted or gets `selection_poisoned`; every phone sees `poisoned`; a reselect clears it on every phone |
+
+- `internal/server/tests/admin_test.go`:
+
+  | Test | Covers |
+  |---|---|
+  | `TestAdminRemoveFromStartedTeam` | after an admin removes a member of a started team: their stream gets `no_team` and no further `team_state`; their scan, selection and state read get `404 not_in_team`; the rest complete a square using the removed player's earlier scan |
+  | `TestAdminRemoveRacesScan` | a member's scan racing their removal, for every non-leader: the removal always succeeds; the scan is accepted (and stays in the stack) or refused with `not_in_team`, never accepted after the removal. Which wins isn't controlled; the refused path is covered deterministically above |
 
 - `internal/server/tests/events_test.go`: `team_state` on connect; `TestStartPublishesTeamState`: when the leader starts, every open stream gets `team` then the empty `team_state`, in that order.

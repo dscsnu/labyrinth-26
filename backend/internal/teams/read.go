@@ -17,7 +17,8 @@ type Status string
 const (
 	// Lobby means the team is forming: members can join, leave and ready up.
 	Lobby Status = "LOBBY"
-	// InGame means the team has started and its roster is frozen.
+	// InGame means the team has started: players can't join or leave, and
+	// only an admin can remove a member (RemoveMember).
 	InGame Status = "IN_GAME"
 	// Finished means the team is done playing. Nothing sets it yet.
 	Finished Status = "FINISHED"

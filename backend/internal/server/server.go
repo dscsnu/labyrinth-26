@@ -57,7 +57,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	}
 
 	// stateStore is loaded after teams (it reads teams), but teams' OnStart
-	// needs it. Build assigns it before returning, and no team can start
+	// and OnRosterChange need it. Build assigns it before returning, and no team can start
 	// before the routes are served, so OnStart never sees it nil.
 	var stateStore *teamstate.Store
 	teamStore, err := teams.Load(ctx, db, hub, log, teams.Rules{
@@ -68,6 +68,9 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		// A started team's members get its (empty) state right after the
 		// team, without reconnecting their stream.
 		OnStart: func(t teams.Team) { stateStore.PublishTeam(t.ID) },
+		// An admin removing a member from a started team: team state stops
+		// sending to them and refuses their writes.
+		OnRosterChange: func(t teams.Team) { stateStore.RosterChanged(t.ID) },
 	})
 	if err != nil {
 		return nil, err
@@ -97,8 +100,14 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	mux.HandleFunc("GET /openapi.yaml", openAPI)
 	mux.HandleFunc("GET /docs", docs)
 	authAPI.Routes(mux)
-	user.NewAPI(users, log).Routes(mux, authAPI.Authed)
-	teams.NewAPI(teamStore, log).Routes(mux, authAPI.Authed)
+	userAPI := user.NewAPI(users, log)
+	userAPI.Routes(mux, authAPI.Authed)
+	// Admin routes: signed in, and ADMIN by the role in the database (never
+	// the token's, which can be stale).
+	admin := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }
+	teamsAPI := teams.NewAPI(teamStore, log)
+	teamsAPI.Routes(mux, authAPI.Authed)
+	teamsAPI.AdminRoutes(mux, admin)
 	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
 	// The one event stream. Browsers open it on the shared domain with the
 	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.

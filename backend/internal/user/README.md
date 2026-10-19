@@ -62,6 +62,12 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
   - **Why `401`, not `404`.** The caller's token is valid but names a user that no longer exists. That's an authentication failure: the frontend should drop the token and sign in again. `404` would suggest the route or resource is missing.
   - **Compare `POST /auth/token`**, which answers `404 user_not_found` when a **login code's** user was deleted: no token is involved there, the code simply points at nothing (see `internal/auth/README.md`).
 - **`fail(w, err)`** writes the matching row (message = the error's text), or logs `load user` and writes `500 internal error`.
+- **`RequireAdmin(next)`** is the admin guard: middleware that runs `next` only for an `ADMIN`. It must run after auth's middleware (it reads `identity.UserID`). On every request it reads the caller with `users.Get`, so the role is the database's **now**, never the token's (which can be up to **12 h**, `auth.token_ttl`, stale): a demoted admin loses access on their next request, a promoted one gains it without signing in again.
+  1. `users.Get(ctx, identity.UserID(r))`; an error goes to `fail` (`401 user_not_found` if the user was deleted, `500` otherwise).
+  2. Role isn't `RoleAdmin` → `403 not_admin`, message `only an admin can do this` (**`ErrNotAdmin`**).
+  3. Otherwise `next`.
+
+  `server.Build` wraps admin routes as `authAPI.RequireAuth(userAPI.RequireAdmin(h))` and hands that to `teams.API.AdminRoutes`. One Postgres read per admin request: admin traffic is a handful of people, not the game loop.
 
 ### `read.go`: types and reads
 - **`Role`** is a `string` type. Constants `RolePlayer = "PLAYER"`, `RoleHelper = "HELPER"`, `RoleAdmin = "ADMIN"`, matching the `user_role` enum.
@@ -258,7 +264,16 @@ Called only after auth has verified the email (see `internal/auth/README.md`).
 ### General rules
 - One account per Google subject; one account per email.
 - Roles change only by hand in Postgres. No route changes them.
-- Code that gates on role must read it with `Get`; the token's role (`identity.Role`) can be up to **12 h** (`auth.token_ttl`) stale.
+- Code that gates on role must read it with `Get`; the token's role (`identity.Role`) can be up to **12 h** (`auth.token_ttl`) stale. Routes do it through `RequireAdmin`.
+
+### `RequireAdmin` (every `/api/admin` route)
+| Case | Result |
+|---|---|
+| No token, or a bad one | `401` from auth's middleware, before this runs |
+| Token valid, user deleted | `401 user_not_found` |
+| Role in `userprofile` is `PLAYER` or `HELPER` (whatever the token says) | `403 not_admin` |
+| Role in `userprofile` is `ADMIN` (even if the token says `PLAYER`) | The route runs |
+| Database error | `500 internal error`, logged |
 - `google_sub` and `last_login_at` are never sent to clients. `/api/me` sends the caller only their own email.
 
 ## Concurrency
@@ -291,7 +306,8 @@ No locks and no memory: Postgres settles every race.
 - **An email clash blocks sign-in.** A Google account whose email belongs to another row gets `reason=email_in_use` and can't sign in until the other account's email changes. Whether to drop the `email` unique constraint, or let an organiser merge accounts, is open.
 - **A removed avatar can't be cleared.** Since an empty `picture` keeps the stored avatar, a user who deletes their Google photo keeps the old URL (which may stop loading).
 - **Emails are case-sensitive.** Google normally sends lowercase, but nothing enforces it.
-- **No role management.** Roles are set by SQL. No admin route exists.
+- **No role management.** Roles are set by SQL. The admin routes that exist (`/api/admin/teams…`, in teams) use roles but can't change them.
+- **`HELPER` has no routes.** Nothing gates on it yet.
 - **No account deletion.** Deleting a user who has played is blocked by foreign keys without `ON DELETE` actions on `team`, `team_scan` and `team_selection`.
 - **`last_login_at` is written but never read.**
 
@@ -314,6 +330,7 @@ End to end in `internal/server` (real Postgres):
 | `internal/server/tests/auth_test.go` `TestTokenAndAuthErrors` | `SignInWithGoogle` called directly; `/api/me` with no token → `401 missing_token`, with a garbage token → `401 invalid_token`; `POST /api/me` → `405` |
 | `internal/server/tests/auth_test.go` `TestEmailInUse` | A sign-in whose email another account has → `reason=email_in_use` |
 | `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile` | A second sign-in with a new name and no picture: the team shows the new name and keeps the avatar |
+| `internal/server/tests/admin_test.go` `TestAdminGuard` | `RequireAdmin`: no token `401 missing_token`; a player `403 not_admin`; made `ADMIN` by SQL (token still says `PLAYER`) is let in; demoted by SQL is refused on the next request |
 | `internal/server/tests/teams_test.go` `newPlayer` helper | every team and team-state test creates its users through `SignInWithGoogle` |
 
 Not covered by any test yet: `401 user_not_found` over HTTP, and a database error on `/api/me`.

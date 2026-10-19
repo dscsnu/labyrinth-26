@@ -27,7 +27,7 @@ import (
 //	entry
 //	  mu          Mutex                writers to this team's state queue here
 //	  cur         atomic.Pointer[State] the current snapshot; readers load it lock-free
-//	  members     []uuid.UUID          the frozen roster events go to, cached on first publish (under mu)
+//	  members     []uuid.UUID          the roster events go to, cached on first publish, dropped by RosterChanged (under mu)
 //
 // A State is fixed size (bitsets, a selection and a fixed-array stack), so a
 // new snapshot is a plain struct copy.
@@ -37,8 +37,9 @@ type entry struct {
 	mu  sync.Mutex
 	cur atomic.Pointer[State]
 	// members are the user IDs the team's events go to, cached by publish
-	// the first time it sees the team IN_GAME, whose roster never changes
-	// again. Nil until then. Guarded by mu.
+	// the first time it sees the team IN_GAME, and dropped by RosterChanged
+	// when an admin removes a member. Nil until the next publish refills it.
+	// Guarded by mu.
 	members []uuid.UUID
 }
 
@@ -58,8 +59,10 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
 
 // Teams is what team state needs from the teams use case. A team only gets
-// state once it's IN_GAME, and an IN_GAME team's roster and status never go
-// back, so reading them without the team's lock is safe.
+// state once it's IN_GAME, and an IN_GAME team's status never goes back, so
+// reading it without the team's lock is safe. Its roster can only shrink, by
+// an admin's removal, which teams reports through RosterChanged; writers
+// re-check membership under the entry's lock (isMember).
 type Teams interface {
 	ForUser(userID uuid.UUID) (teams.Team, error)
 	ByID(teamID string) (teams.Team, bool)
@@ -257,7 +260,7 @@ func (s *Store) publish(e *entry, teamID string, st *State) {
 		for i, m := range t.Members {
 			members[i] = m.ID
 		}
-		if t.Status == teams.InGame { // frozen from here on: safe to keep
+		if t.Status == teams.InGame { // RosterChanged drops it on a removal
 			e.members = members
 		}
 	}

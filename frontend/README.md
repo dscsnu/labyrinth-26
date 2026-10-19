@@ -41,3 +41,17 @@ Apart from the event stream (`/api/events`, above), the browser never calls the 
 | `POST /play/scan` `{"waypoint_id"}` (`src/routes/play/scan/+server.ts`) | `POST /api/teams/me/state/scans` |
 | `PUT /play/selection` `{"shape"}` (`src/routes/play/selection/+server.ts`) | `PUT /api/teams/me/state/selection` |
 | `DELETE /play/selection` (same file) | `DELETE /api/teams/me/state/selection` |
+
+## The `/admin` page
+For organisers: removing a member from a team. The home page links to it when the session's role is `ADMIN`, but the link is only a convenience. **The backend decides who's an admin**, from the role in Postgres on every request (`403 not_admin` otherwise), because the session's role is as of sign-in and may be stale.
+
+`src/routes/admin/+page.server.ts`:
+- **load:** no session redirects to `/`. `GET /api/admin/teams` with the session token; a `403` becomes SvelteKit's `error(403, 'Admins only')`. Returns every team (`TeamSchema[]`).
+- **`remove` action** (form fields `team_id`, `user_id`, `new_leader`): `DELETE /api/admin/teams/{team_id}/members/{user_id}`, adding `?new_leader=` when given. Success returns `{removed}`; a backend error comes back as `fail(status, {code, message})`, shown in red.
+
+`src/routes/admin/+page.svelte`:
+- Every team with its code, status and members, filterable by code, team name or player name.
+- Each member has a **remove** button. The leader's has a required **new leader** picker listing the other members, since the backend refuses a leader's removal without one (`new_leader_required`). A team's only member shows "can't be removed" (the backend's `last_member`).
+- The form uses `use:enhance`; its submit function asks `confirm()` first and calls `cancel()` on "no". After a removal SvelteKit reloads the page's data, so the list is current. The page doesn't listen to events: it shows the teams as of the last load or action.
+
+What the removal does to players: the removed player's stream gets `no_team` (so `/team` shows "No team" and `/play` sends them to `/team`); the rest get the smaller `team`, and a started team keeps playing. See [`backend/internal/teams/README.md`, "Remove a member (admin)"](../backend/internal/teams/README.md#remove-a-member-admin-delete-apiadminteamsteam_idmembersuser_id).

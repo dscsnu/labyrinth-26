@@ -38,7 +38,8 @@ var (
 	ErrAlreadyInTeam = errors.New("already in a team")
 	// ErrTeamFull means the team already has Rules.Size members.
 	ErrTeamFull = errors.New("team is full")
-	// ErrTeamLocked means the team has started, so the roster can't change.
+	// ErrTeamLocked means the team has started, so players can't join or
+	// leave (an admin can still remove a member).
 	ErrTeamLocked = errors.New("team is no longer in the lobby")
 	// ErrNotLeader means only the leader may do this.
 	ErrNotLeader = errors.New("only the team leader can do this")
@@ -46,6 +47,17 @@ var (
 	ErrLeaderReady = errors.New("the leader starts the game instead of readying up")
 	// ErrNotAllReady means a non-leader member isn't ready.
 	ErrNotAllReady = errors.New("not every member is ready")
+	// ErrNotMember means the user isn't in that team (RemoveMember).
+	ErrNotMember = errors.New("that user is not in this team")
+	// ErrLastMember means removing the user would leave the team empty;
+	// RemoveMember never deletes a team.
+	ErrLastMember = errors.New("can't remove a team's only member")
+	// ErrNewLeaderRequired means the removed user leads the team, so a
+	// remaining member must be named as the new leader.
+	ErrNewLeaderRequired = errors.New("removing the leader needs a new leader from the remaining members")
+	// ErrInvalidNewLeader means the new leader isn't a remaining member, or
+	// one was named when the removed user isn't the leader.
+	ErrInvalidNewLeader = errors.New("the new leader must be a remaining member, and is only named when removing the leader")
 )
 
 // Create makes a new LOBBY team with userID as its leader and only member.
@@ -287,8 +299,9 @@ func equalPtr(a, b *string) bool {
 }
 
 // Start moves the leader's team from LOBBY to IN_GAME once every non-leader
-// member is ready. Any size from 1 (the leader alone) to Rules.Size may start. The roster is frozen
-// from then on: nobody can join, leave or change ready. After publishing the
+// member is ready. Any size from 1 (the leader alone) to Rules.Size may start.
+// From then on nobody can join, leave or change ready; the roster only
+// changes when an admin removes a member (RemoveMember). After publishing the
 // "team" event it calls Rules.OnStart (if set) with the started team, still
 // holding the team's lock; a rejected or failed start doesn't call it.
 func (s *Store) Start(ctx context.Context, userID uuid.UUID) (Team, error) {
@@ -333,6 +346,70 @@ func (s *Store) Start(ctx context.Context, userID uuid.UUID) (Team, error) {
 	s.publish(&next)
 	if s.rules.OnStart != nil {
 		s.rules.OnStart(next)
+	}
+	return next, nil
+}
+
+// RemoveMember is the admin's removal of userID from teamID, in any status
+// (LOBBY, IN_GAME or FINISHED). If userID leads the team, newLeader must name
+// a remaining member, who becomes leader; otherwise newLeader must be nil.
+// The team's only member can't be removed (ErrLastMember): this never deletes
+// a team. The removed user gets no_team and is free to create or join a team;
+// their past scans and casts stay with the team. For a team that has started,
+// it calls Rules.OnRosterChange (if set) after publishing, still holding the
+// team's lock.
+func (s *Store) RemoveMember(ctx context.Context, teamID string, userID uuid.UUID, newLeader *uuid.UUID) (Team, error) {
+	// 1. lock
+	e, t, err := s.lockTeam(teamID)
+	if err != nil {
+		return Team{}, err
+	}
+	defer e.mu.Unlock()
+
+	// 2. validate
+	isMember := func(id uuid.UUID) bool {
+		return slices.ContainsFunc(t.Members, func(m Member) bool { return m.ID == id })
+	}
+	if !isMember(userID) {
+		return Team{}, ErrNotMember
+	}
+	if len(t.Members) == 1 {
+		return Team{}, ErrLastMember
+	}
+	switch {
+	case t.LeaderID == userID && newLeader == nil:
+		return Team{}, ErrNewLeaderRequired
+	case t.LeaderID == userID && (*newLeader == userID || !isMember(*newLeader)):
+		return Team{}, ErrInvalidNewLeader
+	case t.LeaderID != userID && newLeader != nil:
+		return Team{}, ErrInvalidNewLeader
+	}
+
+	// 3. build
+	next := *t
+	next.Members = slices.DeleteFunc(slices.Clone(t.Members), func(m Member) bool { return m.ID == userID })
+	if newLeader != nil {
+		next.LeaderID = *newLeader
+	}
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.removeMember(ctx, t.ID, userID, newLeader, false)
+	}); err != nil {
+		return Team{}, s.reconcile(e, t.ID, err)
+	}
+
+	// 5. apply
+	s.mu.Lock()
+	delete(s.userTeam, userID)
+	s.mu.Unlock()
+	e.cur.Store(&next)
+	// 6. publish: the team to its members, no_team to the removed user, then
+	// (through OnRosterChange) whatever other use cases derive from a
+	// started team's roster.
+	s.publish(&next, userID)
+	if next.Status != Lobby && s.rules.OnRosterChange != nil {
+		s.rules.OnRosterChange(next)
 	}
 	return next, nil
 }

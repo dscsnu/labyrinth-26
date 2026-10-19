@@ -51,6 +51,29 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 	httpx.Error(w, http.StatusInternalServerError, "internal error")
 }
 
+// ErrNotAdmin means the caller's role isn't ADMIN.
+var ErrNotAdmin = errors.New("only an admin can do this")
+
+// RequireAdmin wraps next so it only runs for an ADMIN. It must run after
+// the auth middleware (it reads identity.UserID). The role is read from the
+// database on every request, never from the token, which can be up to
+// auth.token_ttl stale: a demoted admin loses access at once. 403 not_admin
+// otherwise; 401 user_not_found if the user no longer exists.
+func (a *API) RequireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, err := a.users.Get(r.Context(), identity.UserID(r))
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		if u.Role != RoleAdmin {
+			httpx.ErrorCode(w, http.StatusForbidden, "not_admin", ErrNotAdmin.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // me handles GET /api/me: it returns the signed-in user, read from the
 // database so the role is current even if it changed since sign-in. 401
 // user_not_found if the token's user no longer exists.

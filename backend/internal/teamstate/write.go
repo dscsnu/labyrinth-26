@@ -24,8 +24,11 @@ import (
 //
 // As AGENTS.md §6 allows, the checks that need no lock run first, labelled
 // "2. validate" before "1. lock": the content (static) and the team (an
-// IN_GAME team's status and roster are frozen). Checks against the State run
-// under the lock, labelled "2. validate" again.
+// IN_GAME team's status never changes). Membership and the State are checked
+// again under the lock, labelled "2. validate" again: an admin can remove a
+// member from a started team (teams.RemoveMember, then RosterChanged, which
+// takes the same lock), so a write either runs before the removal is
+// visible or is refused with ErrNotInTeam after it.
 //
 // The game flow. A member selects a shape, which always purges the team's
 // scan stack. There's no time limit, and any member may scan any number of
@@ -87,7 +90,9 @@ type ScanResult struct {
 }
 
 // inGameTeam returns userID's team if it's IN_GAME. Read without the team's
-// lock: once IN_GAME, a team's status and roster never change.
+// lock: once IN_GAME, a team's status never changes. Its roster can shrink
+// (an admin's teams.RemoveMember), so writers check isMember again under the
+// entry's lock.
 func (s *Store) inGameTeam(userID uuid.UUID) (teams.Team, error) {
 	t, err := s.teams.ForUser(userID)
 	if err != nil {
@@ -113,9 +118,13 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 		return View{}, err
 	}
 
-	// 1. lock
+	// 1. lock, then 2. validate membership again under it: an admin may
+	// have removed the user since the lookup.
 	e := s.lockTeam(t.ID)
 	defer e.mu.Unlock()
+	if !s.isMember(t.ID, userID) {
+		return View{}, ErrNotInTeam
+	}
 	cur := e.cur.Load()
 
 	// 3. build
@@ -147,9 +156,13 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 		return View{}, err
 	}
 
-	// 1. lock
+	// 1. lock, then 2. validate membership again under it: an admin may
+	// have removed the user since the lookup.
 	e := s.lockTeam(t.ID)
 	defer e.mu.Unlock()
+	if !s.isMember(t.ID, userID) {
+		return View{}, ErrNotInTeam
+	}
 	cur := e.cur.Load()
 
 	// 2. validate (state)
@@ -191,9 +204,13 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 		return ScanResult{}, err
 	}
 
-	// 1. lock
+	// 1. lock, then 2. validate membership again under it: an admin may
+	// have removed the user since the lookup.
 	e := s.lockTeam(t.ID)
 	defer e.mu.Unlock()
+	if !s.isMember(t.ID, userID) {
+		return ScanResult{}, ErrNotInTeam
+	}
 	cur := e.cur.Load()
 	now := s.now()
 
@@ -256,6 +273,25 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	s.publish(e, t.ID, &next)
 	res.State = s.view(t.ID, next)
 	return res, nil
+}
+
+// isMember reports whether userID is in teamID's current roster, read from
+// teams (lock-free). Called with the team's entry locked.
+func (s *Store) isMember(teamID string, userID uuid.UUID) bool {
+	t, ok := s.teams.ByID(teamID)
+	return ok && slices.ContainsFunc(t.Members, func(m teams.Member) bool { return m.ID == userID })
+}
+
+// RosterChanged is teams.Rules.OnRosterChange: an admin removed a member from
+// teamID after it started. It drops the entry's cached roster, so the next
+// team_state goes to the current members only. Memory-only (AGENTS.md §6):
+// the roster is teams' data, already saved; and no team_state is published,
+// since the state itself didn't change. Taking the entry's lock also orders
+// the removal against in-flight writes (isMember).
+func (s *Store) RosterChanged(teamID string) {
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+	e.members = nil
 }
 
 // PublishTeam sends teamID's current state to its members as "team_state",
