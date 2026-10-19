@@ -25,6 +25,8 @@ type Settings struct {
 	Teams TeamSettings `toml:"teams"`
 	// Game are the scanning rules.
 	Game GameSettings `toml:"game"`
+	// Spell are the coefficients for pattern damage calculation.
+	Spell SpellSettings `toml:"spell"`
 	// Auth are the sign-in and token timings.
 	Auth AuthSettings `toml:"auth"`
 	// Live are the event stream settings.
@@ -33,6 +35,16 @@ type Settings struct {
 	Server ServerSettings `toml:"server"`
 	// Storage are the write-through settings.
 	Storage StorageSettings `toml:"storage"`
+}
+
+// SpellSettings is config.toml's [spell] table.
+type SpellSettings struct {
+	// PerPoint is damage per waypoint in the pattern (one per member involved).
+	PerPoint float64 `toml:"per_point"`
+	// Per100m is damage per 100 m of estimated walking distance.
+	Per100m float64 `toml:"per_100m"`
+	// Walkability scales straight-line distance to estimated walking distance.
+	Walkability float64 `toml:"walkability"`
 }
 
 // TeamSettings is config.toml's [teams] table.
@@ -175,6 +187,9 @@ func (s Settings) validate() []error {
 	check(s.Game.ScanGrace.Duration >= 0, "game.scan_grace must not be negative")
 	check(s.Game.MaxPatternPoints >= 1 && s.Game.MaxPatternPoints <= s.Teams.Size,
 		"game.max_pattern_points must be 1-teams.size: each point needs a different member")
+	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")
+	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
+	check(s.Spell.Walkability >= 1.0, "spell.walkability must be at least 1.0")
 	check(s.Auth.TokenTTL.Duration > 0, "auth.token_ttl must be positive")
 	check(s.Auth.LoginCodeTTL.Duration > 0, "auth.login_code_ttl must be positive")
 	check(s.Auth.OAuthStateTTL.Duration >= time.Second, "auth.oauth_state_ttl must be at least 1s")

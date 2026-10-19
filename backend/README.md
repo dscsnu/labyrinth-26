@@ -37,9 +37,11 @@ internal/
   user/        players, helpers and admins
   teams/       teams of teams.size (6) players with a leader, lobby → game
   teamstate/   each team's selection, scan stack, visited waypoints, completed patterns and last cast; publishes team_state, including when a scan goes stale
+  spells/      offline geometry and damage formula: projection, TSP tour, convex hull; not imported by server
   server/      wires the use cases together; /healthz and the live event stream
   platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
 cmd/
+  spells/      offline damage generator: writes seeds/dev_2025_spells.sql
   loadtest/    load test (see below)
   docaudit/    checks doc comments
 ```

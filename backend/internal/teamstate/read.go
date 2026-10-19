@@ -188,6 +188,8 @@ type CastView struct {
 	CastAt time.Time `json:"cast_at"`
 	// AlreadyCompleted reports that the team had cast this pattern before.
 	AlreadyCompleted bool `json:"already_completed"`
+	// Damage is what the cast spell deals.
+	Damage int `json:"damage"`
 }
 
 // SelectionView is a Selection as JSON.
@@ -211,6 +213,14 @@ type StackScanView struct {
 	// ExpiresAt is when this scan goes stale (ScannedAt plus window plus
 	// grace); clients count down to it.
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// DamageRange is the minimum and maximum damage across a shape's patterns.
+type DamageRange struct {
+	// Min is the minimum damage across the shape's patterns.
+	Min int `json:"min"`
+	// Max is the maximum damage across the shape's patterns.
+	Max int `json:"max"`
 }
 
 // Game is what a client needs before playing, from GET /api/game/shapes: the
@@ -239,6 +249,8 @@ type GameShape struct {
 	Patterns int `json:"patterns"`
 	// Points is the distinct sizes of its patterns, ascending, e.g. [4].
 	Points []int `json:"points"`
+	// Damage is the min and max damage over the shape's patterns.
+	Damage DamageRange `json:"damage"`
 }
 
 // Game returns the shapes and timing rules for GET /api/game/shapes.
@@ -254,8 +266,23 @@ func newGame(a Atlas, r Rules) Game {
 	}
 	for i := range a.ShapeCount() {
 		sh := a.Shape(i)
+		pIndices := a.ShapePatterns(i)
 		sizes := map[int]bool{}
-		for _, p := range a.ShapePatterns(i) {
+		minD, maxD := 0, 0
+		if len(pIndices) > 0 {
+			minD = a.Pattern(pIndices[0]).Spell.Damage
+			maxD = minD
+			for _, p := range pIndices[1:] {
+				dmg := a.Pattern(p).Spell.Damage
+				if dmg < minD {
+					minD = dmg
+				}
+				if dmg > maxD {
+					maxD = dmg
+				}
+			}
+		}
+		for _, p := range pIndices {
 			sizes[a.Pattern(p).Waypoints.Len()] = true
 		}
 		points := make([]int, 0, len(sizes))
@@ -263,7 +290,13 @@ func newGame(a Atlas, r Rules) Game {
 			points = append(points, n)
 		}
 		slices.Sort(points)
-		g.Shapes[i] = GameShape{ID: sh.ID, Name: sh.Name, Patterns: len(a.ShapePatterns(i)), Points: points}
+		g.Shapes[i] = GameShape{
+			ID:       sh.ID,
+			Name:     sh.Name,
+			Patterns: len(pIndices),
+			Points:   points,
+			Damage:   DamageRange{Min: minD, Max: maxD},
+		}
 	}
 	return g
 }
@@ -329,7 +362,7 @@ func (s *Store) view(teamID string, st State) View {
 	if lc := st.LastCast; lc.Active {
 		p := c.Pattern(lc.Pattern)
 		v.LastCast = &CastView{Pattern: c.WaypointIDs(p.Waypoints), Shape: c.Shape(p.Shape).ID,
-			CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted}
+			CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage}
 	}
 	for _, sc := range st.Stack.Live(s.now(), s.rules.Limit()) {
 		v.Stack = append(v.Stack, StackScanView{

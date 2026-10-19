@@ -144,7 +144,7 @@
 <p>
     {#each game.shapes as s (s.id)}
         <button disabled={busy} onclick={() => selectShape(s.id)} style:font-weight={s.id === selected ? "bold" : "normal"}>
-            {s.name} ({s.points.join("/")} pts · {s.patterns} patterns){ts.shapes.includes(s.id) ? " ✓" : ""}
+            {s.name} ({s.points.join("/")} pts · {s.damage.min}–{s.damage.max} dmg · {s.patterns} patterns){ts.shapes.includes(s.id) ? " ✓" : ""}
         </button>
     {/each}
 </p>
@@ -195,7 +195,7 @@
 
 {#if ts.last_cast}
     <p>
-        Last cast: <b>{ts.last_cast.shape}</b> {ts.last_cast.pattern.join("-")} by {memberName(ts.last_cast.cast_by)}
+        Last cast: <b>{ts.last_cast.shape}</b> {ts.last_cast.pattern.join("-")} ({ts.last_cast.damage} dmg) by {memberName(ts.last_cast.cast_by)}
         at {new Date(ts.last_cast.cast_at).toLocaleTimeString()}{ts.last_cast.already_completed ? " (cast before)" : ""}
     </p>
 {/if}

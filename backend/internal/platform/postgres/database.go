@@ -47,13 +47,20 @@ func (db *DB) Close() { db.pool.Close() }
 var seedFiles embed.FS
 
 // SeedDev2025 loads the 2025 waypoints and patterns as placeholder content
-// for local development. Idempotent. Content is read at startup, so run it
-// while the backend is stopped.
+// for local development, followed by the precomputed spell damage values.
+// Idempotent. Content is read at startup, so run it while the backend is stopped.
 func (db *DB) SeedDev2025(ctx context.Context) error {
 	sql, err := seedFiles.ReadFile("seeds/dev_2025.sql")
 	if err != nil {
 		return err
 	}
-	_, err = db.pool.Exec(ctx, string(sql))
+	if _, err = db.pool.Exec(ctx, string(sql)); err != nil {
+		return err
+	}
+	spellsSQL, err := seedFiles.ReadFile("seeds/dev_2025_spells.sql")
+	if err != nil {
+		return err
+	}
+	_, err = db.pool.Exec(ctx, string(spellsSQL))
 	return err
 }

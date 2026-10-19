@@ -37,8 +37,8 @@ type Source struct {
 	Patterns []PatternSource
 }
 
-// PatternSource is one pattern as stored: its key, its shape's ID and its
-// waypoint IDs.
+// PatternSource is one pattern as stored: its key, its shape's ID, its
+// waypoint IDs and its damage.
 type PatternSource struct {
 	// ID is pattern.id.
 	ID int
@@ -46,6 +46,8 @@ type PatternSource struct {
 	Shape string
 	// Waypoints are the waypoint IDs, in any order.
 	Waypoints []string
+	// Damage is pattern.damage.
+	Damage int
 }
 
 // Rules are the atlas's settings from config.toml.
@@ -53,23 +55,6 @@ type Rules struct {
 	// MaxPatternPoints is the most waypoints in any pattern
 	// (game.max_pattern_points); content with a bigger pattern is refused.
 	MaxPatternPoints int
-	// Spell holds the spell model's coefficients. Not in config.toml yet:
-	// zero until the spell model is added (README.md, "Spells").
-	Spell SpellRules
-}
-
-// SpellRules are the coefficients that turn a pattern's geometry into its
-// spell's damage. Not wired yet: the spell model adds them to config.toml (a
-// [spell] table), settings.go and server.Build, and computes spells in Load.
-type SpellRules struct {
-	// PerPoint is damage per waypoint in the pattern (one per member who
-	// had to be there).
-	PerPoint float64
-	// Per100m is damage per 100 m of estimated walking distance (WalkM).
-	Per100m float64
-	// Walkability scales straight-line distance to walking distance
-	// (Geometry.WalkM = TourM × Walkability).
-	Walkability float64
 }
 
 // Load reads the content tables, validates them against rules, and builds the
@@ -83,11 +68,6 @@ func Load(ctx context.Context, pg *postgres.DB, log *slog.Logger, rules Rules) (
 	if err != nil {
 		return nil, fmt.Errorf("invalid atlas: %w", err)
 	}
-
-	// Spells are computed here, once, when they're added (README.md,
-	// "Spells"): each Waypoint.Position from its latitude and longitude, then
-	// each Pattern.Spell from its waypoints' positions and rules.Spell. Both
-	// live only in memory and are rebuilt from Postgres on every start.
 
 	log.Info("loaded atlas", "waypoints", len(a.waypoints), "shapes", len(a.shapes), "patterns", len(a.patterns))
 	return a, nil
@@ -140,11 +120,14 @@ func New(src Source, rules Rules) (*Atlas, error) {
 		if set.Len() > rules.MaxPatternPoints {
 			return nil, fmt.Errorf("pattern %d has %d waypoints; game.max_pattern_points is %d", p.ID, set.Len(), rules.MaxPatternPoints)
 		}
+		if p.Damage <= 0 {
+			return nil, fmt.Errorf("pattern %d: damage must be positive, got %d", p.ID, p.Damage)
+		}
 		if other, dup := a.patternBySet[set]; dup {
 			return nil, fmt.Errorf("patterns %d and %d use the same waypoints", a.patterns[other].ID, p.ID)
 		}
 
-		a.patterns = append(a.patterns, Pattern{ID: p.ID, Shape: shape, Waypoints: set})
+		a.patterns = append(a.patterns, Pattern{ID: p.ID, Shape: shape, Waypoints: set, Spell: Spell{Damage: p.Damage}})
 		a.patternByID[p.ID] = i
 		a.patternBySet[set] = i
 		a.shapePatterns[shape] = append(a.shapePatterns[shape], i)

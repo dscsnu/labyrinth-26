@@ -129,4 +129,10 @@ func TestGameShapes(t *testing.T) {
 	if len(shapes) != 5 || sq["patterns"] != float64(18) || len(sq["points"].([]any)) != 1 || sq["points"].([]any)[0] != float64(4) {
 		t.Fatalf("shapes: %v", shapes)
 	}
+	for id, s := range byID {
+		dmg, ok := s["damage"].(map[string]any)
+		if !ok || dmg["min"].(float64) <= 0 || dmg["max"].(float64) < dmg["min"].(float64) {
+			t.Fatalf("shape %s damage range invalid: %v", id, s["damage"])
+		}
+	}
 }

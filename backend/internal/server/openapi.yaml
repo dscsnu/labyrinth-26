@@ -563,12 +563,19 @@ components:
         max_pattern_points: { type: integer, example: 6 }
     GameShape:
       type: object
-      required: [id, name, patterns, points]
+      required: [id, name, patterns, points, damage]
       properties:
         id: { type: string, description: What PUT …/selection takes., example: square }
         name: { type: string, example: Square }
         patterns: { type: integer, description: How many valid patterns the type has., example: 18 }
         points: { type: array, items: { type: integer }, description: Distinct pattern sizes, ascending., example: [4] }
+        damage:
+          type: object
+          required: [min, max]
+          description: Minimum and maximum damage across the type's patterns.
+          properties:
+            min: { type: integer, example: 87 }
+            max: { type: integer, example: 125 }
 
     TeamState:
       type: object
@@ -606,13 +613,14 @@ components:
           items: { $ref: "#/components/schemas/StackScan" }
     Cast:
       type: object
-      required: [pattern, shape, cast_by, cast_at, already_completed]
+      required: [pattern, shape, cast_by, cast_at, already_completed, damage]
       properties:
         pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["1001", "1002", "1007", "1008"] }
         shape: { type: string, description: The pattern's type., example: square }
         cast_by: { type: string, format: uuid, description: The member whose scan completed the pattern. }
         cast_at: { type: string, format: date-time, description: When (the completing scan's time). }
         already_completed: { type: boolean, description: The team had cast this pattern before, so its progress didn't grow. }
+        damage: { type: integer, description: What the cast spell deals., example: 107 }
     StackScan:
       type: object
       required: [waypoint_id, user_id, scanned_at, expires_at]
