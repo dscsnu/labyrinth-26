@@ -249,6 +249,7 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	// A wrong scan can't complete: the set fits no pattern of the shape.
 	completed, isComplete := s.atlas.PatternFor(set)
 	isComplete = !wrong && isComplete && s.atlas.Pattern(completed).Shape == cur.Selection.Shape
+	var cast Cast
 	if isComplete {
 		res.Outcome, typ = OutcomePatternCompleted, SpellCast
 		res.Pattern = s.atlas.WaypointIDs(set)
@@ -257,14 +258,20 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 		next.Shapes = cur.Shapes.With(cur.Selection.Shape)
 		next.Selection = Selection{}
 		next.Stack = NewStack(s.rules.MaxPatternPoints)
+		// The cast's damage (× the multiplier) goes to the current boss.
+		cast = Cast{Pattern: completed, By: userID, At: now, AlreadyCompleted: res.AlreadyCompleted}
+		next.Boss, cast.Dealt, cast.Boss, cast.DefeatedBoss = deal(cur.Boss, s.atlas.Pattern(completed).Spell.Damage, s.bosses)
+		if cast.DefeatedBoss {
+			typ = BossDefeated
+		}
 		// Copy-on-write: never append to the current snapshot's slice.
-		next.Casts = append(slices.Clip(cur.Casts), Cast{Pattern: completed, By: userID, At: now, AlreadyCompleted: res.AlreadyCompleted})
+		next.Casts = append(slices.Clip(cur.Casts), cast)
 	}
 
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		if isComplete {
-			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, wrong, res.AlreadyCompleted)
+			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, wrong, cast, next.Boss)
 		}
 		return s.db.insertScan(ctx, t.ID, waypointID, userID, now, wrong)
 	}); err != nil {

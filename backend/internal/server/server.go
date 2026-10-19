@@ -13,6 +13,7 @@ import (
 
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/auth"
+	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/config"
 	"labyrinth/internal/platform/httpx"
 	"labyrinth/internal/platform/identity"
@@ -59,6 +60,11 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	if err != nil {
 		return nil, err
 	}
+	// So are the bosses every team fights.
+	theBosses, err := bosses.Load(ctx, db, log, bosses.Rules{Count: set.Game.Bosses})
+	if err != nil {
+		return nil, err
+	}
 
 	// stateStore is loaded after teams (it reads teams), but teams' OnStart
 	// and OnRosterChange need it. Build assigns it before returning, and no team can start
@@ -84,7 +90,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	authAPI := auth.NewAPI(cfg, g, tokens, codes, users, func(u user.User) {
 		teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL)
 	}, log)
-	stateStore, err = teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{
+	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 		Epoch:            epoch,
@@ -117,6 +123,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	teamsAPI.Routes(mux, authAPI.Authed)
 	teamsAPI.AdminRoutes(mux, admin)
 	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
+	bosses.NewAPI(theBosses).Routes(mux, authAPI.Authed)
 	qrAPI := qr.NewAPI(qr.New(cfg.QRSecret, qr.Rules{
 		Rotate:    set.QR.Rotate.Duration,
 		Tolerance: set.QR.Tolerance.Duration,

@@ -1,13 +1,15 @@
 <script lang="ts">
     import { ServerClock } from "#lib/game/serverClock.ts";
-    import { ScanResultSchema, TeamStateSchema, type Cast, type TeamState } from "#lib/types/Game.type.ts";
+    import { CastLogSchema, ScanResultSchema, TeamStateSchema, type Cast, type TeamState } from "#lib/types/Game.type.ts";
+    import { envelope, isNewer } from "#lib/types/Live.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
+    import { z } from "zod";
     import { goto } from "$app/navigation";
     import { onMount, untrack } from "svelte";
     import type { PageProps } from "./$types";
 
     let { data }: PageProps = $props();
-    let { user, game } = $derived(data);
+    let { user, game, bosses } = $derived(data);
 
     // Latest state from responses and events; until the first, the page load's.
     let live = $state<TeamState | undefined>(undefined);
@@ -16,13 +18,34 @@
     let connected = $state(false);
 
     // The cast log, newest first: loaded with the page, then each new
-    // last_cast (from a response or team_state) is prepended once.
+    // last_cast (from a response or team_state) is prepended once. When
+    // cast_count says the log is longer than ours (missed while
+    // disconnected), it's fetched again.
     let casts = $state<Cast[]>(untrack(() => data.casts));
+    let refetching = false;
+    const refetchCasts = async () => {
+        if (refetching) return;
+        refetching = true;
+        const res = await fetch("/play/casts").catch(() => null);
+        refetching = false;
+        if (res?.ok) casts = CastLogSchema.parse((await res.json()).payload);
+    };
+
+    // Every copy of the state, from the stream or a response, goes through
+    // here: it's kept only if newer than the one shown (by version; they can
+    // arrive in either order).
     const observe = (s: TeamState) => {
+        if (!isNewer(ts.version, s.version)) return;
         live = s;
         const lc = s.last_cast;
         if (lc && !casts.some((c) => c.cast_at === lc.cast_at)) casts = [lc, ...casts];
+        if (s.cast_count > casts.length) refetchCasts();
     };
+
+    // The boss being fought, from the static list by the state's serial, or
+    // null once every boss is defeated (or none are loaded).
+    let boss = $derived(ts.boss ? bosses.find((b) => b.serial === ts.boss!.serial) ?? null : null);
+    const bossName = (serial: number | null) => bosses.find((b) => b.serial === serial)?.name ?? `boss ${serial}`;
 
     // Time, measured the one canonical way: the server's clock as estimated
     // from the stream's hello event (ServerClock). There's no time limit; it
@@ -46,12 +69,25 @@
         events.onopen = () => (connected = true);
         events.onerror = () => (connected = false);
         // Every (re)connect opens with hello: re-measure the clock offset.
+        // Every event's data is {type, message}: type for moments, message
+        // for state.
         events.addEventListener("hello", (e) => {
-            clock.hello(JSON.parse(e.data).server_time);
+            clock.hello(envelope(z.object({ server_time: z.string() })).parse(JSON.parse(e.data)).message.server_time);
             now = clock.now();
         });
-        events.addEventListener("team", (e) => (team = TeamSchema.parse(JSON.parse(e.data))));
-        events.addEventListener("team_state", (e) => observe(TeamStateSchema.parse(JSON.parse(e.data))));
+        events.addEventListener("team", (e) => {
+            const next = envelope(TeamSchema).parse(JSON.parse(e.data)).message;
+            if (next.id !== team?.id || isNewer(team.version, next.version)) team = next;
+        });
+        events.addEventListener("team_state", (e) => {
+            const { type, message: next } = envelope(TeamStateSchema).parse(JSON.parse(e.data));
+            const fresh = isNewer(ts.version, next.version);
+            observe(next);
+            // A teammate's cast that finished a boss: say so on every phone.
+            if (fresh && type === "boss_defeated" && next.last_cast) {
+                message = { ok: true, text: `${bossName(next.last_cast.boss)} defeated!` };
+            }
+        });
         // /play needs a team: without one (never had one, or it's gone) the
         // player belongs on /team, where they can create or join one.
         events.addEventListener("no_team", () => {
@@ -106,9 +142,14 @@
         const result = ScanResultSchema.parse(json.payload);
         observe(result.state);
         const name = selectedShape?.name ?? selected;
+        const lc = result.state.last_cast;
         message =
             result.outcome === "pattern_completed"
-                ? { ok: true, text: `completed ${result.pattern?.join("-")}${result.already_completed ? " (again)" : ""}` }
+                ? {
+                      ok: true,
+                      text: `completed ${result.pattern?.join("-")}${result.already_completed ? " (again)" : ""}` +
+                          (lc && lc.boss !== null ? `: ${lc.dealt} dmg to ${bossName(lc.boss)}${lc.defeated_boss ? ", defeated!" : ""}` : ""),
+                  }
                 : result.outcome === "wrong_scan"
                   ? { ok: false, text: `${waypoint.trim()} doesn't match any ${name} pattern with the points already scanned. Restart the attempt.` }
                   : { ok: true, text: "scan added" };
@@ -128,6 +169,24 @@
 {/if}
 
 <h1>Play</h1>
+
+<h2>Boss {ts.bosses_defeated + (boss ? 1 : 0)}/{bosses.length}</h2>
+{#if boss && ts.boss}
+    <p>
+        <img src="/{boss.asset}" alt="" width="96" height="96" onerror={(e) => ((e.currentTarget as HTMLImageElement).hidden = true)} />
+        <b>{boss.name}</b>: {boss.description}
+    </p>
+    <p>
+        <progress max={boss.hp} value={boss.hp - ts.boss.damage}></progress>
+        {boss.hp - ts.boss.damage} / {boss.hp} HP
+        {#if ts.damage_multiplier !== 1}· damage ×{ts.damage_multiplier}{/if}
+    </p>
+{:else if bosses.length > 0}
+    <p><b>Every boss defeated!</b> Casts still count toward your patterns.</p>
+{:else}
+    <p>No bosses loaded.</p>
+{/if}
+
 
 <h2>1. Pick a type</h2>
 <p>
@@ -190,7 +249,7 @@
     <ol>
         {#each casts as c (c.cast_at)}
             <li>
-                <b>{c.shape}</b> {c.pattern.join("-")} ({c.damage} dmg) by {memberName(c.cast_by)},
+                <b>{c.shape}</b> {c.pattern.join("-")} ({c.damage} dmg{c.boss !== null ? `, ${c.dealt} to ${bossName(c.boss)}` : ""}{c.defeated_boss ? ", defeated it" : ""}) by {memberName(c.cast_by)},
                 {new Date(c.cast_at).toLocaleTimeString()}{c.already_completed ? " (cast before)" : ""}
             </li>
         {/each}

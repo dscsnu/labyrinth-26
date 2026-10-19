@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VersionSchema } from '#lib/types/Live.type.ts';
 
 export const TeamMemberSchema = z.object({
     id: z.string(),
@@ -16,6 +17,7 @@ export const TeamSchema = z.object({
     created_at: z.string(),
     started_at: z.string().nullable(),
     members: z.array(TeamMemberSchema),
+    version: VersionSchema,
 });
 
 export type TeamMember = z.infer<typeof TeamMemberSchema>;

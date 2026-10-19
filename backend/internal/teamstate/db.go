@@ -25,6 +25,14 @@ type teamRows struct {
 	selection *selectionRow // team_selection, if any
 	stack     []scanRow     // the stack: newest scans after the selection, oldest first
 	casts     []castRow     // every team_cast row, oldest first
+	boss      *bossRow      // team_boss, if the team has a row
+}
+
+// bossRow is a team_boss row: the team's progress through the bosses.
+type bossRow struct {
+	defeated   int
+	damage     int
+	multiplier float64
 }
 
 // castRow is a team_cast row.
@@ -33,6 +41,9 @@ type castRow struct {
 	castBy           uuid.UUID
 	castAt           time.Time
 	alreadyCompleted bool
+	dealt            int
+	bossSerial       int // 0 for NULL
+	defeatedBoss     bool
 }
 
 // selectionRow is a team_selection row.
@@ -91,16 +102,31 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 
 	// Every cast per team, oldest first: the cast log.
 	rows, err = d.pool.Query(ctx, `
-		SELECT team_id, pattern_id, cast_by, cast_at, already_completed
+		SELECT team_id, pattern_id, cast_by, cast_at, already_completed, dealt, COALESCE(boss_serial, 0), defeated_boss
 		FROM team_cast`+filter+`
 		ORDER BY team_id, id`, teamID)
 	if err != nil {
 		return nil, err
 	}
 	var cast castRow
-	if _, err := pgx.ForEachRow(rows, []any{&id, &cast.patternID, &cast.castBy, &cast.castAt, &cast.alreadyCompleted}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&id, &cast.patternID, &cast.castBy, &cast.castAt, &cast.alreadyCompleted,
+		&cast.dealt, &cast.bossSerial, &cast.defeatedBoss}, func() error {
 		t := get(id)
 		t.casts = append(t.casts, cast)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// Each team's progress through the bosses, if it has a row.
+	rows, err = d.pool.Query(ctx, "SELECT team_id, defeated, damage, multiplier FROM team_boss"+filter, teamID)
+	if err != nil {
+		return nil, err
+	}
+	var boss bossRow
+	if _, err := pgx.ForEachRow(rows, []any{&id, &boss.defeated, &boss.damage, &boss.multiplier}, func() error {
+		row := boss
+		get(id).boss = &row
 		return nil
 	}); err != nil {
 		return nil, err
@@ -160,12 +186,20 @@ func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uu
 // transaction, in order:
 //  1. INSERT team_scan: the scan itself
 //  2. INSERT team_pattern … ON CONFLICT DO NOTHING: the first completion only
-//  3. INSERT team_cast: every cast, repeats included (alreadyCompleted)
-//  4. DELETE team_selection: which also empties the stack
+//  3. INSERT team_cast: every cast, repeats included, with what it did to the
+//     bosses (c.Dealt, c.Boss, NULL when 0, c.DefeatedBoss)
+//  4. UPSERT team_boss: the team's progress after the cast (p.Defeated,
+//     p.Damage). A new row takes the multiplier's default (1); an existing
+//     one keeps its multiplier, which casts never change.
+//  5. DELETE team_selection: which also empties the stack
 //
 // wrong is always false here (a wrong scan can't complete), but it's passed
 // through for one uniform call.
-func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, wrong, alreadyCompleted bool) error {
+func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, wrong bool, c Cast, p BossProgress) error {
+	var bossSerial *int
+	if c.Boss != 0 {
+		bossSerial = &c.Boss
+	}
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, $5)",
@@ -178,8 +212,15 @@ func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string,
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed)
-			VALUES ($1, $2, $3, $4, $5)`, teamID, patternID, userID, at, alreadyCompleted); err != nil {
+			INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed, dealt, boss_serial, defeated_boss)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			teamID, patternID, userID, at, c.AlreadyCompleted, c.Dealt, bossSerial, c.DefeatedBoss); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO team_boss (team_id, defeated, damage) VALUES ($1, $2, $3)
+			ON CONFLICT (team_id) DO UPDATE SET defeated = EXCLUDED.defeated, damage = EXCLUDED.damage`,
+			teamID, p.Defeated, p.Damage); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, "DELETE FROM team_selection WHERE team_id = $1", teamID)

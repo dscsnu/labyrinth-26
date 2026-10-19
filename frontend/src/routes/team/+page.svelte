@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { envelope, isNewer } from "#lib/types/Live.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
     import { onMount } from "svelte";
     import type { PageProps } from "./$types";
@@ -20,8 +21,11 @@
         const events = new EventSource("/api/events");
         events.onopen = () => (connected = true);
         events.onerror = () => (connected = false);
+        // Events are {type, message}. Keep a team if it's another team than
+        // the one shown, or a newer copy of it (it may race the page load).
         events.addEventListener("team", (e) => {
-            live = TeamSchema.parse(JSON.parse(e.data));
+            const next = envelope(TeamSchema).parse(JSON.parse(e.data)).message;
+            if (next.id !== team?.id || isNewer(team.version, next.version)) live = next;
         });
         events.addEventListener("no_team", () => {
             live = null;

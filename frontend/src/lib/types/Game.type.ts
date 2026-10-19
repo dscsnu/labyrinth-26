@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { VersionSchema } from '#lib/types/Live.type.ts';
 
 export const DamageRangeSchema = z.object({
     min: z.number(),
@@ -37,8 +38,25 @@ export const CastSchema = z.object({
     cast_by: z.string(),
     cast_at: z.string(),
     already_completed: z.boolean(),
+    // The pattern's damage, and what it dealt to the boss (× the team's
+    // multiplier then, rounded; 0 once every boss is defeated).
     damage: z.number(),
+    dealt: z.number(),
+    // The serial of the boss it hit, or null if none.
+    boss: z.number().nullable(),
+    defeated_boss: z.boolean(),
 });
+
+// GET /api/game/bosses: every boss, serial 1 first. Static.
+export const BossSchema = z.object({
+    serial: z.number(),
+    name: z.string(),
+    // A key for the boss's image under static/, e.g. "bosses/1.png".
+    asset: z.string(),
+    description: z.string(),
+    hp: z.number(),
+});
+export const BossListSchema = z.array(BossSchema);
 
 export const TeamStateSchema = z.object({
     team_id: z.string(),
@@ -51,6 +69,15 @@ export const TeamStateSchema = z.object({
     stack: z.array(StackScanSchema),
     // A wrong scan is in the stack: scans are refused until a reselect.
     poisoned: z.boolean(),
+    // Progress through the bosses: the current one (by serial, with the
+    // damage dealt to it so far), or null once every boss is defeated.
+    bosses_defeated: z.number(),
+    boss: z.object({ serial: z.number(), damage: z.number() }).nullable(),
+    damage_multiplier: z.number(),
+    // How many casts the log holds; more than the client's copy means it
+    // missed some and should re-fetch GET /api/teams/me/casts.
+    cast_count: z.number(),
+    version: VersionSchema,
 });
 
 // GET /api/teams/me/casts: every cast, newest first.
@@ -68,5 +95,6 @@ export type DamageRange = z.infer<typeof DamageRangeSchema>;
 export type GameShape = z.infer<typeof GameShapeSchema>;
 export type Game = z.infer<typeof GameSchema>;
 export type Cast = z.infer<typeof CastSchema>;
+export type Boss = z.infer<typeof BossSchema>;
 export type TeamState = z.infer<typeof TeamStateSchema>;
 export type ScanResult = z.infer<typeof ScanResultSchema>;

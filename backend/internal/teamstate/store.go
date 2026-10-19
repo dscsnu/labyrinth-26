@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"labyrinth/internal/atlas"
+	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/teams"
@@ -20,6 +21,7 @@ import (
 // its own per-team lock.
 //
 //	atlas     Atlas                    static waypoints/shapes/patterns (atlas use case), no lock
+//	bosses    Bosses                   the static boss sequence (bosses use case), no lock
 //	clock     Clock                    the time scans and casts are stamped with
 //	Store.mu (RWMutex) guards:
 //	  states  map[teamID]*entry        created on a team's first write
@@ -85,6 +87,14 @@ type Atlas interface {
 	Pattern(i int) atlas.Pattern
 }
 
+// Bosses is what team state needs from the bosses use case: the static
+// sequence every team fights. It never changes after startup, so reading it
+// needs no lock.
+type Bosses interface {
+	Count() int
+	At(i int) bosses.Boss
+}
+
 // Rules are the scanning settings from config.toml.
 type Rules struct {
 	// MaxPatternPoints is the most waypoints in a pattern
@@ -105,13 +115,14 @@ type Rules struct {
 // Store is the team state use case: each team's selection, scan stack and
 // completions in memory, written through to Postgres.
 type Store struct {
-	rules Rules
-	db    db
-	atlas Atlas
-	game  Game // built once from the atlas and rules
-	teams Teams
-	hub   *live.Hub
-	log   *slog.Logger
+	rules  Rules
+	db     db
+	atlas  Atlas
+	bosses Bosses
+	game   Game // built once from the atlas and rules
+	teams  Teams
+	hub    *live.Hub
+	log    *slog.Logger
 
 	mu     sync.RWMutex
 	states map[string]*entry
@@ -125,14 +136,14 @@ func (s *Store) now() time.Time { return s.clock.Now() }
 
 // Load reads every team's stored state, checking it against a. Call once at
 // startup, after atlas.Load and teams.Load.
-func Load(ctx context.Context, pg *postgres.DB, a Atlas, t Teams, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
+func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
 	d := db{pool: pg.Pool()}
 	stored, err := d.selectTeams(ctx, "", rules.MaxPatternPoints+1)
 	if err != nil {
 		return nil, fmt.Errorf("load team state: %w", err)
 	}
 
-	s := &Store{rules: rules, db: d, atlas: a, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, clock: rules.Clock}
+	s := &Store{rules: rules, db: d, atlas: a, bosses: b, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, clock: rules.Clock}
 	if s.clock == nil {
 		s.clock = systemClock{}
 	}
@@ -153,7 +164,7 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, t Teams, hub *live.Hub,
 // no selection, an empty stack of the configured capacity, and the first
 // version of this process's epoch (seq 0).
 func (s *Store) emptyState() State {
-	return State{Stack: NewStack(s.rules.MaxPatternPoints), Version: live.Version{Epoch: s.rules.Epoch}}
+	return State{Stack: NewStack(s.rules.MaxPatternPoints), Boss: BossProgress{Multiplier: 1}, Version: live.Version{Epoch: s.rules.Epoch}}
 }
 
 // stateOf rebuilds a State from stored IDs, failing on any ID the atlas
@@ -184,7 +195,16 @@ func (s *Store) stateOf(rows *teamRows) (State, error) {
 		if !ok {
 			return st, fmt.Errorf("cast: unknown pattern %d", lc.patternID)
 		}
-		st.Casts = append(st.Casts, Cast{Pattern: p, By: lc.castBy, At: lc.castAt.UTC(), AlreadyCompleted: lc.alreadyCompleted})
+		st.Casts = append(st.Casts, Cast{Pattern: p, By: lc.castBy, At: lc.castAt.UTC(), AlreadyCompleted: lc.alreadyCompleted,
+			Dealt: lc.dealt, Boss: lc.bossSerial, DefeatedBoss: lc.defeatedBoss})
+	}
+	if bp := rows.boss; bp != nil {
+		// More bosses defeated than exist means game.bosses was lowered
+		// mid-event: refuse to start rather than guess.
+		if bp.defeated > s.bosses.Count() {
+			return st, fmt.Errorf("team_boss: %d bosses defeated, but game.bosses is %d", bp.defeated, s.bosses.Count())
+		}
+		st.Boss = BossProgress{Defeated: bp.defeated, Damage: bp.damage, Multiplier: bp.multiplier}
 	}
 	for _, sc := range rows.stack {
 		w, ok := s.atlas.WaypointIndex(sc.waypointID)
@@ -303,6 +323,11 @@ const (
 	// poisoned until a member selects again.
 	WrongScan live.EventType = "wrong_scan"
 	// SpellCast: a scan completed a pattern: last_cast is the new cast,
-	// cast_count went up, and the selection and stack were purged.
+	// cast_count went up, the selection and stack were purged, and the
+	// cast's damage went to the current boss.
 	SpellCast live.EventType = "spell_cast"
+	// BossDefeated: a SpellCast whose damage defeated the current boss:
+	// bosses_defeated went up and boss is the next one (or null after the
+	// last).
+	BossDefeated live.EventType = "boss_defeated"
 )

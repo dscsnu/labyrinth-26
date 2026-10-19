@@ -334,6 +334,28 @@ paths:
                       payload: { $ref: "#/components/schemas/Game" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
+  /api/game/bosses:
+    get:
+      tags: [game]
+      summary: The bosses every team fights
+      description: >-
+        Every boss in serial order: every team fights them in this order, the same for everyone and static while
+        the backend runs (`game.bosses` of them; empty before boss content is loaded). A team's progress is in
+        its `team_state` (`boss`, `bosses_defeated`, `damage_multiplier`).
+      responses:
+        "200":
+          description: The bosses, serial 1 first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: array
+                        items: { $ref: "#/components/schemas/Boss" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+
   /api/teams/me/state:
     get:
       tags: [game]
@@ -535,7 +557,7 @@ paths:
         | `hello` | stream | `HelloEvent` | `connected` |
         | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `resync` |
 
         ```
         retry: 3412
@@ -646,10 +668,12 @@ components:
         `snapshot` (on connect), `game_started` (right after the `team` event of type `started`),
         `shape_selected` (a spell attempt starts; the stack was purged), `selection_cleared`, `scan_added`,
         `wrong_scan` (the attempt is now `poisoned`), `spell_cast` (`last_cast` is the new cast, `cast_count`
-        went up, the selection and stack were purged), `resync` (reloaded after a failed write).
+        went up, the selection and stack were purged, its damage went to the current boss), `boss_defeated` (a
+        `spell_cast` that defeated the boss: `bosses_defeated` went up and `boss` is the next one, or null),
+        `resync` (reloaded after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
     Version:
       type: object
@@ -759,7 +783,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, cast_count, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, cast_count, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
@@ -795,6 +819,26 @@ components:
         poisoned:
           type: boolean
           description: A scan in the stack is wrong; scans are refused (`selection_poisoned`) until a reselect.
+        bosses_defeated: { type: integer, minimum: 0, description: How many bosses the team has defeated., example: 1 }
+        boss:
+          description: >-
+            The boss the team is fighting (by serial; its name, HP and asset are in `GET /api/game/bosses`) and
+            the damage dealt to it so far, always below its HP. Null once every boss is defeated, or when no boss
+            content is loaded.
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [serial, damage]
+              properties:
+                serial: { type: integer, minimum: 1, example: 2 }
+                damage: { type: integer, minimum: 0, example: 107 }
+        damage_multiplier:
+          type: number
+          exclusiveMinimum: 0
+          description: >-
+            What each cast's damage is multiplied by (then rounded) before it's dealt to the boss. 1 unless
+            something sets it.
+          example: 1
         cast_count:
           type: integer
           minimum: 0
@@ -806,14 +850,33 @@ components:
         version: { $ref: "#/components/schemas/Version" }
     Cast:
       type: object
-      required: [pattern, shape, cast_by, cast_at, already_completed, damage]
+      required: [pattern, shape, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss]
       properties:
         pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["1001", "1002", "1007", "1008"] }
         shape: { type: string, description: The pattern's type., example: square }
         cast_by: { type: string, format: uuid, description: The member whose scan completed the pattern. }
         cast_at: { type: string, format: date-time, description: When (the completing scan's time). }
         already_completed: { type: boolean, description: The team had cast this pattern before, so its progress didn't grow. }
-        damage: { type: integer, description: What the cast spell deals., example: 107 }
+        damage: { type: integer, description: "What the cast spell deals: the pattern's damage.", example: 107 }
+        dealt:
+          type: integer
+          minimum: 0
+          description: >-
+            The damage it dealt to a boss: `damage` × the team's multiplier at the time, rounded. 0 if every boss
+            was already defeated (or for casts from before bosses existed). A cast that defeats a boss loses the
+            rest: it never carries to the next boss.
+          example: 107
+        boss: { type: ["integer", "null"], description: The serial of the boss it hit, or null if none., example: 1 }
+        defeated_boss: { type: boolean, description: This cast defeated that boss. }
+    Boss:
+      type: object
+      required: [serial, name, asset, description, hp]
+      properties:
+        serial: { type: integer, minimum: 1, description: "Its place in the sequence: 1 is fought first.", example: 1 }
+        name: { type: string, example: Matthew Patel }
+        asset: { type: string, description: "A key the frontend resolves to the boss's image; not a URL.", example: bosses/1.png }
+        description: { type: string }
+        hp: { type: integer, minimum: 1, description: The damage a team must deal to defeat it., example: 200 }
     StackScan:
       type: object
       required: [waypoint_id, user_id, scanned_at, wrong]

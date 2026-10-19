@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"labyrinth/internal/atlas"
+	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
@@ -57,6 +58,10 @@ func (c *clock) at(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// seedBosses is how many bosses the 2025 dev seed has; with another
+// game.bosses the seed doesn't load, so these tests skip.
+const seedBosses = 7
+
 // seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
 // smaller game.max_pattern_points the seed can't load, so these tests skip.
 const seedMaxPoints = 4
@@ -70,6 +75,7 @@ const minTestTeam = 6
 // fixtureEnv is a seeded database with one team, its stores and a fake clock.
 type fixtureEnv struct {
 	atlas  *atlas.Atlas
+	bosses *bosses.Bosses
 	db     *postgres.DB
 	dbURL  string
 	teams  *teams.Store
@@ -103,6 +109,9 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	set := configtest.Settings(t)
 	if set.Game.MaxPatternPoints < seedMaxPoints {
 		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, set.Game.MaxPatternPoints)
+	}
+	if set.Game.Bosses != seedBosses {
+		t.Skipf("the 2025 seed has %d bosses; game.bosses is %d", seedBosses, set.Game.Bosses)
 	}
 	if set.Teams.Size < minTestTeam {
 		t.Skipf("teamstate tests need teams.size >= %d", minTestTeam)
@@ -150,8 +159,9 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	clk := &clock{t: start}
 	rules.Clock = clk
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: rules.MaxPatternPoints}))
-	st := pgtest.Must(teamstate.Load(ctx, db, at, ts, hub, pgtest.Quiet, rules))
-	return &fixtureEnv{atlas: at, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
+	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: set.Game.Bosses}))
+	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, rules))
+	return &fixtureEnv{atlas: at, bosses: bs, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
 }
 
 // tick returns n seconds: the time unit scenarios are written in. There's no
@@ -594,7 +604,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 	beforeView := f.view(t)
 	rules := f.rules
 	rules.Epoch = 2 // a new process
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, rules))
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, rules))
 	afterView := pgtest.Must(restarted.ForUser(f.users[0]))
 	// Version is memory-only: a restart starts again at seq 0, in the new
 	// epoch. Everything else reloads exactly.
@@ -822,7 +832,7 @@ func TestCastLog(t *testing.T) {
 		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&rows); err != nil || rows != 2 {
 		t.Fatalf("team_cast has %d rows (%v), want 2", rows, err)
 	}
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.teams, f.hub, pgtest.Quiet, f.rules))
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, f.rules))
 	before := pgtest.Must(json.Marshal(cs))
 	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.CastsForUser(f.users[2]))))
 	if string(before) != string(after) {

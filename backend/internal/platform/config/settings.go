@@ -68,6 +68,9 @@ type TeamSettings struct {
 type GameSettings struct {
 	// MaxPatternPoints is the most waypoints in a pattern.
 	MaxPatternPoints int `toml:"max_pattern_points"`
+	// Bosses is how many bosses every team fights: the boss table must hold
+	// exactly serials 1 to Bosses.
+	Bosses int `toml:"bosses"`
 }
 
 // QRSettings is config.toml's [qr] table.
@@ -195,6 +198,7 @@ func (s Settings) validate() []error {
 	check(s.Teams.CodeAttempts >= 1, "teams.code_attempts must be at least 1")
 	check(s.Game.MaxPatternPoints >= 1 && s.Game.MaxPatternPoints <= MaxPatternPoints,
 		"game.max_pattern_points must be 1-%d", MaxPatternPoints)
+	check(s.Game.Bosses >= 1, "game.bosses must be at least 1")
 	check(s.QR.Rotate.Duration > 0, "qr.rotate must be positive")
 	check(s.QR.Tolerance.Duration > 0, "qr.tolerance must be positive")
 	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")

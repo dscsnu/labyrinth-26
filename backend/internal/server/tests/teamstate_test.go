@@ -177,3 +177,58 @@ func TestGameShapes(t *testing.T) {
 		}
 	}
 }
+
+// TestGameBosses checks GET /api/game/bosses: it needs a token, is empty
+// before content is loaded, then lists the seed's game.bosses bosses in
+// serial order; and a cast over HTTP shows up in team_state as damage to
+// boss 1, with what the cast dealt in last_cast.
+func TestGameBosses(t *testing.T) {
+	e := setup(t)
+	expect(t, "no token", e.call("GET", "/api/game/bosses", player{}, nil), http.StatusUnauthorized, "missing_token")
+	list := func() []any {
+		req, _ := http.NewRequest("GET", e.backend.URL+"/api/game/bosses", nil)
+		req.Header.Set("Authorization", "Bearer "+e.newPlayer("viewer").token)
+		res := e.do(req)
+		var env struct {
+			Payload []any `json:"payload"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&env); err != nil || res.StatusCode != http.StatusOK {
+			t.Fatalf("bosses: %d %v", res.StatusCode, err)
+		}
+		return env.Payload
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("before seeding: %v", got)
+	}
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart() // content is read at startup
+	got := list()
+	if len(got) != e.cfg.Settings.Game.Bosses {
+		t.Fatalf("%d bosses, want game.bosses = %d", len(got), e.cfg.Settings.Game.Bosses)
+	}
+	for i, b := range got {
+		b := b.(map[string]any)
+		if b["serial"] != float64(i+1) || b["name"] == "" || b["asset"] == "" || b["hp"].(float64) <= 0 {
+			t.Fatalf("boss %d: %v", i, b)
+		}
+	}
+
+	ps := e.startedTeam("b")
+	r := e.call("GET", "/api/teams/me/state", ps[0], nil)
+	if boss := r.payload["boss"].(map[string]any); boss["serial"] != float64(1) || boss["damage"] != float64(0) ||
+		r.payload["bosses_defeated"] != float64(0) || r.payload["damage_multiplier"] != float64(1) {
+		t.Fatalf("before a cast: %v", r.payload)
+	}
+	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
+	for _, w := range []string{"1001", "1002", "1007", "1008"} {
+		r = e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"waypoint_id": w})
+	}
+	st := r.payload["state"].(map[string]any)
+	lc := st["last_cast"].(map[string]any)
+	if lc["boss"] != float64(1) || lc["dealt"] != lc["damage"] || lc["defeated_boss"] != false ||
+		st["boss"].(map[string]any)["damage"] != lc["dealt"] {
+		t.Fatalf("after a cast: %v", st)
+	}
+}

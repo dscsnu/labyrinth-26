@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"labyrinth/internal/atlas"
+	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres/pgtest"
@@ -65,7 +66,8 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 	}
 
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: set.Game.MaxPatternPoints}))
-	st := pgtest.Must(teamstate.Load(ctx, db, at, ts, hub, pgtest.Quiet, teamstate.Rules{
+	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: set.Game.Bosses}))
+	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 	}))

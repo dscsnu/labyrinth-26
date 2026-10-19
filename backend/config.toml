@@ -24,6 +24,11 @@ code_attempts = 10
 # number of a pattern's points. Allowed: 1 to 15 (the scan stack is a
 # fixed-size array: a pattern's points plus one wrong scan).
 max_pattern_points = 6
+# How many bosses every team fights, in serial order: the boss table must hold
+# exactly serials 1 to this, or startup is refused. (An empty table is allowed,
+# before content is loaded: then casts hit no boss.) A team that defeats them
+# all keeps casting, but its casts deal no more damage. Allowed: at least 1.
+bosses = 7
 
 [qr]
 # How often a waypoint's rotating QR changes, and thus how often the /qr

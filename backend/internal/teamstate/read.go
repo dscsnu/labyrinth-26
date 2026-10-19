@@ -1,6 +1,7 @@
 package teamstate
 
 import (
+	"math"
 	"slices"
 	"time"
 
@@ -31,6 +32,8 @@ type State struct {
 	// current snapshot's slice; it builds a new one (copy-on-write), so
 	// snapshots stay immutable.
 	Casts []Cast
+	// Boss is the team's progress through the bosses (bosses use case).
+	Boss BossProgress
 	// Version orders this team's snapshots (see live.Version): every apply
 	// sets the next one. Memory-only; it starts again, in a new Epoch, after a
 	// restart.
@@ -68,6 +71,51 @@ type Cast struct {
 	// AlreadyCompleted reports that the team had cast this pattern before,
 	// so its progress didn't grow.
 	AlreadyCompleted bool
+	// Dealt is the damage the cast dealt to a boss: the pattern's damage ×
+	// the team's multiplier at the time, rounded; 0 if every boss was
+	// already defeated (or the cast predates bosses).
+	Dealt int
+	// Boss is the serial of the boss it hit, or 0 if none.
+	Boss int
+	// DefeatedBoss reports that this cast finished Boss.
+	DefeatedBoss bool
+}
+
+// BossProgress is a team's progress through the bosses, which every team
+// fights in serial order. A value, so a State copy copies it.
+type BossProgress struct {
+	// Defeated is how many bosses the team has defeated; it's fighting the
+	// boss at index Defeated (serial Defeated+1), or none once Defeated is
+	// the boss count.
+	Defeated int
+	// Damage is what the team has dealt to its current boss so far. A cast
+	// that brings it to the boss's HP defeats the boss and resets it to 0:
+	// damage beyond the HP is lost, not carried to the next boss.
+	Damage int
+	// Multiplier is what each cast's damage is multiplied by before it's
+	// dealt (rounded to an integer). 1 unless something sets it; nothing
+	// does yet.
+	Multiplier float64
+}
+
+// deal applies a cast of the given damage to p, against bosses: the new
+// progress, the damage dealt (damage × multiplier, rounded), the serial of
+// the boss hit (0 if every boss is already defeated, in which case nothing
+// is dealt), and whether the cast defeated it.
+func deal(p BossProgress, damage int, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
+	if p.Defeated >= b.Count() {
+		return p, 0, 0, false
+	}
+	boss := b.At(p.Defeated)
+	dealt = int(math.Round(float64(damage) * p.Multiplier))
+	next = p
+	next.Damage += dealt
+	if next.Damage >= boss.HP {
+		next.Defeated++
+		next.Damage = 0 // the rest of this cast is lost
+		defeated = true
+	}
+	return next, dealt, boss.Serial, defeated
 }
 
 // Selection is the shape a team has chosen to attempt.
@@ -161,6 +209,15 @@ type View struct {
 	// Poisoned reports that a scan in the stack is wrong: nothing more can be
 	// scanned until the team selects again.
 	Poisoned bool `json:"poisoned"`
+	// BossesDefeated is how many bosses the team has defeated.
+	BossesDefeated int `json:"bosses_defeated"`
+	// Boss is the boss the team is fighting and the damage dealt to it so
+	// far, or null once every boss is defeated. The boss itself (name, HP,
+	// asset) is in GET /api/game/bosses.
+	Boss *BossView `json:"boss"`
+	// DamageMultiplier is what each cast's damage is multiplied by before
+	// it's dealt to the boss (rounded): 1 unless something sets it.
+	DamageMultiplier float64 `json:"damage_multiplier"`
 	// CastCount is how many casts are in the team's cast log, repeats
 	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
 	// it when this is more than its length plus the cast it just saw.
@@ -182,7 +239,22 @@ type CastView struct {
 	CastAt time.Time `json:"cast_at"`
 	// AlreadyCompleted reports that the team had cast this pattern before.
 	AlreadyCompleted bool `json:"already_completed"`
-	// Damage is what the cast spell deals.
+	// Damage is what the cast spell deals: the pattern's damage.
+	Damage int `json:"damage"`
+	// Dealt is the damage it dealt to a boss: Damage × the team's multiplier
+	// then, rounded; 0 if every boss was already defeated.
+	Dealt int `json:"dealt"`
+	// Boss is the serial of the boss it hit, or null if none.
+	Boss *int `json:"boss"`
+	// DefeatedBoss reports that this cast defeated that boss.
+	DefeatedBoss bool `json:"defeated_boss"`
+}
+
+// BossView is the boss a team is fighting, as JSON.
+type BossView struct {
+	// Serial is the boss's serial (see GET /api/game/bosses).
+	Serial int `json:"serial"`
+	// Damage is what the team has dealt to it so far, below its HP.
 	Damage int `json:"damage"`
 }
 
@@ -334,7 +406,11 @@ func (s *Store) Snapshot(userID uuid.UUID) (live.Event, bool) {
 func (s *Store) view(teamID string, st State) View {
 	c := s.atlas
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{},
-		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version}
+		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version,
+		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier}
+	if st.Boss.Defeated < s.bosses.Count() {
+		v.Boss = &BossView{Serial: s.bosses.At(st.Boss.Defeated).Serial, Damage: st.Boss.Damage}
+	}
 	for _, p := range st.Patterns.Indexes() {
 		v.Patterns = append(v.Patterns, c.WaypointIDs(c.Pattern(p).Waypoints))
 	}
@@ -360,8 +436,14 @@ func (s *Store) view(teamID string, st State) View {
 // castView turns a Cast into JSON, with its pattern's damage from the atlas.
 func (s *Store) castView(lc Cast) CastView {
 	p := s.atlas.Pattern(lc.Pattern)
-	return CastView{Pattern: s.atlas.WaypointIDs(p.Waypoints), Shape: s.atlas.Shape(p.Shape).ID,
-		CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage}
+	cv := CastView{Pattern: s.atlas.WaypointIDs(p.Waypoints), Shape: s.atlas.Shape(p.Shape).ID,
+		CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage,
+		Dealt: lc.Dealt, DefeatedBoss: lc.DefeatedBoss}
+	if lc.Boss != 0 {
+		serial := lc.Boss
+		cv.Boss = &serial
+	}
+	return cv
 }
 
 // CastsForUser returns userID's team's cast log, newest first, for
