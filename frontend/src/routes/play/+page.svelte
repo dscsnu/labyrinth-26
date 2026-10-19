@@ -1,5 +1,6 @@
 <script lang="ts">
     import { ScanGate } from "#lib/game/scanGate.ts";
+    import { ServerClock } from "#lib/game/serverClock.ts";
     import { ScanResultSchema, TeamStateSchema, type TeamState } from "#lib/types/Game.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
     import { goto } from "$app/navigation";
@@ -15,15 +16,18 @@
     let team = $state<Team | null>(null);
     let connected = $state(false);
 
-    // The countdown. The window comes from the backend (config.toml
-    // game.scan_window) and never changes while the page is open. gate isn't
+    // Time, measured the one canonical way: the server's clock as estimated
+    // from the stream's hello event (ServerClock). The countdown's deadline is
+    // the bottom scan's scanned_at + the window (config.toml game.scan_window),
+    // so every phone, reloaded or not, counts to the same moment. gate isn't
     // reactive, so version is bumped after each change.
+    const clock = new ServerClock();
     const gate = new ScanGate(untrack(() => data.game.scan_window_ms));
     let version = $state(0);
-    let now = $state(performance.now());
-    const observe = (s: TeamState, at = performance.now()) => {
+    let now = $state(clock.now());
+    const observe = (s: TeamState) => {
         live = s;
-        gate.observe(s.stack.length, at);
+        gate.observe(s.stack.length > 0 ? Date.parse(s.stack[0].scanned_at) : null);
         version++;
     };
 
@@ -48,17 +52,16 @@
     let message = $state<{ ok: boolean; text: string } | null>(null);
 
     onMount(() => {
-        // A stack already running when the page loaded: estimate how long ago
-        // it started from the bottom scan's server time (wall clocks may
-        // differ a little; the server's grace covers that).
-        if (data.state.stack.length > 0) {
-            const elapsed = Math.max(0, Date.now() - Date.parse(data.state.stack[0].scanned_at));
-            observe(data.state, performance.now() - elapsed);
-        }
-        const tick = setInterval(() => (now = performance.now()), 100);
+        observe(data.state); // a stack already running when the page loaded
+        const tick = setInterval(() => (now = clock.now()), 100);
         const events = new EventSource("/team/events");
         events.onopen = () => (connected = true);
         events.onerror = () => (connected = false);
+        // Every (re)connect opens with hello: re-measure the clock offset.
+        events.addEventListener("hello", (e) => {
+            clock.hello(JSON.parse(e.data).server_time);
+            now = clock.now();
+        });
         events.addEventListener("team", (e) => (team = TeamSchema.parse(JSON.parse(e.data))));
         events.addEventListener("team_state", (e) => observe(TeamStateSchema.parse(JSON.parse(e.data))));
         // /play needs a team: without one (never had one, or it's gone) the
@@ -109,7 +112,7 @@
     const scan = async (e: SubmitEvent) => {
         e.preventDefault();
         // The gate is the rule: after the window, nothing is sent.
-        if (!gate.canScan(performance.now())) {
+        if (!gate.canScan(clock.now())) {
             message = { ok: false, text: "time's up: select the type again to restart" };
             return;
         }
@@ -118,7 +121,7 @@
         busy = false;
         if (!res.ok) return (message = { ok: false, text: `${json.code}: ${json.message}` });
         const result = ScanResultSchema.parse(json.payload);
-        observe(result.state); // the first scan's 200 starts the countdown
+        observe(result.state); // a first scan's 200 sets the deadline from its scanned_at
         waypoint = "";
         message =
             result.outcome === "pattern_completed"

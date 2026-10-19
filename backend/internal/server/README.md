@@ -112,7 +112,7 @@ Every number below that comes from `config.toml` is shown with its current value
 - **`health`** handles `GET /healthz`: `db.Ping`; on error `503` `database unreachable`; otherwise `200` with `{"streams": Hub.Count()}`.
 - **`events`** handles `GET /api/events` and its alias: see [The event stream](#the-event-stream). It lives here because it carries events from every use case.
 - **`snapshot(userID)`** is the initial snapshots, in order. Game-wide snapshots are added at its end.
-- **`hello(now)`** is the `hello` event: `{"server_time": now}` in UTC.
+- **`hello(now)`** is the `hello` event: `{"server_time": now}` in UTC. Clients measure their clock offset from it; it carries nothing else (game rules come from `GET /api/game/shapes`).
 
 ### `*_test.go`
 End-to-end tests for every use case, because they need the whole app. See [The test harness](#the-test-harness).
@@ -187,7 +187,7 @@ The complete reference for the live stream: what it carries, what triggers each 
 1. `userID := identity.UserID(r)`.
 2. **`sub := a.Hub.Subscribe(userID)`**, then `defer sub.Close()`.
 3. **Initial snapshots** (`snapshot`), read from memory after subscribing:
-   - `hello`: `{"server_time": …}`, the server's clock, for clients to correct countdowns.
+   - `hello`: `{"server_time": …}`, the server's clock: the one way clients measure time against the game (see [Client integration](#client-integration), step 4).
    - `a.Teams.Snapshot(userID)`: `team` with the same JSON as `GET /api/teams/me`, or `no_team` with `{}` if the user is in no team (or the team failed to encode, which is logged).
    - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` with the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged). Sent for a `LOBBY` team too (an empty state).
    - Game-wide resources come last (none yet).
@@ -237,7 +237,7 @@ data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":n
 ### Events
 | Event | Data | Same JSON as | Schema (`openapi.yaml`) |
 |---|---|---|---|
-| `hello` | `{"server_time": …}`, the server's clock as the stream opened | none | `Hello` |
+| `hello` | `{"server_time": …}`, the server's clock as the stream opened; clients re-measure their clock offset from it on every connect | none | `Hello` |
 | `team` | the user's team | `GET /api/teams/me` | `Team` |
 | `no_team` | `{}` | (`GET /api/teams/me` is `404 not_in_team`) | none |
 | `team_state` | the user's team's game state, the `View` | `GET /api/teams/me/state` | `TeamState` |
@@ -374,7 +374,7 @@ What a client must do to use the stream as designed. **The frontend doesn't do a
 1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect.
 2. **Register events by name.** Keep a map from event name to its zod schema (`hello`, `team`, `no_team`, `team_state`, and each game-wide event as it's added), and keep the newest parsed snapshot of each. `no_team` clears both `team` and `team_state`. A game-wide event whose data is `null` means nothing is active.
 3. **Derive notifications from transitions.** Compare each snapshot with the one before it. Game-wide: a new `id`, or a status change. Spells, from `team_state`: `selection` set (a spell started), `stack` growing (another member scanned; `stack[].user_id` says who), `last_cast.cast_at` changing (a spell finished).
-4. **Correct the clock.** `clockOffset = hello.server_time − local time at receipt`; add it to local time when counting down to a server timestamp (`expires_at`, a quiz's `closes_at`). Countdowns are display only: the server publishes the change itself when the time comes.
+4. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`; `/play` already does this). On every `hello`: offset = `Date.parse(server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead, and the phone's own clock error cancels out. Every countdown is a deadline in server time from a state timestamp: the scan countdown is the stack's bottom `scanned_at` + **1 m** (`game.scan_window`) (`frontend/src/lib/game/scanGate.ts`; a quiz's `closes_at` would work the same way). Countdowns never change state: the server publishes the change itself when the time comes.
 5. **Move to `/api/events`.** In production the reverse proxy routes it straight to the backend, which reads the `labyrinth_token` cookie; keep the SvelteKit proxy only for local dev. Remove `GET /api/teams/me/events` once nothing uses it.
 6. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots. The responses to writes (`ScanResult.state`) may arrive before or after the matching event; both are full snapshots.
 
@@ -576,12 +576,13 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestUnroutedRequestsUseEnvelope` | `tests/teams_test.go` | `GET /api/nope` with and without a token → `404 not_found`; `DELETE /api/teams` → `405 method_not_allowed` |
 | `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), `member_already_scanned`, `pattern_completed`; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `scan_added` and locking the member; state after; reselect; clear |
 | `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, and `scan_window_ms`, `scan_grace_ms`, `max_pattern_points` equal to `config.toml`'s |
-| `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack, the square completed and its countdown reset |
-| `TestSimLastScanAtDeadlineWithinGrace` | `tests/simulation_test.go` | the last player at 300 ms each way (0.6 s round trip ≤ the 1 s simulated grace) sends 20 ms before their own countdown ends: `pattern_completed` |
+| `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack, the square completed and no countdown |
+| `TestSimLastScanAtDeadlineWithinGrace` | `tests/simulation_test.go` | the last player at 300 ms each way (0.6 s round trip ≤ the 1 s simulated grace) sends 20 ms before their own deadline (on a `hello`-corrected clock 300 ms behind the server's): `pattern_completed` |
 | `TestSimLatencyBeyondGraceLosesBottomScan` | `tests/simulation_test.go` | the same at 700 ms each way (1.4 s > 1 s): the bottom scan is stale on arrival, `scan_added` |
-| `TestSimGateClosesThenReselectOpens` | `tests/simulation_test.go` | once a countdown runs out the client sends nothing (0 requests); a reselect resets every client's countdown and the square can be scanned |
+| `TestSimGateClosesThenReselectOpens` | `tests/simulation_test.go` | once the deadline passes the client sends nothing (0 requests); a reselect empties the stack, ending every client's countdown, and the square can be scanned |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
-| `TestSimStaleScanReachesEveryone` | `tests/simulation_test.go` | real time: after one scan, with nobody acting, every player's stream gets a `team_state` with an empty stack once the scan is older than `simWindow` + `simGrace` (3 s), and every countdown resets |
+| `TestSimStaleScanReachesEveryone` | `tests/simulation_test.go` | real time: after one scan, with nobody acting, every player's stream gets a `team_state` with an empty stack once the scan is older than `simWindow` + `simGrace` (3 s), and no countdown runs |
+| `TestSimSkewedClocksShareTheDeadline` | `tests/simulation_test.go` | six phones with clocks off by −9, +7, 0, +4, −3 and +9 s (20 ms each way) re-measure their offset from `hello`: all compute the identical server-time deadline, and the phone 9 s fast lands its last scan 50 ms before its deadline: `pattern_completed` |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
 | `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
 | `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello`, its `server_time` within a second of now, then `no_team` |
@@ -591,6 +592,6 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 
-**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, its own event stream (each event delivered after the response delay, in order), and `scanGate`, a Go copy of the frontend's countdown (`frontend/src/lib/game/scanGate.ts`): start on the first non-empty stack seen, reset on an empty one, send nothing after `game.scan_window`. They shrink `game.scan_window` to 2 s (`simWindow`) and `game.scan_grace` to 1 s (`simGrace`) through `e.cfg.Settings` and `restart`, so each runs in seconds. The bound they check, response delay + request delay ≤ grace, is derived in `internal/teamstate/README.md` ("The client countdown and latency"). They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
+**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, its own event stream (each event delivered after the response delay, in order), an offset measured from `hello` delivered one response delay late (`simClient.offset`, a Go copy of `frontend/src/lib/game/serverClock.ts`), an optional phone clock error (`skew`), and `scanGate{window, deadline}`, a Go copy of the frontend's countdown (`frontend/src/lib/game/scanGate.ts`): deadline = the bottom scan's `scanned_at` + `game.scan_window` on the estimated server clock, none for an empty stack, send nothing after it. They shrink `game.scan_window` to 2 s (`simWindow`) and `game.scan_grace` to 1 s (`simGrace`) through `e.cfg.Settings` and `restart`, so each runs in seconds. The bound they check, response delay + request delay ≤ grace, is derived in `internal/teamstate/README.md` ("The client countdown and latency"). They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
 
 **Not covered here:** `/healthz` returning `503`, the heartbeat (tests wait at most 3 s; covered in `platform/live`), a slow stream being dropped over HTTP (covered in `platform/live`), `Hub.Close` on shutdown, the `Allow` header's value, and `main.go` itself (subcommands, lock ordering, lost-lock shutdown, sweep loop, timeouts).
