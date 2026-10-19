@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,14 +76,17 @@ func TestQRVerify(t *testing.T) {
 
 	expect(t, "expired", verify(qrToken("1001", time.Now().Unix()-100)), http.StatusConflict, "qr_expired")
 
-	// Flip the last signature character to a different, still-valid base64url
-	// one, so the signature can't match regardless of the real value.
-	last := fresh[len(fresh)-1]
+	// Change the signature's first character to a different base64url one.
+	// Every bit of a first character is signature data, so the bytes always
+	// change and the signature can't match. (Changing the last character
+	// doesn't always: it carries only 4 data bits; see qr's
+	// TestVerifyRejectsNonCanonicalSignature.)
+	dot := strings.IndexByte(fresh, '.')
 	replacement := byte('A')
-	if last == 'A' {
+	if fresh[dot+1] == 'A' {
 		replacement = 'B'
 	}
-	bad := fresh[:len(fresh)-1] + string(replacement)
+	bad := fresh[:dot+1] + string(replacement) + fresh[dot+2:]
 	expect(t, "tampered", verify(bad), http.StatusBadRequest, "invalid_qr")
 
 	expect(t, "empty body", e.call("POST", "/api/qr/verify", p, map[string]string{}), http.StatusBadRequest, "invalid_body")
