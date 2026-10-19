@@ -83,8 +83,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 - **Types:**
   - `State`: the in-memory per-team snapshot, made of `Selection`, `Stack`, `StackScan` and `Cast` (see [Data model: memory](#data-model-memory)).
   - `Cast`: one completed pattern (`Active`, `Pattern`, `By`, `At`, `AlreadyCompleted`), held as `State.LastCast`.
-  - `View`, `SelectionView`, `CastView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast`: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`.
-  - `Game`, `GameShape`: the JSON of `GET /api/game/shapes`.
+  - `View`, `SelectionView`, `CastView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast`: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`, `damage`.
+  - `Game`, `GameShape`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`).
 - **`Stack` methods** (all on values; none modifies the receiver):
   - `NewStack(cap)` is an empty stack (exported so tests can build one).
   - `Len()` counts scans, stale ones included.
@@ -424,7 +424,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "patterns": [["1003", "1004", "1005", "1006"]],
   "shapes": ["square"],
   "selection": {"shape": "triangle", "selected_by": "6f1c…", "selected_at": "2026-10-17T12:00:00Z"},
-  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false},
+  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 107},
   "stack": [
     {"waypoint_id": "1001", "user_id": "9a2b…", "scanned_at": "2026-10-17T12:00:01Z", "expires_at": "2026-10-17T12:01:06Z"},
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:05Z", "expires_at": "2026-10-17T12:01:10Z"}
@@ -432,7 +432,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 }
 ```
 - `selection` is `null` when nothing is selected.
-- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow). It stays until the next cast: selecting or clearing doesn't remove it.
+- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow), and `damage` is what the cast spell deals. It stays until the next cast: selecting or clearing doesn't remove it.
 - `stack` is the live scans, bottom (oldest) first; `[]` when empty. Stale correct scans are left out; wrong scans are included (with no flag telling them apart).
 - `expires_at` is `scanned_at` + 65 s (window + grace): when a correct scan goes stale on the server. One microsecond later the server publishes a `team_state` without it. The app's countdown doesn't use it (see [The client countdown and latency](#the-client-countdown-and-latency)); it's for display.
 
@@ -440,18 +440,18 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 ```json
 {
   "shapes": [
-    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3]},
-    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4]},
-    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4]},
-    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4]},
-    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3]}
+    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 65, "max": 106}},
+    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 86, "max": 131}},
+    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 93, "max": 131}},
+    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 84, "max": 129}},
+    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 60, "max": 113}}
   ],
   "scan_window_ms": 60000,
   "scan_grace_ms": 5000,
   "max_pattern_points": 6
 }
 ```
-- `shapes`: every selectable shape (the client's "types"), in index order (by ID). `id` is what `PUT …/selection` takes; `name` is for display; `patterns` is how many valid patterns the shape has; `points` is the distinct sizes of those patterns, ascending (a shape mixing 3- and 4-point patterns shows `[3, 4]`).
+- `shapes`: every selectable shape (the client's "types"), in index order (by ID). `id` is what `PUT …/selection` takes; `name` is for display; `patterns` is how many valid patterns the shape has; `points` is the distinct sizes of those patterns, ascending (a shape mixing 3- and 4-point patterns shows `[3, 4]`); `damage` is the minimum and maximum damage across the shape's patterns.
 - `scan_window_ms`: **1 m** (`game.scan_window`) in milliseconds: the client's countdown.
 - `scan_grace_ms`: **5 s** (`game.scan_grace`) in milliseconds: server-side tolerance only; clients don't add it.
 - `max_pattern_points`: **6** (`game.max_pattern_points`).

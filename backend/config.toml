@@ -35,6 +35,17 @@ scan_grace = "5s"
 # stack. Each waypoint needs a different member. Allowed: 1 to teams.size.
 max_pattern_points = 6
 
+[spell]
+# Base damage awarded per waypoint in the pattern (one per member involved).
+# Allowed: more than 0.
+per_point = 15
+# Damage awarded per 100 meters of estimated walking distance.
+# Allowed: 0 or more.
+per_100m = 2
+# Campus walkability multiplier (ratio of walking distance to straight-line distance).
+# Allowed: at least 1.0.
+walkability = 1.5
+
 [auth]
 # How long an access token (JWT) is valid. A role change applies at the next
 # sign-in, so at most this long after it's made. Allowed: more than 0.

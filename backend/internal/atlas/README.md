@@ -240,74 +240,37 @@ Measured once on the 2025 seed, by hand (the committed `BenchmarkLookups` runs o
 **Why not a lookup table.** The alternative is a precomputed map from every `(shape, subset of one of its patterns)` to `true`. On the seed that's **983** entries, and, measured once on the seed, a flat **15–19 ns**: hashing a key costs more than scanning at most 156 `uint64`s. So the loop stays. Revisit only if a shape grows to thousands of patterns.
 
 ## Spells
-The contract for the spell model, an open PR (branch `feat/damage-lookup`) to be redone against this package. Nothing below is computed on main yet; the types are in place and zero.
+What completing a pattern casts: the team's reward for it. **One per pattern**, held in memory on `Pattern.Spell.Damage`, read from Postgres once at startup, so a scan that completes a pattern reads it as a plain field access.
 
-### What a spell is
-What completing a pattern casts: the team's reward for it (the PR calls it damage or powerup). **One per pattern**, held in memory on `Pattern.Spell`, computed once at startup, so a scan that completes a pattern reads it as a field.
+### How it works
+- **Stored in Postgres:** `pattern.damage` (INTEGER, CHECK > 0, added in migration `0008_pattern_damage.sql`).
+- **Loaded once at startup:** `db.selectAtlas` selects `p.damage`, scanning it into `PatternSource.Damage`. `atlas.New` validates that `Damage > 0` (failing startup with an error naming the pattern if missing or non-positive) and stores it in `Pattern.Spell.Damage`.
+- **Zero runtime or startup computation:** The backend never runs geometric algorithms, tours, or formula math while serving or loading.
+- **Offline math and generator:** All geometric modeling (equirectangular projection around waypoints' mean, Traveling Salesperson closed loop tour, Andrew's monotone chain convex hull, and damage calibration) lives in `internal/spells/`. The offline CLI `cmd/spells` reads waypoints and patterns from Postgres and generates `seeds/dev_2025_spells.sql`.
+- **Seed execution:** `SeedDev2025` runs `seeds/dev_2025.sql` followed by `seeds/dev_2025_spells.sql`, ensuring freshly seeded databases have damage populated.
 
-### The structs already in place, unfilled
-| Where | What | Today |
+### The in-memory struct
+| Where | What | Meaning |
 |---|---|---|
-| `Waypoint.Position` | `Point{X, Y}`: metres east (X) and north (Y) of an origin | zero |
-| `Pattern.Spell` | `Spell{Damage int, Geometry Geometry}` | zero |
-| `Spell.Geometry` | `Geometry{Hull WaypointSet, TourM float64, WalkM float64}` | zero |
-| `Geometry.Convex(set)` | `Hull == set`; interior points are `pattern.Waypoints &^ Hull` | unused |
-| `Rules.Spell` | `SpellRules{PerPoint, Per100m, Walkability float64}` | zero; `server.Build` doesn't set it |
-
-Nothing reads any of them yet.
-
-### Where to compute them
-In `Load` in `store.go`, **at the marked comment, after `New` validates**:
-1. **Every `Waypoint.Position`** from latitude and longitude, with the PR's projection: equirectangular around the waypoints' mean. With the origin (lat₀, lon₀) = the mean of all waypoints' coordinates and *R* the Earth's radius (a named constant whose comment gives its value and why it isn't in config.toml, AGENTS.md §10):
-   - x (east) = *R* · (lon − lon₀) · cos(lat₀), in radians
-   - y (north) = *R* · (lat − lat₀)
-2. **Every `Pattern.Spell`** from its waypoints' positions and `rules.Spell`:
-   - `Hull`: the waypoints on the convex hull of their positions (collinear points on an edge: as the PR's hull tests decide)
-   - `TourM`: the shortest closed loop through every waypoint (out and back for 2, 0 for 1). With at most 6 points, every order can be tried: at most 5!/2 = 60 distinct loops
-   - `WalkM` = `TourM × Walkability`
-   - `Damage` = `PerPoint × points + Per100m × WalkM / 100` (the field comments on `SpellRules`); its rounding to `int` is stated here when the PR lands
-
-- **Pure maths** (projection, tour, hull) goes in a new supporting file **`geometry.go`**, listed in [How each file works](#how-each-file-works) per AGENTS.md §3. `Load` only loops and assigns.
-- **Immutable after `Load` returns.** Positions and spells are written into the slices before `Load` returns the `*Atlas`, never after; no lock is added.
-- Positions and spells live only in memory and are rebuilt from Postgres on every start ([Memory ↔ Postgres](#memory--postgres)).
+| `Pattern.Spell` | `Spell{Damage int}` | The pattern's damage value, loaded from `pattern.damage`. |
 
 ### Identity
-- Waypoints by **4-digit ID**; patterns by **`WaypointSet`** (in memory) or Postgres **`ID`**.
-- **Never short names** like `"T6"`: they aren't stored. They only appear inside display names (`"Tower 6 FruitShop (T6)"`).
-- If a string key is needed (logs, test tables, JSON), it's the pattern's sorted waypoint IDs joined by `-`: `strings.Join(a.WaypointIDs(p.Waypoints), "-")` → `"1001-1002-1007-1008"`.
+- Waypoints by **4-digit ID** (`1001`–`1011`); patterns by **`WaypointSet`** (in memory) or Postgres **`ID`**.
+- **Never short names** like `"T6"`: they aren't stored in pattern definitions. They only appear inside display names (`"Tower 6 FruitShop (T6)"`).
 
 ### Single source of truth
-- Coordinates come **only from Postgres** (`waypoint.latitude`, `waypoint.longitude`), never from a JSON file in the repo.
-- **No precomputed tables** in the repo: spells are computed at startup from what Postgres holds.
-- Why: the PR's copy of T6's longitude is `77.5777379378554`; the seed's is `77.57777379378554` (a dropped digit). That's about **3.5 m** east–west at campus latitude: exactly the drift a second copy causes.
+- Coordinates come **only from Postgres** (`waypoint.latitude`, `waypoint.longitude`).
+- Damage values come **only from Postgres** (`pattern.damage`).
+- No separate JSON files in the repository.
 
 ### Config
-The coefficients go in `config.toml`, following AGENTS.md §10's steps:
-1. A **`[spell]`** table, each key commented with what it does and its range:
-   - `per_point`: damage per waypoint in the pattern. Proposed range: ≥ 0.
-   - `per_100m`: damage per 100 m of `WalkM`. Proposed range: ≥ 0.
-   - `walkability`: straight-line to walking distance. Proposed range: ≥ 1 (a walk is never shorter than the straight line).
-2. A `Spell` struct in `internal/platform/config/settings.go` with `toml` tags, doc comments and range checks in `validate`.
-3. `validTOML` in `internal/platform/config/tests/settings_test.go`, and `TestLoadSettingsRejects` cases for out-of-range values.
-4. **Passed through `atlas.Rules.Spell`** in `server.Build`: `atlas.Rules{MaxPatternPoints: …, Spell: atlas.SpellRules{PerPoint: …, Per100m: …, Walkability: …}}`.
-5. Tests read the values with `configtest.Settings(t)`; docs write each value with its key. `internal/platform/README.md` and `internal/server/README.md` get the new keys.
+The generator's coefficients live in `config.toml` under `[spell]`:
+- `per_point` (**15**): base damage per waypoint in the pattern (one per member involved).
+- `per_100m` (**2**): damage per 100 m of walking distance.
+- `walkability` (**1.5**): straight-line to walking distance ratio.
 
-### Coverage
-- Spells are computed for **the patterns in the atlas**: **359** in the 2025 seed, sizes **3–4** (165 of 3 points, 194 of 4). Not for every subset of waypoints.
-- The code must still handle every allowed size, 1 to `game.max_pattern_points`: a **1-point** pattern has tour 0, so damage = `per_point`; a 2-point one goes out and back.
-
-### Tests expected
-In `internal/atlas/geometry_test.go` (pure functions) and `tests/store_test.go` (through `Load`):
-- **Geometry on the seed's real coordinates through `Load`**: the PR's hull-count and non-collinearity checks, 6-point sets included (built from seed waypoints, since the seed's patterns stop at 4).
-- **Every pattern has a non-zero spell** once computed (with config.toml's coefficients, skipping if they're zero).
-- Plus AGENTS.md §13's edges: a 1-point pattern (`Damage == per_point`), a 2-point one (tour = twice the distance), a collinear set.
-
-### Mapping from the PR
-| PR file | Here |
-|---|---|
-| `damage_lookup.json` | `Pattern.Spell`, computed in `Load` |
-| `labyrinth_point_combinations.json` | deleted: Postgres has the coordinates |
-| `geometry_test.go` | `internal/atlas/tests/geometry_test.go`, testing `geometry.go` through the exported API (`atlas.New` / `atlas.Load`) |
+### Drift prevention
+The test `TestPatternDamageDrift` in `internal/spells/tests/` recomputes every pattern's damage from database waypoints and coefficients and verifies it matches `pattern.damage`. Any change to coordinates or coefficients without re-running `go run ./cmd/spells` fails the test.
 | `DAMAGE_MODEL.md` | this section |
 
 Open questions are under [Not decided yet](#not-decided-yet).

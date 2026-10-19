@@ -284,3 +284,50 @@ func TestStartPublishesTeamState(t *testing.T) {
 		}
 	}
 }
+
+// TestCastPublishesDamageOverEventStream checks that after a completing scan,
+// team_state.last_cast arrives over the event stream with its positive damage value.
+func TestCastPublishesDamageOverEventStream(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+
+	_, ps := e.fullTeam("cast-damage")
+	for _, p := range ps[1:] {
+		expect(t, "ready", e.call("PUT", "/api/teams/me/ready", p, map[string]bool{"ready": true}), http.StatusOK, "")
+	}
+	expect(t, "start", e.call("POST", "/api/teams/me/start", ps[0], nil), http.StatusOK, "")
+
+	s := e.openStream(ps[0])
+	expectTeam(t, "initial team", s.next(t, "initial team"), len(ps))
+	s.nextState(t, "initial team_state")
+
+	expect(t, "select collinear", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "collinear"}), http.StatusOK, "")
+	s.nextState(t, "selection state")
+
+	// Pattern 1 has waypoints 1001, 1003, 1004.
+	scan := func(p player, waypoint string) {
+		r := e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint": waypoint})
+		expect(t, "scan "+waypoint, r, http.StatusOK, "")
+	}
+	scan(ps[0], "1001")
+	s.nextState(t, "first scan")
+	scan(ps[1], "1003")
+	s.nextState(t, "second scan")
+	scan(ps[2], "1004") // completes pattern 1
+
+	completedState := s.nextState(t, "cast completed state")
+	lastCast, ok := completedState.data["last_cast"].(map[string]any)
+	if !ok || lastCast == nil {
+		t.Fatalf("expected last_cast in team_state, got %v", completedState.data["last_cast"])
+	}
+	damage, ok := lastCast["damage"].(float64)
+	if !ok || damage <= 0 {
+		t.Fatalf("expected positive damage in last_cast, got %v", lastCast["damage"])
+	}
+	if int(damage) != 65 {
+		t.Fatalf("expected damage 65 for pattern 1, got %v", damage)
+	}
+}

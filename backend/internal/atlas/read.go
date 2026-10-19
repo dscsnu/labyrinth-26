@@ -15,19 +15,6 @@ type Waypoint struct {
 	Latitude float64 `json:"latitude"`
 	// Longitude is in degrees (WGS 84), from Postgres.
 	Longitude float64 `json:"longitude"`
-	// Position is the waypoint on a flat local plane, in metres, for
-	// geometry (distances, hulls). Zero until Load computes it: see
-	// README.md, "Spells".
-	Position Point `json:"-"`
-}
-
-// Point is a position on the campus plane: metres east (X) and north (Y) of
-// a fixed origin.
-type Point struct {
-	// X is metres east of the origin.
-	X float64
-	// Y is metres north of the origin.
-	Y float64
 }
 
 // Shape is a pattern type a team selects, e.g. "square" (the client calls it
@@ -48,36 +35,17 @@ type Pattern struct {
 	Shape int
 	// Waypoints is its set of waypoints.
 	Waypoints WaypointSet
-	// Spell is what completing it casts. Zero until Load computes it: see
-	// README.md, "Spells".
+	// Spell is what completing it casts, read from pattern.damage.
 	Spell Spell
 }
 
 // Spell is what a completed pattern casts: the team's reward for it (the
-// "powerup"). Computed once per pattern at startup from its waypoints'
-// positions, so reading it during a scan is a field access.
+// "powerup"). Read once at startup from pattern.damage, so reading it
+// during a scan is a plain field access.
 type Spell struct {
 	// Damage is what the spell deals.
 	Damage int
-	// Geometry is what Damage is computed from, kept for display and tests.
-	Geometry Geometry
 }
-
-// Geometry describes a pattern's waypoints as points on the campus plane.
-// Convexity is a property of the set, not of the order players scan in.
-type Geometry struct {
-	// Hull is the waypoints on the set's convex hull. Waypoints not in Hull
-	// are interior points.
-	Hull WaypointSet
-	// TourM is the shortest closed loop through all the waypoints, in
-	// straight-line metres (out and back for two points, 0 for one).
-	TourM float64
-	// WalkM is TourM scaled to estimated walking distance on campus.
-	WalkM float64
-}
-
-// Convex reports whether every waypoint of set is on the hull g describes.
-func (g Geometry) Convex(set WaypointSet) bool { return g.Hull == set }
 
 // Atlas is the static game content and its lookup tables. Never modified
 // after Load returns, so it's safe to read from any goroutine without locks.

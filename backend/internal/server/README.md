@@ -251,7 +251,8 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     "shape": "square",
     "cast_by": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b04",
     "cast_at": "2026-10-17T12:00:12Z",
-    "already_completed": false
+    "already_completed": false,
+    "damage": 107
   },
   "stack": [
     {"waypoint_id": "1001", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:10Z", "expires_at": "2026-10-17T12:06:15Z"},
@@ -266,7 +267,7 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
 | `patterns` | every completed pattern, each as its sorted waypoint IDs |
 | `shapes` | every shape with at least one completed pattern, in atlas index order |
 | `selection` | the shape being attempted, who selected it and when; `null` if none |
-| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, and `already_completed` (the team had cast that pattern before, so progress didn't grow). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`) |
+| `last_cast` | the newest cast: its pattern (sorted IDs), shape, who completed it, when, `already_completed` (the team had cast that pattern before, so progress didn't grow), and `damage` (what the cast spell deals). Kept until the next cast; a new selection or a clear keeps it. `null` if the team never cast (or only before migration `0007`) |
 | `stack` | the live scans, bottom (oldest) first. Stale correct scans are left out; wrong scans are included with nothing marking them |
 | `stack[].expires_at` | `scanned_at` + **65 s**: when that correct scan goes stale. At that moment the server publishes a new `team_state` without it (below) |
 

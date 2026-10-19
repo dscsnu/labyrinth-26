@@ -20,6 +20,10 @@ code_attempts = 10
 scan_window = "1m"
 scan_grace = "5s"
 max_pattern_points = 6
+[spell]
+per_point = 15
+per_100m = 2
+walkability = 1.5
 [auth]
 token_ttl = "12h"
 login_code_ttl = "2m"
@@ -64,6 +68,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s.Teams.Size != 6 || s.Game.ScanWindow.Duration != time.Minute || s.Game.ScanGrace.Duration != 5*time.Second || s.Game.MaxPatternPoints != 6 ||
+		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
 		t.Fatalf("decoded %+v", s)
 	}
@@ -85,6 +90,9 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"team too big":                      {"size = 6", "size = 17", "teams.size"},
 		"name longer than the database":     {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
 		"more pattern points than members":  {"max_pattern_points = 6", "max_pattern_points = 7", "max_pattern_points"},
+		"zero per_point":                    {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},
+		"negative per_100m":                 {"per_100m = 2", "per_100m = -1", "spell.per_100m must not be negative"},
+		"walkability under 1.0":             {"walkability = 1.5", "walkability = 0.5", "spell.walkability must be at least 1.0"},
 		"zero window":                       {`scan_window = "1m"`, `scan_window = "0s"`, "scan_window"},
 		"zero code attempts":                {"code_attempts = 10", "code_attempts = 0", "teams.code_attempts must be at least 1"},
 		"zero token ttl":                    {`token_ttl = "12h"`, `token_ttl = "0s"`, "auth.token_ttl must be positive"},

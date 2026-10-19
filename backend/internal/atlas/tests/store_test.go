@@ -39,9 +39,9 @@ func fixture() atlas.Source {
 		Waypoints: []atlas.Waypoint{{ID: "1001"}, {ID: "1002"}, {ID: "1003"}, {ID: "1004"}},
 		Shapes:    []atlas.Shape{{ID: "line"}, {ID: "triangle"}},
 		Patterns: []atlas.PatternSource{
-			{ID: 10, Shape: "triangle", Waypoints: []string{"1001", "1002", "1003"}},
-			{ID: 11, Shape: "line", Waypoints: []string{"1001", "1004"}},
-			{ID: 12, Shape: "triangle", Waypoints: []string{"1002", "1003", "1004"}},
+			{ID: 10, Shape: "triangle", Waypoints: []string{"1001", "1002", "1003"}, Damage: 50},
+			{ID: 11, Shape: "line", Waypoints: []string{"1001", "1004"}, Damage: 30},
+			{ID: 12, Shape: "triangle", Waypoints: []string{"1002", "1003", "1004"}, Damage: 50},
 		},
 	}
 }
@@ -127,8 +127,10 @@ func TestAtlasValidation(t *testing.T) {
 		"unknown waypoint":         {func(r *atlas.Source) { r.Patterns[0].Waypoints = []string{"1001", "9999"} }, "unknown waypoint"},
 		"unknown shape":            {func(r *atlas.Source) { r.Patterns[0].Shape = "hexagon" }, "unknown shape"},
 		"empty pattern":            {func(r *atlas.Source) { r.Patterns[0].Waypoints = nil }, "has no waypoints"},
+		"zero damage":              {func(r *atlas.Source) { r.Patterns[0].Damage = 0 }, "damage must be positive"},
+		"negative damage":          {func(r *atlas.Source) { r.Patterns[0].Damage = -10 }, "damage must be positive"},
 		"same waypoints": {func(r *atlas.Source) {
-			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 99, Shape: "line", Waypoints: []string{"1003", "1002", "1001"}})
+			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 99, Shape: "line", Waypoints: []string{"1003", "1002", "1001"}, Damage: 50})
 		}, "use the same waypoints"},
 		"pattern bigger than max_pattern_points": {func(r *atlas.Source) {
 			for i := range limit {
@@ -138,10 +140,10 @@ func TestAtlasValidation(t *testing.T) {
 			for i := range limit + 1 {
 				ids = append(ids, r.Waypoints[i].ID)
 			}
-			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 98, Shape: "line", Waypoints: ids})
+			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 98, Shape: "line", Waypoints: ids, Damage: 50})
 		}, "game.max_pattern_points is"},
 		"pattern inside a larger one of the same shape": {func(r *atlas.Source) {
-			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 97, Shape: "triangle", Waypoints: []string{"1001", "1002"}})
+			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 97, Shape: "triangle", Waypoints: []string{"1001", "1002"}, Damage: 50})
 		}, "would complete first"},
 		"too many waypoints": {func(r *atlas.Source) {
 			for i := range atlas.MaxWaypoints {
@@ -157,7 +159,7 @@ func TestAtlasValidation(t *testing.T) {
 			// The counts are checked before anything else, so the patterns'
 			// contents don't matter.
 			for i := range atlas.MaxPatterns {
-				r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 1000 + i, Shape: "line", Waypoints: []string{"1001"}})
+				r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 1000 + i, Shape: "line", Waypoints: []string{"1001"}, Damage: 50})
 			}
 		}, "fit in a PatternSet"},
 	}
@@ -195,7 +197,7 @@ func TestBitsets(t *testing.T) {
 func TestMixedSizesAllowedWhenNotNested(t *testing.T) {
 	rows := fixture()
 	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
-	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}})
+	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50})
 	if _, err := atlas.New(rows, atlas.Rules{MaxPatternPoints: maxPoints(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -255,8 +257,12 @@ func TestDevSeedLoads(t *testing.T) {
 	}
 	square := []string{"1001", "1002", "1007", "1008"}
 	set, _ := a.SetOf(square)
-	if p, ok := a.PatternFor(set); !ok || a.Shape(a.Pattern(p).Shape).ID != "square" {
+	p, ok := a.PatternFor(set)
+	if !ok || a.Shape(a.Pattern(p).Shape).ID != "square" {
 		t.Fatalf("%v should be a square", square)
+	}
+	if a.Pattern(p).Spell.Damage <= 0 {
+		t.Fatalf("pattern %d: damage = %d, want > 0", a.Pattern(p).ID, a.Pattern(p).Spell.Damage)
 	}
 	if w := a.Waypoint(0); w.ID != "1001" || w.Latitude == 0 || w.Longitude == 0 {
 		t.Fatalf("waypoint 0: %+v", w)

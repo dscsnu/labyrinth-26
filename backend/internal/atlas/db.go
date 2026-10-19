@@ -43,17 +43,18 @@ func (d db) selectAtlas(ctx context.Context) (Source, error) {
 
 	rows, err = d.pool.Query(ctx, `
 		SELECT p.id, p.shape_id, COALESCE(array_agg(pw.waypoint_id ORDER BY pw.waypoint_id)
-		                                  FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}')
+		                                  FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}'),
+		       p.damage
 		FROM pattern p
 		LEFT JOIN pattern_waypoint pw ON pw.pattern_id = p.id
-		GROUP BY p.id
+		GROUP BY p.id, p.damage
 		ORDER BY p.id`)
 	if err != nil {
 		return c, err
 	}
 	c.Patterns, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (PatternSource, error) {
 		var p PatternSource
-		return p, r.Scan(&p.ID, &p.Shape, &p.Waypoints)
+		return p, r.Scan(&p.ID, &p.Shape, &p.Waypoints, &p.Damage)
 	})
 	return c, err
 }
