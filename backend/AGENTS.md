@@ -60,7 +60,7 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 ```
 browser ──▶ SvelteKit server (frontend/) ──Bearer JWT──▶ Go backend (backend/) ──▶ Postgres
    ▲                                                      │  memory: atlas, teams, team state
-   └──────────────── SSE (/api/teams/me/events) ◀─────────┘
+   └────────────────────── SSE (/api/events) ◀────────────┘
 ```
 - **Go 1.26**, standard `net/http` with method patterns. **pgx/v5**. No ORM, no Supabase, no web framework.
 - **Auth:** Google OAuth with PKCE → one-time login code → the SvelteKit server swaps it for an **Ed25519 JWT** (`EdDSA`). The frontend verifies tokens locally with the public key.
@@ -193,13 +193,27 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
   - Static content (waypoints, shapes, patterns) is read at startup by `atlas`; edits need a restart.
 
 ## 9. Live events
-- **Events are full snapshots,** never diffs. A reconnecting client needs nothing replayed.
+**One stream per signed-in user** (`GET /api/events`) carries every event, at every scope. A client opens exactly one connection; nobody subscribes to channels.
+
+- **Three scopes, one way to publish each.** The publisher decides who gets an event, when it sends it:
+
+  | Scope | Publish with | Reaches | Examples |
+  |---|---|---|---|
+  | user | `hub.Send(userID, ev)` | that user's streams | `no_team` |
+  | team | `hub.Send` for each current member | the team's members | `team`, `team_state` |
+  | game | `hub.Broadcast(ev)` | every open stream | future quizzes, quick-time events |
+
+  Publish after apply and **while holding the entry lock** of the state the event shows, so one key's events stay in order. Read the recipients from memory at send time (or a frozen roster you cache, as teamstate does); never make clients resubscribe.
+- **Events are full snapshots,** never diffs, never one-off messages. A reconnecting client needs nothing replayed. A "notification" (a quiz opening, a spell starting) is the client noticing a change between snapshots: a new `id`, a status change, `selection` being set.
+- **Build each event once with `live.NewEvent`,** then send that value to every recipient: its wire bytes are shared, not re-encoded per stream.
 - **Name events after the resource,** in snake_case (`team`, `no_team`, `team_state`), with the same JSON as the matching GET route.
-- **Publish through the shared `*live.Hub`,** addressed by user ID, after apply and while holding the entry lock (so a key's events stay in order).
+- **Game-wide resources** send `null` when nothing is active, or an object with at least an `id`. A broadcast payload is identical for every viewer: anything that varies per player goes in that player's scope (a player's own answer), and a team's results go in `team_state` (§17).
+- **Hot events stay small.** Data that never changes while the backend runs (atlas content, game rules) comes from GET routes once and never rides in events.
 - **Never publish** on a rejection or no-op.
-- **A new event that must arrive on connect** needs a `Snapshot(userID)` on the use case, included in `server.events`.
-- **Changes caused by time passing** are published by the server when they happen (teamstate's `Clock` timers and `expire`), like any other change. See §17.
-- **The wire-level reference** (endpoint, format, every event, triggers, ordering, heartbeat, reconnection) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
+- **A new event that must arrive on connect** needs a snapshot on the use case (`Snapshot(userID)`, or `Snapshot()` for game scope), added to `server.snapshot` in its place: `hello`, then user and team events, then game-wide ones.
+- **The server owns time.** Changes caused by time passing are published by the server when they happen (a `Clock` timer, like teamstate's `expire`). Every stream opens with `hello {server_time}` so clients can correct countdowns; clients use timestamps only for display. See §17.
+- **Admin-triggered game events** read the caller's role from `user.Get`, never from the token (roles in tokens can be stale), then follow §6 with `Broadcast` as step 6.
+- **The wire-level reference** (endpoint, scopes, format, every event, triggers, ordering, heartbeat, reconnection, client integration) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
 
 ## 10. Configuration: no hard-coded constants
 - **Every tunable lives in `backend/config.toml`:** sizes, counts, durations, timeouts, limits, intervals. Never write `30 * time.Second` or `6` in a use case, a test, or a doc comment.
@@ -301,6 +315,7 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 - **Exactly one backend process per database.** The instance lock is taken before migrating, seeding or serving, and checked every `storage.instance_lock_check`; if it's lost, the backend shuts down.
 - **`migrate` and `seed` refuse to run while a backend serves** the same database. Stop it, run them, start it.
 - **Don't edit in-memory data with SQL while the backend runs.** Stop it, edit, start it.
+- **Every phone holds a stream open.** Raise the process's file-descriptor limit well above the expected players (one per stream, ~10,000 on game day), keep any proxy's idle timeout above `live.heartbeat`, and route `/api/events` straight to the backend rather than through the SvelteKit server (`internal/server/README.md`, "Endpoint").
 - **Never point `TEST_DATABASE_URL` at a real database:** tests drop schemas.
 - **⚠ Before the event:** QR verification must replace the raw waypoint ID in `POST /api/teams/me/state/scans`.
 
@@ -311,7 +326,7 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 4. Put every tunable in `config.toml` and pass it in through `Rules` (§10).
 5. Wire it in `server.Build`, in dependency order, and register its routes (§2, §4).
    Document every route in `internal/server/openapi.yaml` (§7).
-6. Add live events and a `Snapshot` if clients need its state live (§9). Per-team gameplay results don't get their own event: they go inside `team_state` (§17).
+6. Add live events and a snapshot if clients need its state live, choosing the scope (user, team or game) by who must see it (§9). Per-team gameplay results don't get their own event: they go inside `team_state` (§17). A game-wide resource (a quiz) gets its own game-scope event, and each team's result from it goes in `team_state`.
 7. Write the tests for every case in the README (§13).
 8. Finish the README to §12 depth, update `backend/README.md`, and run §14.
 
@@ -324,6 +339,7 @@ Everything a team's players see about the game loop reaches them as **one struct
 - **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them.
 - **The server publishes time-driven changes.** A correct scan going stale is a change like any other. The store arms a `Clock` timer for it and `expire` publishes the new `team_state`. Clients never infer such a change. They use timestamps (`scanned_at`, `expires_at`, `cast_at`) only for display and their own countdown (`frontend/src/lib/game/scanGate.ts`), never to change the state they show.
 - **Rejected or no-op requests publish nothing** (§6, §9). That includes `409`s, clearing with nothing selected, and an expiry timer that finds nothing stale.
+- **Spells are already in `team_state`.** Clients derive the spell lifecycle from it, with no event of its own: a spell **starts** when `selection` is set, members **finish their part** as `stack` grows (`stack[].user_id` says who, its length how many), and a spell **finishes** when `last_cast` changes (`cast_at`, `shape`, `cast_by`).
 
 **A new gameplay feature isn't done until it has all of these:**
 

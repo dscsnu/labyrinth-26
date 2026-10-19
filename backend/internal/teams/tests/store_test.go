@@ -68,7 +68,7 @@ func load(t testing.TB, db *postgres.DB) *teams.Store {
 func loadWithHub(t testing.TB, db *postgres.DB) (*teams.Store, *live.Hub) {
 	t.Helper()
 	set := configtest.Settings(t)
-	hub := live.NewHub(set.Live.SubscriberBuffer)
+	hub := live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer)
 	return pgtest.Must(teams.Load(context.Background(), db, hub, pgtest.Quiet, teams.Rules{
 		Size:          set.Teams.Size,
 		NameMaxLength: set.Teams.NameMaxLength,
@@ -245,8 +245,8 @@ func TestRefreshProfile(t *testing.T) {
 	if m := got.Members[0]; m.Name != "Renamed" || m.AvatarURL == nil || *m.AvatarURL != avatar {
 		t.Fatalf("member after refresh: %+v", m)
 	}
-	if ev := <-sub.C; ev.Name != "team" {
-		t.Fatalf("event %q", ev.Name)
+	if ev := <-sub.C; ev.Name() != "team" {
+		t.Fatalf("event %q", ev.Name())
 	}
 
 	same := avatar
@@ -254,7 +254,7 @@ func TestRefreshProfile(t *testing.T) {
 	s.RefreshProfile(ids[1], "Nobody", nil) // not in a team
 	select {
 	case ev := <-sub.C:
-		t.Fatalf("no-op refresh published %s", ev.Name)
+		t.Fatalf("no-op refresh published %s", ev.Name())
 	default:
 	}
 }
@@ -270,7 +270,7 @@ func TestStartCallsOnStart(t *testing.T) {
 		t.Skipf("needs teams.size >= %d", minStartTeam)
 	}
 	users := newUsers(t, db, set.Teams.Size)
-	hub := live.NewHub(set.Live.SubscriberBuffer)
+	hub := live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer)
 
 	var s *teams.Store
 	var sub *live.Subscription // opened just before the start, so it holds only the start's events
@@ -291,8 +291,8 @@ func TestStartCallsOnStart(t *testing.T) {
 			case last = <-sub.C:
 			default:
 			}
-			if last.Name != "team" || !strings.Contains(string(last.Data), `"IN_GAME"`) {
-				t.Errorf("OnStart: last event %q %s, want the started team", last.Name, last.Data)
+			if last.Name() != "team" || !strings.Contains(string(last.Data()), `"IN_GAME"`) {
+				t.Errorf("OnStart: last event %q %s, want the started team", last.Name(), last.Data())
 			}
 			calls = append(calls, team)
 		},

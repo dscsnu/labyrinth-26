@@ -28,6 +28,7 @@ import (
 //	  mu          Mutex                writers to this team's state queue here
 //	  cur         atomic.Pointer[State] the current snapshot; readers load it lock-free
 //	  stopExpiry  func() bool          cancels the team's one pending expiry timer (under mu)
+//	  members     []uuid.UUID          the frozen roster events go to, cached on first publish (under mu)
 //
 // A State is fixed size (bitsets, a selection and a fixed-array stack), so a
 // new snapshot is a plain struct copy.
@@ -40,6 +41,10 @@ type entry struct {
 	// stopExpiry cancels the pending expiry timer (scheduleExpiry), or is nil
 	// if none is pending. Guarded by mu.
 	stopExpiry func() bool
+	// members are the user IDs the team's events go to, cached by publish
+	// the first time it sees the team IN_GAME, whose roster never changes
+	// again. Nil until then. Guarded by mu.
+	members []uuid.UUID
 }
 
 // Clock is where the store gets time from: the current time, and timers for
@@ -259,7 +264,7 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 		var st State
 		if st, err = s.stateOf(rows); err == nil {
 			e.cur.Store(&st)
-			s.publish(teamID, &st)
+			s.publish(e, teamID, &st)
 			s.scheduleExpiry(e, teamID, &st)
 			return writeErr
 		}
@@ -315,28 +320,44 @@ func (s *Store) expire(teamID string) {
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	s.publish(teamID, &next)
+	s.publish(e, teamID, &next)
 	s.scheduleExpiry(e, teamID, &next)
 }
 
-// publish sends a team's state to its members as a "team_state" event.
-func (s *Store) publish(teamID string, st *State) {
-	t, ok := s.teams.ByID(teamID)
-	if !ok {
-		return
+// publish sends a team's state to its members as a "team_state" event. The
+// caller holds e.mu. The roster comes from e's cache, filled from teams on
+// the first publish of an IN_GAME team, so a publish normally reads nothing
+// outside the entry.
+func (s *Store) publish(e *entry, teamID string, st *State) {
+	members := e.members
+	if members == nil {
+		t, ok := s.teams.ByID(teamID)
+		if !ok {
+			return
+		}
+		members = make([]uuid.UUID, len(t.Members))
+		for i, m := range t.Members {
+			members[i] = m.ID
+		}
+		if t.Status == teams.InGame { // frozen from here on: safe to keep
+			e.members = members
+		}
 	}
 	ev, err := s.event(teamID, st)
 	if err != nil {
 		s.log.Error("encode team state event", "team_id", teamID, "error", err)
 		return
 	}
-	for _, m := range t.Members {
-		s.hub.Send(m.ID, ev)
+	for _, id := range members {
+		s.hub.Send(id, ev)
 	}
 }
 
 // event encodes a team's state as a "team_state" live event.
 func (s *Store) event(teamID string, st *State) (live.Event, error) {
 	data, err := json.Marshal(s.view(teamID, *st))
-	return live.Event{Name: "team_state", Data: data}, err
+	if err != nil {
+		return live.Event{}, err
+	}
+	return live.NewEvent("team_state", data), nil
 }

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"labyrinth/internal/auth"
 )
 
 // sseEvent is one parsed server-sent event.
@@ -18,8 +20,10 @@ type sseEvent struct {
 	data map[string]any
 }
 
-// stream is an open event stream being read in the background.
+// stream is an open event stream being read in the background. Events are
+// routed by name: hello, team_state, and the rest (team, no_team).
 type stream struct {
+	hellos chan sseEvent // hello
 	events chan sseEvent // team / no_team
 	states chan sseEvent // team_state
 	cancel context.CancelFunc
@@ -29,22 +33,29 @@ type stream struct {
 }
 
 // seen returns the names of every event received so far, in order, across
-// both channels.
+// all channels.
 func (s *stream) seen() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.names)
 }
 
-// openStream connects p to the team event stream and parses events in the
-// background.
+// openStream connects p to the event stream with its Bearer token and parses
+// events in the background.
 func (e *env) openStream(p player) *stream {
+	e.t.Helper()
+	return e.openStreamAt("/api/events", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+p.token) })
+}
+
+// openStreamAt connects to the event stream at path, letting auth add the
+// credentials, and parses events in the background.
+func (e *env) openStreamAt(path string, auth func(*http.Request)) *stream {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	e.t.Cleanup(cancel)
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", e.backend.URL+"/api/teams/me/events", nil)
-	req.Header.Set("Authorization", "Bearer "+p.token)
+	req, _ := http.NewRequestWithContext(ctx, "GET", e.backend.URL+path, nil)
+	auth(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		e.t.Fatal(err)
@@ -53,8 +64,9 @@ func (e *env) openStream(p player) *stream {
 		e.t.Fatalf("stream: %d %s", res.StatusCode, res.Header.Get("Content-Type"))
 	}
 
-	s := &stream{events: make(chan sseEvent, 64), states: make(chan sseEvent, 64), cancel: cancel}
+	s := &stream{hellos: make(chan sseEvent, 64), events: make(chan sseEvent, 64), states: make(chan sseEvent, 64), cancel: cancel}
 	go func() {
+		defer close(s.hellos)
 		defer close(s.events)
 		defer close(s.states)
 		defer res.Body.Close()
@@ -71,10 +83,14 @@ func (e *env) openStream(p player) *stream {
 				s.mu.Lock()
 				s.names = append(s.names, name)
 				s.mu.Unlock()
-				if name == "team_state" {
-					s.states <- sseEvent{name: name, data: data}
-				} else {
-					s.events <- sseEvent{name: name, data: data}
+				ev := sseEvent{name: name, data: data}
+				switch name {
+				case "hello":
+					s.hellos <- ev
+				case "team_state":
+					s.states <- ev
+				default:
+					s.events <- ev
 				}
 			}
 		}
@@ -179,9 +195,11 @@ func TestTeamEventStream(t *testing.T) {
 func TestEventStreamAuthAndCleanup(t *testing.T) {
 	e := setup(t)
 
-	req, _ := http.NewRequest("GET", e.backend.URL+"/api/teams/me/events", nil)
-	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("no token: %d", res.StatusCode)
+	for _, path := range []string{"/api/events", "/api/teams/me/events"} {
+		req, _ := http.NewRequest("GET", e.backend.URL+path, nil)
+		if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s, no token: %d", path, res.StatusCode)
+		}
 	}
 
 	streams := func() float64 {
@@ -278,9 +296,60 @@ func TestStartPublishesTeamState(t *testing.T) {
 		if st.data["team_id"] != teamID || len(st.data["waypoints"].([]any)) != 0 || len(st.data["stack"].([]any)) != 0 || st.data["selection"] != nil {
 			t.Fatalf("member %d: team_state after start %v, want empty", i, st.data)
 		}
-		want := []string{"team", "team_state", "team", "team_state"}
+		want := []string{"hello", "team", "team_state", "team", "team_state"}
 		if got := s.seen(); !slices.Equal(got, want) {
 			t.Fatalf("member %d: events %v, want %v", i, got, want)
 		}
+	}
+}
+
+// TestStreamStartsWithHello checks that every stream opens with hello, whose
+// server_time is the server's clock, before the user's own snapshot.
+func TestStreamStartsWithHello(t *testing.T) {
+	e := setup(t)
+	before := time.Now()
+	s := e.openStream(e.newPlayer("p"))
+	expectNoTeam(t, "initial", s.next(t, "initial"))
+	h := <-s.hellos
+	at, err := time.Parse(time.RFC3339Nano, h.data["server_time"].(string))
+	if err != nil || at.Before(before.Add(-time.Second)) || at.After(time.Now().Add(time.Second)) {
+		t.Fatalf("hello server_time %v (%v), want about now", h.data["server_time"], err)
+	}
+	if got := s.seen(); !slices.Equal(got, []string{"hello", "no_team"}) {
+		t.Fatalf("events %v, want [hello no_team]", got)
+	}
+}
+
+// TestStreamCookieAndAlias checks that /api/events accepts the token cookie
+// a browser's EventSource sends, that no other route does, and that the
+// deprecated /api/teams/me/events alias serves the same stream with Bearer.
+func TestStreamCookieAndAlias(t *testing.T) {
+	e := setup(t)
+	p := e.newPlayer("p")
+	cookie := &http.Cookie{Name: auth.TokenCookie, Value: p.token}
+
+	s := e.openStreamAt("/api/events", func(r *http.Request) { r.AddCookie(cookie) })
+	expectNoTeam(t, "cookie stream", s.next(t, "cookie stream"))
+
+	req, _ := http.NewRequest("GET", e.backend.URL+"/api/teams/me", nil)
+	req.AddCookie(cookie)
+	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/teams/me with only the cookie: %d, want 401", res.StatusCode)
+	}
+	req, _ = http.NewRequest("GET", e.backend.URL+"/api/teams/me/events", nil)
+	req.AddCookie(cookie)
+	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("alias with only the cookie: %d, want 401", res.StatusCode)
+	}
+	req, _ = http.NewRequest("GET", e.backend.URL+"/api/events", nil)
+	req.AddCookie(&http.Cookie{Name: auth.TokenCookie, Value: "not-a-token"})
+	if res := e.do(req); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad cookie: %d, want 401", res.StatusCode)
+	}
+
+	alias := e.openStreamAt("/api/teams/me/events", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+p.token) })
+	expectNoTeam(t, "alias stream", alias.next(t, "alias stream"))
+	if got := alias.seen(); !slices.Equal(got, []string{"hello", "no_team"}) {
+		t.Fatalf("alias events %v, want [hello no_team]", got)
 	}
 }

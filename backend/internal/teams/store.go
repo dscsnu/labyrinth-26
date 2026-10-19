@@ -197,12 +197,15 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 
 // noTeamEvent tells a user they're not in a team (they left, or it was
 // deleted). Its counterpart, "team", carries the full team.
-var noTeamEvent = live.Event{Name: "no_team", Data: []byte("{}")}
+var noTeamEvent = live.NewEvent("no_team", []byte("{}"))
 
 // teamEvent encodes t as a "team" live event, same JSON as GET /api/teams/me.
 func teamEvent(t *Team) (live.Event, error) {
 	data, err := json.Marshal(t)
-	return live.Event{Name: "team", Data: data}, err
+	if err != nil {
+		return live.Event{}, err
+	}
+	return live.NewEvent("team", data), nil
 }
 
 // publish sends t to its members and no_team to users who just left. Called

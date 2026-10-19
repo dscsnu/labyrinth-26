@@ -22,7 +22,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | `config/configtest` | `configtest.go` | Loads the repository's `config.toml` for tests. | tests |
 | `httpx` | `respond.go` | The response envelope `{"success", "code", "message", "payload"}` and `DecodeJSON`. | every `api.go`, `server` |
 | `identity` | `identity.go` | Carries the signed-in user through a request, so use cases don't import `auth`. | `auth` (sets), everyone else (reads) |
-| `live` | `hub.go`, `stream.go` | `Hub`: fans events out to each user's open streams. `Serve`: writes one stream as server-sent events. | `server`, `teams`, `teamstate` |
+| `live` | `event.go`, `hub.go`, `stream.go` | `Event`: one event, encoded once. `Hub`: fans events out to one user's streams or to all. `Streamer`: writes one stream as server-sent events. | `server`, `teams`, `teamstate` |
 | `postgres` | `database.go`, `migrate.go`, `instance_lock.go` | The pool, migrations, the single-instance lock, the dev seed, `ErrNotFound`. | `main`, every `db.go`, `server` |
 | `postgres/pgtest` | `pgtest.go` | A migrated, empty schema per test package. | tests |
 
@@ -95,6 +95,10 @@ Both are read **once at startup**. A change needs a restart.
 | `auth.login_code_sweep` | `Duration` | `"10m"` | > 0 | How often expired login codes are deleted |
 | `live.heartbeat` | `Duration` | `"25s"` | > 0 | Interval between `: ping` comments on each stream |
 | `live.subscriber_buffer` | `int` | `16` | ≥ 1 | Events a stream may have unread before it's dropped |
+| `live.hub_shards` | `int` | `64` | ≥ 1 | Locks the hub spreads streams over, by user ID |
+| `live.write_timeout` | `Duration` | `"10s"` | > 0 | Longest one write to a stream may take before the client is cut off |
+| `live.retry_min` | `Duration` | `"1s"` | ≥ 1 ms | Shortest reconnect delay sent to a client |
+| `live.retry_max` | `Duration` | `"6s"` | ≥ `retry_min` | Longest reconnect delay sent to a client |
 | `server.read_header_timeout` | `Duration` | `"10s"` | > 0 | Time to send request headers |
 | `server.read_timeout` | `Duration` | `"30s"` | ≥ `server.read_header_timeout` (`server.read_timeout must be at least server.read_header_timeout`) | Time to send a whole request, body included. Event streams clear it (see `Serve`) |
 | `server.idle_timeout` | `Duration` | `"2m"` | > 0 | Idle keep-alive connection lifetime |
@@ -128,7 +132,7 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 |---|---|
 | `TestRepositoryConfigLoads` | The committed `backend/config.toml` is valid |
 | `TestLoadSettings` | A complete `validTOML` decodes `size`, `scan_window`, `scan_grace`, `max_pattern_points`, `token_ttl`, `subscriber_buffer`, `write_timeout` |
-| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration, negative grace, missing `scan_grace` (`missing key game.scan_grace`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 7 pattern points with 6 members, zero window; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `heartbeat`, `subscriber_buffer`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
+| `TestLoadSettingsRejects` | Each is refused, naming the problem: unknown key, missing `live.heartbeat`, bad duration, negative grace, missing `scan_grace` (`missing key game.scan_grace`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 7 pattern points with 6 members, zero window; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML` |
 
 Not tested: `Load()` and the environment variables, and the key functions. A missing `scan_grace` is a case in `TestLoadSettingsRejects`.
 
@@ -206,77 +210,96 @@ Each caller maps any error to its own response: `400 invalid_body` in teams, tea
 - **`With(ctx, id)`**: a context carrying `id`, under an unexported key type (no other package can collide with it or forge it).
 - **`From(ctx)`**: the `Identity` and whether one was set.
 - **`UserID(r)`**: the caller's ID. Only valid behind auth's `RequireAuth`; elsewhere it returns `uuid.Nil` silently.
-- **Who uses it:** `RequireAuth` calls `With`. Every authed handler calls `UserID(r)`. Nothing reads `Email`, `Name` or `Role` yet.
+- **Who uses it:** `RequireAuth` and `RequireStreamAuth` call `With`. Every authed handler calls `UserID(r)`. Nothing reads `Email`, `Name` or `Role` yet.
 - **Why it exists:** `auth` depends on `user`, and every use case needs the caller. Putting the caller type here lets them read it without importing `auth`, which would create a cycle.
 - No state, no locks; a context value is immutable.
 
 ## live
-Server-sent events. Use cases publish full snapshots to users through the `Hub`; `Serve` writes one subscription to one HTTP response.
+Server-sent events. Use cases publish full snapshots through the `Hub`, to one user (`Send`) or to every stream (`Broadcast`); a `Streamer` writes one subscription to one HTTP response.
 
 ### Data model
 ```
-Event                                   one server-sent event; 40 bytes on 64-bit
-  Name  string                          event name: "team", "no_team", "team_state"
-  Data  []byte                          compact JSON, no newlines; shared, never modified
+Event                                   one server-sent event, encoded once; immutable
+  name   string                         event name: "hello", "team", "no_team", "team_state"
+  data   []byte                         the payload (compact JSON); shared, never modified
+  frame  []byte                         the wire bytes "event: …\ndata: …\n\n", built by NewEvent
 
 Hub
-  mu      sync.Mutex                    guards everything below; one lock for all users
-  subs    map[uuid.UUID]                user ID →
-            map[*Subscription]struct{}    that user's open streams (a set)
-  closed  bool                          set by Close; Subscribe then starts closed
+  shards  []shard                       live.hub_shards (64); a user's streams all live in one shard
+  seed    maphash.Seed                  picks the shard: maphash.Comparable(seed, userID) % len(shards)
   buffer  int                           live.subscriber_buffer (16)
 
+shard
+  mu      sync.Mutex                    guards everything below, for this shard's users only
+  subs    map[uuid.UUID]                user ID →
+            map[*Subscription]struct{}    that user's open streams (a set)
+  closed  bool                          set by Hub.Close; Subscribe then starts closed
+
 Subscription                            one open stream
-  C   <-chan Event                      what Serve reads; closed when the subscription ends
-  ch  chan Event                        the same channel, send side; capacity = buffer
-  h   *Hub
-  id  uuid.UUID                         the user it belongs to
+  C      <-chan Event                   what Serve reads; closed when the subscription ends
+  ch     chan Event                     the same channel, send side; capacity = buffer
+  shard  *shard                         where it's registered
+  id     uuid.UUID                      the user it belongs to
+
+Streamer                                built once in server.Build, shared by every stream
+  Heartbeat           time.Duration     live.heartbeat (25 s)
+  WriteTimeout        time.Duration     live.write_timeout (10 s)
+  RetryMin, RetryMax  time.Duration     live.retry_min, live.retry_max (1 s, 6 s)
 ```
-- **Keyed by user, not team,** so a stream follows its user from team to team with nothing to re-subscribe.
+- **Keyed by user, not team,** so a stream follows its user from team to team with nothing to re-subscribe. Who gets an event is decided by the publisher when it sends: one user, a team's members, or everyone (see `internal/server/README.md`, "Scopes").
 - **A set per user,** so every tab gets every event.
-- An empty set is deleted from `subs`, so the map holds only users with open streams.
-- `Data` is the same slice for every recipient; publishers build it once with `json.Marshal` and never touch it again.
+- **Sharded,** so publishers for different users rarely wait on each other, and a broadcast never holds the whole hub.
+- An empty set is deleted from `subs`, so each map holds only users with open streams.
+- **An `Event` is encoded once.** `frame` is shared by every stream it's sent to; `Serve` only copies bytes. Its fields are unexported so it can't be changed after `NewEvent`; read them with `Name()` and `Data()`.
 
 ### Functions
-- **`NewHub(buffer)`**: an empty hub.
-- **`Subscribe(userID)`**: makes a channel of capacity `buffer`, then under `mu` adds it to the user's set. If the hub is closed, closes the channel and returns it unregistered: the caller's `Serve` returns at once. **Subscribe before reading the state you send first** (see `internal/server/README.md`).
-- **`Subscription.Close()`**: `remove` → `dropLocked` under `mu`. Safe to call any number of times, and after `Hub.Close`.
+- **`NewEvent(name, data)`**: builds the frame. Each line of `data` becomes its own `data:` line (the client joins them back with newlines), so any payload round-trips; compact JSON is one line. The zero `Event` has an empty frame, which `Serve` skips.
+- **`NewHub(shards, buffer)`**: an empty hub with `shards` shards (panics below 1: a programming error, since config validation already refuses it).
+- **`Subscribe(userID)`**: makes a channel of capacity `buffer`, then under the user's shard lock adds it to the user's set. If the hub is closed, closes the channel and returns it unregistered: the caller's `Serve` returns at once. **Subscribe before reading the state you send first** (see `internal/server/README.md`).
+- **`Subscription.Close()`**: `dropLocked` under its shard's lock. Safe to call any number of times, and after `Hub.Close`.
 - **`dropLocked(sub)`**: if `sub` is still in its user's set, deletes it (and the set, if now empty) and closes its channel. Otherwise a no-op. This check is what makes every close happen exactly once.
-- **`Send(userID, ev)`**: under `mu`, for each of the user's subscriptions, a non-blocking send. If the channel is full, `dropLocked`. Never blocks; a user with no streams costs one map lookup.
-- **`Count()`**: total open subscriptions across all users (for `/healthz`). Walks every user's set.
-- **`Close()`**: sets `closed`, closes every channel, clears `subs`. Called through `srv.RegisterOnShutdown`.
+- **`Send(userID, ev)`**: under the user's shard lock, for each of the user's subscriptions, a non-blocking send (`deliverLocked`). If the channel is full, `dropLocked`. Never blocks; a user with no streams costs one hash and one map lookup.
+- **`Broadcast(ev)`**: for each shard in turn, under that shard's lock, the same non-blocking send to every subscription. Never blocks, and never holds more than one shard: Sends to other shards carry on meanwhile.
+- **`Count()`**: total open subscriptions (for `/healthz`), summing each shard under its lock.
+- **`Close()`**: per shard, sets `closed`, closes every channel, clears `subs`. Called through `srv.RegisterOnShutdown`.
 
 ### The slow-subscriber rule
-A subscription's channel holds **16** (`live.subscriber_buffer`) events. When `Send` finds it full, i.e. a 17th event arrives while 16 are unread, the subscription is **dropped**:
+A subscription's channel holds **16** (`live.subscriber_buffer`) events. When `Send` or `Broadcast` finds it full, i.e. a 17th event arrives while 16 are unread, the subscription is **dropped**:
 1. removed from the hub and its channel closed
 2. `Serve` still drains the 16 buffered events, writes them, then sees the closed channel and returns, ending the response
-3. the browser's `EventSource` reconnects; the new stream starts from fresh snapshots
+3. the browser's `EventSource` reconnects after its `retry:` delay; the new stream starts from fresh snapshots
 
 Nothing is lost, because every event is a full snapshot, never a diff. Only the slow stream is dropped; the user's other tabs and other users are unaffected.
 
 **Why drop instead of block:** `Send` runs while a use case holds a team's write lock. Blocking on one slow phone would stall every write to that team.
 
-### `Serve(w, r, sub, initial, heartbeat)`
+### `Streamer.Serve(w, r, sub, initial)`
 1. Sets headers, then `200`:
    - `Content-Type: text/event-stream`
    - `Cache-Control: no-store`
    - `X-Accel-Buffering: no` (nginx: don't buffer)
-2. Clears the connection's read deadline (`ResponseController.SetReadDeadline(time.Time{})`). The server's **30 s** (`server.read_timeout`) covers a whole request; a stream lasts hours, and hitting the deadline would cancel its context. A writer without deadline support (httptest's) ignores this.
-3. Writes each `initial` event and flushes after each.
+2. Clears the connection's read deadline (`ResponseController.SetReadDeadline(time.Time{})`). The server's **30 s** (`server.read_timeout`) covers a whole request; a stream lasts hours, and hitting the deadline would cancel its context. A writer without deadline support (`http.ErrNotSupported`, httptest's) is fine.
+3. Writes `retry: <ms>`, a delay picked uniformly between **1 s** and **6 s** (`live.retry_min`, `live.retry_max`) for this stream, then each `initial` event, and flushes once.
 4. Loops until one of these, then returns:
    - `r.Context()` done (client disconnected, or the server closed the connection)
    - `sub.C` closed (dropped for being slow, or the hub closed)
-   - a write or flush fails
-5. Each event from `sub.C` is written and flushed, then the heartbeat ticker is **reset**.
-6. A `time.Ticker` at **25 s** (`live.heartbeat`) writes `: ping` and flushes. It starts after the initial events. Because every event resets it, a ping goes out only after 25 s with **no** event: a busy stream gets none.
+   - a write or flush fails, or a write misses its deadline
+5. Each event from `sub.C` is written, then **up to a buffer's worth of events already queued** are written after it (`drain`), then one flush; then the heartbeat ticker is **reset**. A burst costs one flush, and a stream that's always busy still flushes at least every 16 events.
+6. A `time.Ticker` at **25 s** (`live.heartbeat`) writes `: ping` and flushes. Because every event resets it, a ping goes out only after 25 s with **no** event: a busy stream gets none.
+7. **Every write gets a fresh deadline** of **10 s** (`live.write_timeout`) through `ResponseController.SetWriteDeadline`. A phone that stopped reading without closing the connection fills its TCP window; the write then fails at the deadline and `Serve` returns, freeing its goroutine and buffers instead of waiting minutes for TCP to give up.
 
-Flushing uses `http.NewResponseController(w).Flush()`; if the writer can't flush, the first flush returns an error and `Serve` returns.
+`conn` holds the writer, its `ResponseController` and the first error, so a batch of writes is checked once, at its flush.
 
 ### Wire format
-Each event is exactly `event: <Name>\ndata: <Data>\n\n`. A heartbeat is `: ping\n\n`, an SSE comment that `EventSource` ignores. No `id:` or `retry:` fields are sent, so reconnection uses the browser's default delay and nothing is replayed.
+Each event is exactly `event: <name>\ndata: <data>\n\n` (one `data:` line per line of data). A heartbeat is `: ping\n\n`, an SSE comment that `EventSource` ignores. The stream opens with `retry: <ms>\n\n`. No `id:` fields are sent, so nothing is replayed.
 
 A member of team `482913` connects, nothing happens for 25 s, then a teammate readies. Byte for byte, after the headers (`␤` = `\n`):
 ```
+retry: 3412␤
+␤
+event: hello␤
+data: {"server_time":"2026-10-17T12:00:00.123456Z"}␤
+␤
 event: team␤
 data: {"id":"482913","name":"Live","leader_id":"6f1c…","status":"LOBBY","created_at":"2026-10-17T12:00:00Z","started_at":null,"members":[…]}␤
 ␤
@@ -289,9 +312,7 @@ event: team␤
 data: {"id":"482913",…,"members":[…,{"id":"9a2b…","name":"b","avatar_url":null,"is_ready":true,"joined_at":"2026-10-17T12:00:05Z"}]}␤
 ␤
 ```
-A user in no team gets `event: no_team␤data: {}␤␤` instead of the first two events. Every event, what triggers it and the ordering guarantees: `internal/server/README.md`, "The event stream".
-
-`Data` must not contain a newline: SSE would split it into two `data:` lines. `json.Marshal` never emits one (newlines inside strings are escaped as `\n`).
+A user in no team gets `event: no_team␤data: {}␤␤` instead of `team` and `team_state`. Every event, what triggers it and the ordering guarantees: `internal/server/README.md`, "The event stream".
 
 ### Cases
 | Case | Result |
@@ -299,29 +320,52 @@ A user in no team gets `event: no_team␤data: {}␤␤` instead of the first tw
 | A user has several tabs open | Each tab's stream gets every event |
 | A stream has 16 unread events and another arrives | That stream is dropped after its 16 are written; others unaffected |
 | `Send` to a user with no streams | Nothing happens |
+| `Broadcast` with a slow stream among many | Only the slow one is dropped |
 | `Subscription.Close` twice, or after `Hub.Close` | No-op |
 | `Subscribe` after `Hub.Close` | Returns a closed subscription; not counted |
-| `Hub.Close` twice | Second is a no-op |
+| `Broadcast` or `Close` after `Hub.Close` | No-op |
 | Client disconnects | `Serve` returns via `r.Context()`; the caller's deferred `Close` removes the subscription |
+| Client stops reading but keeps the connection | The next write fails after **10 s** (`live.write_timeout`); `Serve` returns |
+| Several events queued at once | Written together, one flush |
 | No events for 25 s | `: ping` keeps proxies and mobile networks from closing the connection |
 | An event every 10 s | No pings: each event resets the ticker |
 | Stream open longer than 30 s (`server.read_timeout`) | Unaffected: `Serve` cleared the read deadline |
+| The backend restarts | Every client reconnects after its own `retry:` delay, spread over 1–6 s |
 
 ### Concurrency
-- **One mutex for the whole hub.** `Send`, `Subscribe`, `Close` and `Count` all take it. Held only for map work and non-blocking channel sends, never for I/O.
-- **Channels are closed only under `mu`**, and only after removal from `subs`, so `Send` never sends on a closed channel and nothing closes a channel twice.
-- **Per-stream order** is the order `Send` was called for that user. Use cases publish while holding the entry lock, so each team's events go out in write order.
+- **One mutex per shard.** `Send` and `Subscribe` take their user's shard; `Broadcast`, `Count` and `Close` take each shard in turn, never two at once. Held only for map work and non-blocking channel sends, never for I/O.
+- **Channels are closed only under their shard's lock**, and only after removal from `subs`, so nothing sends on a closed channel and nothing closes a channel twice.
+- **Per-stream order** is the order events were queued for that stream. Use cases publish while holding the entry lock, so each team's events go out in write order. Two `Broadcast`s from different publishers may reach different streams in different orders: a game-wide publisher broadcasts under its own entry lock.
 - `Serve` runs in the request's goroutine and is the only reader of `sub.C`.
 
-### Tests (`live/tests/hub_test.go`, `live/tests/stream_test.go`)
+### Performance
+Measured on an Apple M-series laptop (10 cores), `go test -bench`, before and after the sharded hub and pre-encoded frames:
+
+| Benchmark | Before | After |
+|---|---|---|
+| `BenchmarkHubSend`: parallel `Send`, 10,000 users | 600 ns/op | 135 ns/op |
+| `BenchmarkTeamStatePublish` (`teamstate/tests`): parallel `team_state` publishes over 1,666 teams (10,000 players) | 4.4 µs/op | 1.0 µs/op |
+| `BenchmarkHubBroadcast`: queue one event on 10,000 streams | 3.2 ms (a `Send` per user, no `Broadcast` existed) | 3.9 ms, holding one shard at a time |
+| `BenchmarkBroadcastFanout`: 10,000 real HTTP streams, broadcast → last client read | ~135 ms; p50 33 ms, p99 178 ms | ~130 ms; p50 35 ms, p99 180–240 ms |
+
+The fan-out benchmark runs the 10,000 clients on the same machine as the server, so client parsing competes with it for CPU; the end-to-end figures are dominated by the kernel and the clients, not by the hub. Run it with `go test -run '^$' -bench Fanout -fanout.streams 10000 ./internal/platform/live/tests/` (it opens 20,000 sockets; raise `ulimit -n`).
+
+### Tests (`live/tests/hub_test.go`, `live/tests/stream_test.go`, `live/tests/fanout_test.go`)
 | Test | Covers |
 |---|---|
 | `TestHubDropsSlowSubscriberOnly` | Two streams for one user; `live.subscriber_buffer` + 1 = 17 sends; the slow one gets exactly **16** (`live.subscriber_buffer`, read with `configtest`) then closes; the fast one keeps receiving; `Count` is 1 |
-| `TestHubCloseAndRemove` | `Close` twice is safe; `Hub.Close` closes open streams; `Close` after it is safe; a late `Subscribe` starts closed; `Count` is 0 |
+| `TestHubCloseAndRemove` | `Close` twice is safe; `Hub.Close` closes open streams; `Close` and `Broadcast` after it are safe; a late `Subscribe` starts closed; `Count` is 0 |
 | `TestHubSendsOnlyToThatUser` | An event for one user doesn't reach another |
+| `TestHubBroadcastReachesEveryStream` | 200 users with two streams each, across every shard, get every broadcast; a slow stream gets exactly 16 then is dropped; `Count` is right |
+| `TestHubConcurrentUse` | `Subscribe`, `Send`, `Broadcast` and `Close` side by side (meaningful under `-race`) |
+| `TestServeWritesFrames` | Exact bytes: the `retry:` line, then each event, a two-line payload as two `data:` lines, an empty payload as one empty `data:` line |
+| `TestServeRetryWithinRange` | 20 streams with a 1–3 s range each send a delay within it |
+| `TestServeCoalescesQueuedEvents` | Three events queued before `Serve` starts go out in one flush, in order |
+| `TestServeStalledClientTimesOut` | A client that never accepts a write ends `Serve` at the 50 ms write deadline |
 | `TestHeartbeatOnlyWhenIdle` | With a 150 ms heartbeat: events every 30 ms for 3 heartbeats give no pings; then idle, a ping arrives within 2.5 heartbeats |
+| `BenchmarkHubSend`, `BenchmarkHubBroadcast`, `BenchmarkBroadcastFanout` | See [Performance](#performance). The fan-out benchmark skips under `-short` |
 
-`Serve`'s format and disconnect are tested over HTTP in `internal/server/tests/events_test.go`.
+`Serve`'s format, `hello`, cookie auth and disconnect are also tested over HTTP in `internal/server/tests/events_test.go`.
 
 ## postgres
 ### `database.go`

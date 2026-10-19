@@ -55,6 +55,19 @@ heartbeat = "25s"
 # How many events a slow client may fall behind before it's dropped (it
 # reconnects and gets fresh state). Allowed: at least 1.
 subscriber_buffer = 16
+# How many locks the hub spreads open streams over, by user ID. More shards
+# mean less waiting between publishers; a broadcast takes them one at a time.
+# Allowed: at least 1.
+hub_shards = 64
+# How long one write to a stream may take before the client is cut off (a
+# dead phone connection otherwise holds its stream open until TCP gives up).
+# Allowed: more than 0.
+write_timeout = "10s"
+# Each stream tells its client to wait a random delay in this range before
+# reconnecting, so a restart doesn't bring every client back at once.
+# Allowed: retry_min at least 1ms, retry_max at least retry_min.
+retry_min = "1s"
+retry_max = "6s"
 
 [server]
 # How long a client may take to send request headers. Allowed: more than 0.

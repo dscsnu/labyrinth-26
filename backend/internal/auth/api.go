@@ -25,6 +25,10 @@ const (
 	stateCookie = "labyrinth_oauth_state"
 	// stateCookiePath limits the state cookie to the sign-in routes.
 	stateCookiePath = "/auth/google"
+	// TokenCookie is the httpOnly cookie the SvelteKit app keeps the access
+	// token in. RequireStreamAuth reads it when a browser's EventSource,
+	// which can't send headers, reaches the backend on the same origin.
+	TokenCookie = "labyrinth_token"
 )
 
 // API serves the sign-in flow and provides the auth middleware.
@@ -247,26 +251,63 @@ func (a *API) token(w http.ResponseWriter, r *http.Request) {
 // and puts the caller's identity on the request for other use cases.
 func (a *API) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme, raw, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-		if !ok || !strings.EqualFold(scheme, "Bearer") || raw == "" {
+		raw, ok := bearerToken(r)
+		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			httpx.ErrorCode(w, http.StatusUnauthorized, "missing_token", "missing bearer token")
 			return
 		}
-		claims, err := a.tokens.VerifyAccess(raw)
-		if err != nil {
-			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-			httpx.ErrorCode(w, http.StatusUnauthorized, "invalid_token", "invalid or expired token")
-			return
-		}
-		userID, _ := claims.UserID() // VerifyAccess checked it parses
-		next.ServeHTTP(w, r.WithContext(identity.With(r.Context(), identity.Identity{
-			UserID: userID,
-			Email:  claims.Email,
-			Name:   claims.Name,
-			Role:   string(claims.Role),
-		})))
+		a.serveAuthed(w, r, raw, next)
 	})
+}
+
+// RequireStreamAuth is RequireAuth for the event stream: it also accepts the
+// token from the TokenCookie cookie, since a browser's EventSource can't set
+// an Authorization header. A Bearer header, if present, wins. Use it only on
+// GET routes that change nothing, where a cookie can't be abused to act for
+// the user.
+func (a *API) RequireStreamAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, ok := bearerToken(r)
+		if !ok {
+			c, err := r.Cookie(TokenCookie)
+			if err != nil || c.Value == "" {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				httpx.ErrorCode(w, http.StatusUnauthorized, "missing_token", "missing bearer token")
+				return
+			}
+			raw = c.Value
+		}
+		a.serveAuthed(w, r, raw, next)
+	})
+}
+
+// bearerToken returns the token from r's "Authorization: Bearer" header, and
+// whether there was one.
+func bearerToken(r *http.Request) (string, bool) {
+	scheme, raw, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || raw == "" {
+		return "", false
+	}
+	return raw, true
+}
+
+// serveAuthed verifies the access token raw and, if it's valid, calls next
+// with the caller's identity on the request; otherwise it answers 401.
+func (a *API) serveAuthed(w http.ResponseWriter, r *http.Request, raw string, next http.Handler) {
+	claims, err := a.tokens.VerifyAccess(raw)
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		httpx.ErrorCode(w, http.StatusUnauthorized, "invalid_token", "invalid or expired token")
+		return
+	}
+	userID, _ := claims.UserID() // VerifyAccess checked it parses
+	next.ServeHTTP(w, r.WithContext(identity.With(r.Context(), identity.Identity{
+		UserID: userID,
+		Email:  claims.Email,
+		Name:   claims.Name,
+		Role:   string(claims.Role),
+	})))
 }
 
 // Authed adapts RequireAuth for route registration.

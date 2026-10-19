@@ -26,9 +26,10 @@ Every number below that comes from `config.toml` is shown with its current value
 |---|---|
 | **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Atlas`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). `Atlas` is the `*atlas.Atlas` (static content); nothing reads `App.Atlas` today (`Build` passes the atlas to teamstate directly), it's there for `main`, tests and future use cases. Unexported: the `*postgres.DB` (for `/healthz`) and the heartbeat. |
 | **Build order** | Each use case is constructed after everything it reads. `atlas` is static content every game use case reads, so `atlas.Load` runs first. `teamstate` reads `atlas` and `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
-| **Authed route** | A route wrapped in auth's `RequireAuth` (passed to each use case as `authAPI.Authed`). It needs `Authorization: Bearer <jwt>` and puts the caller on the request via `platform/identity`. |
-| **Stream** | One open `GET /api/teams/me/events`: one `live.Subscription` in the hub, keyed by the caller's user ID. |
-| **Initial snapshots** | The events a stream sends before anything else: `team` or `no_team`, then `team_state` if the caller is in a team. |
+| **Authed route** | A route wrapped in auth's `RequireAuth` (passed to each use case as `authAPI.Authed`). It needs `Authorization: Bearer <jwt>` and puts the caller on the request via `platform/identity`. `GET /api/events` uses `RequireStreamAuth` instead, which also takes the token from the `labyrinth_token` cookie. |
+| **Stream** | One open `GET /api/events` (or its deprecated alias `GET /api/teams/me/events`): one `live.Subscription` in the hub, keyed by the caller's user ID. A client opens one, and it carries every scope. |
+| **Scope** | Who an event goes to: one **user** (`Hub.Send`), a **team**'s current members (`Hub.Send` per member), or every stream, **game**-wide (`Hub.Broadcast`). The publisher decides; clients never subscribe to channels. |
+| **Initial snapshots** | The events a stream sends before anything else: `hello`, then `team` or `no_team`, then `team_state` if the caller is in a team, then game-wide resources (none yet). |
 | **Instance lock** | A Postgres advisory lock (key `7272027`) the process holds from just after connecting until it exits, checked every **5 s** (`storage.instance_lock_check`). A second backend, `migrate` or `seed` on the same database refuses to run. |
 | **Unrouted request** | One no route pattern matches: an unknown path, or a known path with the wrong method. `envelopeUnrouted` answers it in the JSON envelope. |
 | **Sign-in hook** | The `onSignIn` function `Build` gives auth: after every sign-in it calls `teams.Store.RefreshProfile`, so a renamed user shows the new name in their team at once. |
@@ -84,7 +85,7 @@ Every number below that comes from `config.toml` is shown with its current value
 ### `server.go`
 - **`App`**: see [Concepts](#concepts).
 - **`Build(ctx, cfg, db, google, log)`** constructs everything in dependency order. `google` is `auth.DefaultGoogleEndpoints` in `main`, a fake in tests.
-  1. `live.NewHub(live.subscriber_buffer)`: the shared hub. Every use case that publishes gets this one.
+  1. `live.NewHub(live.hub_shards, live.subscriber_buffer)`: the shared hub. Every use case that publishes gets this one.
   2. `user.New(db)`: Postgres-only users.
   3. `auth.NewTokens(cfg.JWTKey, auth.token_ttl)`: the JWT signer and verifier.
   4. `auth.NewLoginCodes(db, auth.login_code_ttl)`.
@@ -93,12 +94,13 @@ Every number below that comes from `config.toml` is shown with its current value
   7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start before `Build` returns and routes are served.
   8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
   9. `teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas. It needs the atlas (through its `Atlas` interface) and `teamStore` (through its `Teams` interface), so it runs after steps 6 and 7.
-  10. The `App` (with `Atlas: theAtlas`), then a `http.ServeMux` with, in this order:
+  10. The `App` (with `Atlas: theAtlas`, and a `live.Streamer` from `live.heartbeat`, `live.write_timeout`, `live.retry_min` and `live.retry_max`), then a `http.ServeMux` with, in this order:
      - `GET /healthz` (no auth)
      - `GET /openapi.yaml` and `GET /docs` (no auth; see [API docs](#api-docs-openapi))
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
      - `user`, `teams`, `teamstate`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
-     - `GET /api/teams/me/events`, wrapped in `authAPI.Authed`
+     - `GET /api/events`, wrapped in `authAPI.RequireStreamAuth` (Bearer or the `labyrinth_token` cookie)
+     - `GET /api/teams/me/events`, the deprecated alias, wrapped in `authAPI.Authed` (Bearer only)
   11. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
 - **`envelopeUnrouted(mux)`** wraps the mux. For each request it asks `mux.Handler(r)` for the matching pattern:
   - a pattern matched → `mux.ServeHTTP` as usual
@@ -108,7 +110,9 @@ Every number below that comes from `config.toml` is shown with its current value
     - anything else → handled by the mux as it would have been (not expected: the mux's redirects have a pattern and never reach this branch)
 - **`statusRecorder`**: `Header()`, `WriteHeader(status)` and `Write` (counts the bytes, sets `200` if no status yet) for the above.
 - **`health`** handles `GET /healthz`: `db.Ping`; on error `503` `database unreachable`; otherwise `200` with `{"streams": Hub.Count()}`.
-- **`events`** handles `GET /api/teams/me/events`: see [The event stream](#the-event-stream). It lives here because it carries events from two use cases.
+- **`events`** handles `GET /api/events` and its alias: see [The event stream](#the-event-stream). It lives here because it carries events from every use case.
+- **`snapshot(userID)`** is the initial snapshots, in order. Game-wide snapshots are added at its end.
+- **`hello(now)`** is the `hello` event: `{"server_time": now}` in UTC.
 
 ### `*_test.go`
 End-to-end tests for every use case, because they need the whole app. See [The test harness](#the-test-harness).
@@ -126,10 +130,13 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `auth.login_code_ttl` | 2 m | `auth.NewLoginCodes` |
 | `auth.oauth_state_ttl` | 10 m | read by `auth.API` from `cfg.Settings` (state token TTL and cookie `MaxAge`) |
 | `auth.login_code_sweep` | 10 m | `main.cleanupLoginCodes` |
-| `live.heartbeat` | 25 s | `App.heartbeat` → `live.Serve` |
+| `live.heartbeat` | 25 s | `live.Streamer.Heartbeat` |
 | `live.subscriber_buffer` | 16 | `live.NewHub` |
+| `live.hub_shards` | 64 | `live.NewHub` |
+| `live.write_timeout` | 10 s | `live.Streamer.WriteTimeout` |
+| `live.retry_min`, `live.retry_max` | 1 s, 6 s | `live.Streamer.RetryMin`, `RetryMax` |
 | `server.read_header_timeout` | 10 s | `http.Server.ReadHeaderTimeout` (`main`) |
-| `server.read_timeout` | 30 s | `http.Server.ReadTimeout` (`main`); cleared per stream by `live.Serve` |
+| `server.read_timeout` | 30 s | `http.Server.ReadTimeout` (`main`); cleared per stream by `Streamer.Serve` |
 | `server.idle_timeout` | 2 m | `http.Server.IdleTimeout` (`main`) |
 | `server.shutdown_timeout` | 10 s | the `srv.Shutdown` context (`main`) |
 | `server.max_body_bytes` | 1,048,576 | `http.MaxBytesHandler` |
@@ -158,7 +165,7 @@ http.Server              ReadHeaderTimeout 10 s, ReadTimeout 30 s, IdleTimeout 2
   DELETE /api/teams             → 405 Allow: POST
                                       {"success":false,"code":"method_not_allowed","message":"method not allowed"}
   ```
-- **Auth.** `RequireAuth` (in `internal/auth`):
+- **Auth.** `RequireAuth` (in `internal/auth`; `RequireStreamAuth` is the same, but with no header it reads the token from the `labyrinth_token` cookie):
   - no header, a scheme other than `Bearer` (case-insensitive), or an empty token → `401 missing_token`, `WWW-Authenticate: Bearer`
   - a token that fails `VerifyAccess` (bad signature, expired, malformed) → `401 invalid_token`, `WWW-Authenticate: Bearer error="invalid_token"`
   - otherwise the handler runs with `identity.Identity{UserID, Email, Name, Role}` from the token's claims
@@ -170,24 +177,40 @@ The complete reference for the live stream: what it carries, what triggers each 
 ### Endpoint
 | | |
 |---|---|
-| Backend | `GET /api/teams/me/events`, `Authorization: Bearer <jwt>` (any signed-in user, in a team or not). No token or a bad one: `401 missing_token` / `401 invalid_token`, no stream |
-| Browser | `GET /team/events`, same origin, through the SvelteKit proxy `frontend/src/routes/team/events/+server.ts`: `new EventSource("/team/events")` |
+| Backend | `GET /api/events`, with `Authorization: Bearer <jwt>` or, failing that, the `labyrinth_token` cookie (any signed-in user, in a team or not). No token or a bad one: `401 missing_token` / `401 invalid_token`, no stream. `GET /api/teams/me/events` is a deprecated alias, Bearer only, kept until the frontend moves |
+| Production routing | The reverse proxy in front of both apps sends `/api/events` on the frontend's origin straight to the backend, so the browser's cookie reaches it and no Node process copies the stream. Deployment config doesn't exist yet; this is the rule it must follow |
+| Browser (today) | `GET /team/events`, same origin, through the SvelteKit proxy `frontend/src/routes/team/events/+server.ts`: `new EventSource("/team/events")`. See [Client integration](#client-integration) for the move to `/api/events` |
 | Proxy | Reads the httpOnly session token (`locals.token`; none → `401 not signed in`), calls the backend with it (`backendFetch`) and returns the backend's body unchanged with `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`. A backend `401` stays `401`; any other failure is `502 event stream unavailable`. The browser closing its request aborts the backend request too (`signal: request.signal`) |
 | Response | `200`, `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no` (so nginx doesn't buffer). The body never ends on its own |
 
 ### How `events` serves a stream
 1. `userID := identity.UserID(r)`.
 2. **`sub := a.Hub.Subscribe(userID)`**, then `defer sub.Close()`.
-3. **Initial snapshots**, read from memory after subscribing:
+3. **Initial snapshots** (`snapshot`), read from memory after subscribing:
+   - `hello`: `{"server_time": …}`, the server's clock, for clients to correct countdowns.
    - `a.Teams.Snapshot(userID)`: `team` with the same JSON as `GET /api/teams/me`, or `no_team` with `{}` if the user is in no team (or the team failed to encode, which is logged).
    - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` with the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged). Sent for a `LOBBY` team too (an empty state).
-4. `live.Serve(w, r, sub, initial, live.heartbeat)`: clears the read deadline, writes the initial events, then every event from `sub`, plus `: ping` after **25 s** (`live.heartbeat`) with no event. Returns when the client disconnects, the subscription is dropped or the hub closes.
+   - Game-wide resources come last (none yet).
+4. `a.stream.Serve(w, r, sub, initial)` (`live.Streamer`): clears the read deadline, writes a `retry:` line and the initial events in one flush, then every event from `sub`, plus `: ping` after **25 s** (`live.heartbeat`) with no event. Returns when the client disconnects, a write fails or takes over **10 s** (`live.write_timeout`), the subscription is dropped or the hub closes.
 5. The deferred `sub.Close()` removes the subscription; the `/healthz` count drops.
 
 **The stream follows the user.** Subscriptions are keyed by user ID, not team. Joining, leaving or a new team all arrive on the same stream (`TestTeamEventStream`). Each tab is its own subscription and gets every event.
 
+### Scopes: how an event finds its streams
+Nobody picks a channel. The publisher decides who gets each event, at the moment it sends it:
+
+| Scope | Sent with | To | Today |
+|---|---|---|---|
+| user | `Hub.Send(userID, ev)` | that user's streams | `no_team` |
+| team | `Hub.Send` for each member | the team's members at that moment | `team`, `team_state` |
+| game | `Hub.Broadcast(ev)` | every open stream | none yet (quizzes, quick-time events) |
+
+- **Team membership is read when sending,** so a user who joins a team gets its next event without reconnecting. `teams` already holds the team it publishes; `teamstate` caches an `IN_GAME` team's frozen roster in its entry on the first publish, so publishing reads nothing outside the entry.
+- **Why not topics clients subscribe to.** Every join or leave would need a resubscribe, an event could fall in the gap, and a client could ask for a topic it shouldn't see.
+- **Each event is encoded once** (`live.NewEvent`): the team's members, or every stream for a broadcast, share the same bytes.
+
 ### Wire format
-Each event is exactly `event: <name>\n` + `data: <compact JSON on one line>\n` + `\n`. A heartbeat is the comment `: ping\n\n`, which `EventSource` ignores. No `id:` or `retry:` fields are sent. Each write is flushed at once.
+Each event is exactly `event: <name>\n` + `data: <compact JSON on one line>\n` + `\n` (data with a newline in it would be split into several `data:` lines, which the client joins back; compact JSON never has one). A heartbeat is the comment `: ping\n\n`, which `EventSource` ignores. The stream opens with `retry: <ms>\n\n`, a reconnect delay picked at random per stream between **1 s** (`live.retry_min`) and **6 s** (`live.retry_max`). No `id:` fields are sent. Events already queued when one is written go out with it in a single flush; every write has a **10 s** deadline (`live.write_timeout`).
 
 Byte-level example for a user in the lobby team `482913` with two members, from connect to the first ping (`␤` = `\n`):
 ```
@@ -196,6 +219,11 @@ Content-Type: text/event-stream
 Cache-Control: no-store
 X-Accel-Buffering: no
 
+retry: 3412␤
+␤
+event: hello␤
+data: {"server_time":"2026-10-17T11:58:30.123456Z"}␤
+␤
 event: team␤
 data: {"id":"482913","name":"Scanners","leader_id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","status":"LOBBY","created_at":"2026-10-17T11:50:00Z","started_at":null,"members":[{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01","name":"Asha","avatar_url":null,"is_ready":false,"joined_at":"2026-10-17T11:50:00Z"},{"id":"3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02","name":"Bilal","avatar_url":"https://example.com/b.png","is_ready":true,"joined_at":"2026-10-17T11:51:30Z"}]}␤
 ␤
@@ -209,6 +237,7 @@ data: {"team_id":"482913","waypoints":[],"patterns":[],"shapes":[],"selection":n
 ### Events
 | Event | Data | Same JSON as | Schema (`openapi.yaml`) |
 |---|---|---|---|
+| `hello` | `{"server_time": …}`, the server's clock as the stream opened | none | `Hello` |
 | `team` | the user's team | `GET /api/teams/me` | `Team` |
 | `no_team` | `{}` | (`GET /api/teams/me` is `404 not_in_team`) | none |
 | `team_state` | the user's team's game state, the `View` | `GET /api/teams/me/state` | `TeamState` |
@@ -277,7 +306,7 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 
 | Trigger | Event | To |
 |---|---|---|
-| **Connect** (`GET /api/teams/me/events`) | `team` (or `no_team`), then `team_state` if in a team | that stream only |
+| **Connect** (`GET /api/events`) | `hello`, then `team` (or `no_team`), then `team_state` if in a team | that stream only |
 | teams `POST /api/teams` (create) | `team` | the creator (its only member) |
 | teams `POST /api/teams/join` | `team` | members, the joiner included |
 | teams `POST /api/teams/leave`, others remain | `team` (new `leader_id` if the leader left) | the remaining members |
@@ -303,7 +332,8 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 The HTTP response to a write carries the same JSON as its event (`ScanResult.state` for a scan), but on a different connection: a client may see either first.
 
 ### Ordering
-- **One stream is FIFO.** `Hub.Send` puts events on the subscription's one channel, and `Serve` writes them in that order.
+- **One stream is FIFO.** `Hub.Send` and `Hub.Broadcast` put events on the subscription's one channel, and `Serve` writes them in that order.
+- **Game-wide events in order.** A game use case broadcasts while holding the entry lock of the state it shows, so its events reach every stream in the order they were applied. `Broadcast` takes the hub's shards one at a time, so two broadcasts from different locks may interleave differently on different streams.
 - **Per team, in order.** Each use case publishes while holding the team's entry lock (`teams`' entry, or `teamstate`'s entry for writes, `expire` and `reconcile`), so one team's `team` events arrive in the order they were applied, and so do its `team_state` events.
 - **No order between `team` and `team_state`,** with one exception. They're published under different locks; a `team` and a `team_state` from changes at the same moment may arrive either way round. Each is still the full truth for its part. **The exception is a start:** teams calls the start hook after publishing the `IN_GAME` `team`, still holding the team's entry lock, so on every member's stream the start's `team` comes before its `team_state` (`TestStartPublishesTeamState`).
 - **Expiry is ordered with writes.** `expire` takes the same entry lock as a scan, and re-checks the stack under it, so a stale-scan event never arrives after a later write that already dropped the scan.
@@ -316,11 +346,13 @@ The HTTP response to a write carries the same JSON as its event (`ScanResult.sta
 After **25 s** (`live.heartbeat`) with no event, `Serve` writes `: ping\n\n` and flushes, so mobile networks and proxies don't drop the idle connection. Every event resets the timer, so a busy stream gets no pings. The first ping comes 25 s after the initial events. Keep `live.heartbeat` under any proxy's idle timeout.
 
 ### Slow clients
-Each subscription buffers **16** (`live.subscriber_buffer`) unread events. `Hub.Send` never blocks: when an event arrives while 16 are unread, that subscription is **dropped**. `Serve` writes the 16 buffered events, then the response ends. The client reconnects and starts from fresh snapshots, so it loses nothing. Other streams, the same user's other tabs included, are unaffected.
+Each subscription buffers **16** (`live.subscriber_buffer`) unread events. `Hub.Send` and `Hub.Broadcast` never block: when an event arrives while 16 are unread, that subscription is **dropped**. `Serve` writes the 16 buffered events, then the response ends. The client reconnects and starts from fresh snapshots, so it loses nothing. Other streams, the same user's other tabs included, are unaffected.
+
+A client that stops reading (a phone that lost signal without closing the connection) fills its TCP window; the next write then waits at most **10 s** (`live.write_timeout`) before `Serve` gives up and returns, freeing the goroutine.
 
 ### Reconnection
-- The browser's `EventSource` reconnects by itself after any end of the response (drop, restart, network loss), after its default delay: no `retry:` is sent.
-- Nothing is replayed (no `id:`, so no `Last-Event-ID`). The **first events after each connect are full snapshots** (`team`/`no_team`, then `team_state`), which is all a client needs.
+- The browser's `EventSource` reconnects by itself after any end of the response (drop, restart, network loss), after the stream's `retry:` delay: random per stream between **1 s** and **6 s** (`live.retry_min`, `live.retry_max`), so after a restart the clients come back spread over five seconds rather than in one burst.
+- Nothing is replayed (no `id:`, so no `Last-Event-ID`). The **first events after each connect are full snapshots** (`hello`, `team`/`no_team`, then `team_state`), which is all a client needs.
 - `/team` and `/play` show "reconnecting…" while `EventSource` is between connections (`onerror`), and "live ●" once it's open.
 
 ### Shutdown and restart
@@ -331,15 +363,26 @@ Each subscription buffers **16** (`live.subscriber_buffer`) unread events. `Hub.
 - Anything for a **rejection** (every `4xx`) or a **no-op** (ready unchanged, clear with nothing selected, a sign-in that changes nothing, an expiry timer that finds nothing stale).
 - Whether a scan was **wrong**: `team_state` has no such flag; wrong scans look like correct ones.
 - **Stale** correct scans: left out of `stack`.
-- **Diffs**, event IDs or `retry:` fields.
+- **Diffs**, event IDs, or one-off notifications: a "notification" (a quiz opening) is the client seeing a snapshot change.
 - Another team's state, or any member's email.
-- `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load.
+- `GET /api/game/shapes` (`Game`): static while the backend runs; read once per page load. Static data never goes in events (AGENTS.md §9).
+
+### Client integration
+What a client must do to use the stream as designed. **The frontend doesn't do all of this yet**: it opens one `EventSource` per page (`/team`, `/play`) through the SvelteKit proxy at `/team/events`, which keeps working through the deprecated alias. The steps below are the migration.
+
+1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect.
+2. **Register events by name.** Keep a map from event name to its zod schema (`hello`, `team`, `no_team`, `team_state`, and each game-wide event as it's added), and keep the newest parsed snapshot of each. `no_team` clears both `team` and `team_state`. A game-wide event whose data is `null` means nothing is active.
+3. **Derive notifications from transitions.** Compare each snapshot with the one before it. Game-wide: a new `id`, or a status change. Spells, from `team_state`: `selection` set (a spell started), `stack` growing (another member scanned; `stack[].user_id` says who), `last_cast.cast_at` changing (a spell finished).
+4. **Correct the clock.** `clockOffset = hello.server_time − local time at receipt`; add it to local time when counting down to a server timestamp (`expires_at`, a quiz's `closes_at`). Countdowns are display only: the server publishes the change itself when the time comes.
+5. **Move to `/api/events`.** In production the reverse proxy routes it straight to the backend, which reads the `labyrinth_token` cookie; keep the SvelteKit proxy only for local dev. Remove `GET /api/teams/me/events` once nothing uses it.
+6. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots. The responses to writes (`ScanResult.state`) may arrive before or after the matching event; both are full snapshots.
 
 ## API
 | Method | Path | Auth | Response |
 |---|---|---|---|
 | GET | `/healthz` | none | `200 {"success":true,"payload":{"streams":3}}`, or `503 {"success":false,"message":"database unreachable"}` |
-| GET | `/api/teams/me/events` | Bearer | `200 text/event-stream` (see above) |
+| GET | `/api/events` | Bearer or `labyrinth_token` cookie | `200 text/event-stream` (see above) |
+| GET | `/api/teams/me/events` | Bearer | deprecated alias of `/api/events` |
 | GET | `/openapi.yaml` | none | `200 application/yaml`: the OpenAPI 3.1 spec |
 | GET | `/docs` | none | `200 text/html`: Swagger UI over `/openapi.yaml` |
 
@@ -386,15 +429,17 @@ Any other path or method:
 | Case | Result |
 |---|---|
 | No token, or a bad one | `401` (no stream) |
-| User in no team | `no_team` only |
-| User in a team | `team`, then `team_state` |
+| Only the `labyrinth_token` cookie, on `/api/events` | Accepted, same as Bearer (`TestStreamCookieAndAlias`) |
+| Only the cookie, on any other route (the alias included) | `401 missing_token` |
+| User in no team | `hello`, then `no_team` |
+| User in a team | `hello`, then `team`, then `team_state` |
 | A change to the user's team or state | One event per change, on every one of the user's streams (see [What publishes what](#what-publishes-what)) |
 | A correct scan in the team's stack passes **65 s** (`game.scan_window` + `game.scan_grace`) with nobody acting | `team_state` without it, at the first microsecond it's stale (`TestSimStaleScanReachesEveryone`) |
 | A rejected or no-op request | Nothing |
 | Several tabs | Each tab is its own subscription; each gets every event |
 | Client disconnects | `Serve` returns on the request context; subscription removed; `/healthz` count drops |
 | A queued event arrives while **16** (`live.subscriber_buffer`) are already unread | That stream is dropped: the buffered events are written, then the response ends. The browser's `EventSource` reconnects and gets fresh snapshots |
-| A write to the client fails | `Serve` returns; subscription removed |
+| A write to the client fails, or takes over **10 s** (`live.write_timeout`) | `Serve` returns; subscription removed |
 | Server shuts down | `Hub.Close` closes every subscription; each `Serve` returns |
 
 ### Body limit
@@ -407,7 +452,7 @@ Any other path or method:
 
 ## Concurrency
 - **`Build` is single-threaded** and runs before the server listens. Nothing is served until every store is loaded.
-- **Requests run concurrently.** All shared state is in the stores (their own locks) and the hub (one mutex). `App` itself is read-only after `Build`.
+- **Requests run concurrently.** All shared state is in the stores (their own locks) and the hub (**64** shards, `live.hub_shards`, each with its own mutex: a `Send` locks one, a `Broadcast` each in turn). `App` itself is read-only after `Build`.
 - **Snapshots are read lock-free** from the stores. `team` and `team_state` are read separately, so a change between the two reads can make them disagree briefly; the change's own events follow and correct it.
 - **The sweep goroutine** only touches Postgres (`auth_code`), never memory.
 - **teamstate's expiry timers** (`time.AfterFunc`, at most one per team) run in their own goroutines and take the team's entry lock like a write; see `internal/teamstate/README.md`, "Concurrency and locking".
@@ -437,12 +482,18 @@ Any other path or method:
 | Shutdown wait 10 s | `server.shutdown_timeout`; keep it above `storage.write_timeout` | Edit and restart |
 | Heartbeat 25 s | `live.heartbeat`; keep it under any proxy's idle timeout | Edit and restart |
 | Slow-client buffer 16 events | `live.subscriber_buffer` | Edit and restart |
+| Hub shards 64 | `live.hub_shards` (≥ 1) | Edit and restart |
+| Stream write deadline 10 s | `live.write_timeout` (> 0) | Edit and restart |
+| Reconnect delay 1–6 s | `live.retry_min` (≥ 1 ms), `live.retry_max` (≥ `retry_min`) | Edit and restart |
+| Open streams | The process's file-descriptor limit: one per stream, plus Postgres and listeners. Game day (~10,000 phones) needs well over 10,000 (`ulimit -n`), and any proxy's idle timeout must exceed `live.heartbeat` | Raise the limit in the service config |
 | Sweep every 10 m | `auth.login_code_sweep` | Edit and restart |
 | Port 3000 | `PORT` in `.env` | Set and restart |
 
 ## Not decided yet
 - **A lost instance lock is noticed only at the next check**, up to **5 s** (`storage.instance_lock_check`) plus the check's timeout. A second backend starting in that window would run alongside this one briefly.
 - **No request logging, panic recovery beyond `net/http`'s, or rate limiting.**
+- **Production routing of `/api/events`** (reverse proxy straight to the backend) waits for the deployment setup.
+- **The schemas of game-wide events**, and slimming `team_state` (it resends `waypoints`, `patterns` and `shapes`, which only grow), wait for the schema pass.
 
 ## The test harness
 The `*_test.go` files are package `server_test`. They run the real `server.Build` handler over HTTP against `TEST_DATABASE_URL`, with a fake Google. Without `TEST_DATABASE_URL` every test skips.
@@ -484,10 +535,10 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `startedTeam(prefix)` | `tests/teamstate_test.go` | `fullTeam`, everyone but the leader ready, leader starts |
 
 ### `openStream(p)` (`tests/events_test.go`)
-- Opens `GET /api/teams/me/events` with `p`'s token on a cancellable context (cancelled at cleanup). Fails unless `200` and `Content-Type: text/event-stream`.
-- A goroutine scans lines: `event: X` sets the name; `data: {...}` is parsed as JSON and sent to `states` if the name is `team_state`, else to `events`. Comment lines (`: ping`) are ignored. Both channels hold 64 and close when the body ends.
+- Opens `GET /api/events` with `p`'s Bearer token on a cancellable context (cancelled at cleanup), through `openStreamAt(path, auth)`, which takes any path and lets `auth` set the credentials (a cookie, for instance). Fails unless `200` and `Content-Type: text/event-stream`.
+- A goroutine scans lines: `event: X` sets the name; `data: {...}` is parsed as JSON and routed by name: `hello` to `hellos`, `team_state` to `states`, anything else to `events`. Comment lines (`: ping`) and `retry:` are ignored. The channels hold 64 and close when the body ends.
 - `stream.next(t, what)`: the next `team` or `no_team` event, failing after 3 s or if the stream closed. `stream.nextState(t, what)` likewise for the next `team_state`.
-- `stream.seen()`: the names of every event received so far, across both channels, in arrival order (for checking order between `team` and `team_state`).
+- `stream.seen()`: the names of every event received so far, across all channels, in arrival order (for checking order between `hello`, `team` and `team_state`).
 - `expectTeam(t, what, ev, n)`: fails unless `ev` is `team` with `n` members; returns its data. `expectNoTeam` likewise for `no_team`. `memberReady(team, id)` reads a member's `is_ready`.
 - `stream.cancel()` disconnects, which is how cleanup is tested.
 
@@ -531,9 +582,11 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
 | `TestSimStaleScanReachesEveryone` | `tests/simulation_test.go` | real time: after one scan, with nobody acting, every player's stream gets a `team_state` with an empty stack once the scan is older than `simWindow` + `simGrace` (3 s), and every countdown resets |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
-| `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401`; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
+| `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
+| `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello`, its `server_time` within a second of now, then `no_team` |
+| `TestStreamCookieAndAlias` | `tests/events_test.go` | `/api/events` accepts the `labyrinth_token` cookie; `GET /api/teams/me` and the alias refuse it (`401`), as does `/api/events` with a bad cookie; the alias with Bearer serves `hello`, `no_team` |
 | `TestStreamIncludesTeamState` | `tests/events_test.go` | `team_state` follows `team` on connect; `GET /api/teams/me/state` works, and is `404 not_in_team` without a team |
-| `TestStartPublishesTeamState` | `tests/events_test.go` | a full, ready team with every member's stream open: when the leader starts, each stream gets the `IN_GAME` `team`, then an empty `team_state`, in that order (events seen: `team`, `team_state`, `team`, `team_state`), without reconnecting |
+| `TestStartPublishesTeamState` | `tests/events_test.go` | a full, ready team with every member's stream open: when the leader starts, each stream gets the `IN_GAME` `team`, then an empty `team_state`, in that order (events seen: `hello`, `team`, `team_state`, `team`, `team_state`), without reconnecting |
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 

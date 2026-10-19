@@ -74,6 +74,14 @@ type LiveSettings struct {
 	Heartbeat Duration `toml:"heartbeat"`
 	// SubscriberBuffer is how many events a client may fall behind.
 	SubscriberBuffer int `toml:"subscriber_buffer"`
+	// HubShards is how many locks the hub spreads streams over.
+	HubShards int `toml:"hub_shards"`
+	// WriteTimeout is how long one write to a stream may take.
+	WriteTimeout Duration `toml:"write_timeout"`
+	// RetryMin is the shortest reconnect delay sent to a client.
+	RetryMin Duration `toml:"retry_min"`
+	// RetryMax is the longest reconnect delay sent to a client.
+	RetryMax Duration `toml:"retry_max"`
 }
 
 // ServerSettings is config.toml's [server] table.
@@ -179,6 +187,10 @@ func (s Settings) validate() []error {
 	check(s.Server.MaxBodyBytes >= 1, "server.max_body_bytes must be at least 1")
 	check(s.Live.Heartbeat.Duration > 0, "live.heartbeat must be positive")
 	check(s.Live.SubscriberBuffer >= 1, "live.subscriber_buffer must be at least 1")
+	check(s.Live.HubShards >= 1, "live.hub_shards must be at least 1")
+	check(s.Live.WriteTimeout.Duration > 0, "live.write_timeout must be positive")
+	check(s.Live.RetryMin.Duration >= time.Millisecond, "live.retry_min must be at least 1ms")
+	check(s.Live.RetryMax.Duration >= s.Live.RetryMin.Duration, "live.retry_max must be at least live.retry_min")
 	check(s.Storage.WriteTimeout.Duration > 0, "storage.write_timeout must be positive")
 	return errs
 }
