@@ -75,7 +75,14 @@ func TestQRVerify(t *testing.T) {
 
 	expect(t, "expired", verify(qrToken("1001", time.Now().Unix()-100)), http.StatusConflict, "qr_expired")
 
-	bad := fresh[:len(fresh)-1] + "A"
+	// Flip the last signature character to a different, still-valid base64url
+	// one, so the signature can't match regardless of the real value.
+	last := fresh[len(fresh)-1]
+	replacement := byte('A')
+	if last == 'A' {
+		replacement = 'B'
+	}
+	bad := fresh[:len(fresh)-1] + string(replacement)
 	expect(t, "tampered", verify(bad), http.StatusBadRequest, "invalid_qr")
 
 	expect(t, "empty body", e.call("POST", "/api/qr/verify", p, map[string]string{}), http.StatusBadRequest, "invalid_body")
