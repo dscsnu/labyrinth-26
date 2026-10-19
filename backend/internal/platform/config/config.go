@@ -4,6 +4,7 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
@@ -22,6 +23,11 @@ type Config struct {
 	// JWTKey signs access tokens and the OAuth state cookie. The SvelteKit app
 	// verifies tokens with the matching public key.
 	JWTKey ed25519.PrivateKey
+
+	// QRSecret signs and verifies the short-lived waypoint QR tokens
+	// (HMAC-SHA256). It never leaves the backend: the /qr display fetches a
+	// fresh signed token, it doesn't get the secret.
+	QRSecret []byte
 
 	GoogleClientID     string
 	GoogleClientSecret string
@@ -83,6 +89,14 @@ func Load() (*Config, error) {
 		cfg.JWTKey = key
 	}
 
+	if raw := require("QR_SECRET"); raw != "" {
+		secret, err := ParseQRSecret(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("QR_SECRET: %w", err))
+		}
+		cfg.QRSecret = secret
+	}
+
 	settings, err := LoadSettings(SettingsPath())
 	if err != nil {
 		errs = append(errs, err)
@@ -122,6 +136,28 @@ func ParsePrivateKey(b64 string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("must be an Ed25519 key")
 	}
 	return ed, nil
+}
+
+// ParseQRSecret decodes a base64 QR signing secret and rejects one shorter
+// than 32 bytes. Generate with: go run . keygen (prints QR_SECRET too).
+func ParseQRSecret(b64 string) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if err != nil {
+		return nil, errors.New("must be base64 (generate with: go run . keygen)")
+	}
+	if len(raw) < 32 {
+		return nil, fmt.Errorf("must be at least 32 bytes, got %d", len(raw))
+	}
+	return raw, nil
+}
+
+// GenerateQRSecret returns a base64 32-byte QR signing secret.
+func GenerateQRSecret() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
 // GenerateKeyPair returns a new Ed25519 keypair as base64 PKCS#8 (private)

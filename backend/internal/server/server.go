@@ -19,6 +19,7 @@ import (
 	"labyrinth/internal/platform/identity"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
+	"labyrinth/internal/qr"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -109,6 +110,16 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	teamsAPI.Routes(mux, authAPI.Authed)
 	teamsAPI.AdminRoutes(mux, admin)
 	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
+	qrAPI := qr.NewAPI(qr.New(cfg.QRSecret, qr.Rules{
+		Rotate:    set.QR.Rotate.Duration,
+		Tolerance: set.QR.Tolerance.Duration,
+	}, theAtlas), log)
+	qrAPI.Routes(mux, authAPI.Authed)
+	// TEMPORARY (dev): mint is staff-only in production; opened to any
+	// signed-in user so /qr can be tried before roles are set. Restore with:
+	//   staff := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireStaff(h)) }
+	//   qrAPI.StaffRoutes(mux, staff)
+	qrAPI.StaffRoutes(mux, authAPI.Authed)
 	// The one event stream. Browsers open it on the shared domain with the
 	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.
 	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(http.HandlerFunc(app.events)))

@@ -41,6 +41,9 @@ const (
 	frontendURL = "http://frontend.test"
 )
 
+// qrTestSecret is the fixed QR signing secret the tests mint tokens with.
+var qrTestSecret = []byte("0123456789abcdef0123456789abcdef")
+
 // env is a running backend on a fresh database with a fake Google.
 type env struct {
 	t        *testing.T
@@ -111,6 +114,7 @@ func setup(t *testing.T, allowedDomains ...string) *env {
 		JWTKey: jwtKey, Settings: configtest.Settings(t),
 		GoogleClientID: clientID, GoogleClientSecret: "secret",
 		PublicURL: publicURL, FrontendURL: feURL, AllowedEmailDomains: allowedDomains,
+		QRSecret: qrTestSecret,
 	}
 	e.cfg, e.log = cfg, log
 	e.endpoints = auth.GoogleEndpoints{

@@ -25,6 +25,15 @@ code_attempts = 10
 # fixed-size array: a pattern's points plus one wrong scan).
 max_pattern_points = 6
 
+[qr]
+# How often a waypoint's rotating QR changes, and thus how often the /qr
+# display re-issues a token. Allowed: more than 0.
+rotate = "5s"
+# How much longer than rotate a scan stays accepted, absorbing the time a
+# phone takes to scan and submit. A token is valid for rotate + tolerance
+# after it's issued. Allowed: more than 0.
+tolerance = "5s"
+
 [spell]
 # Base damage awarded per waypoint in the pattern (one per member involved).
 # Allowed: more than 0.
