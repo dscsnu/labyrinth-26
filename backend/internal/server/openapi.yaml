@@ -14,7 +14,9 @@ info:
     **Limits.** Request bodies over `server.max_body_bytes` (1 MiB) get `400 invalid_body`.
     Unknown paths get 404 `not_found`, wrong methods 405 `method_not_allowed`, both as envelopes.
 
-    **Live updates** come over server-sent events at `GET /api/teams/me/events`.
+    **Live updates** come over one server-sent event stream per user at `GET /api/events`, which also
+    accepts the `labyrinth_token` cookie (a browser's EventSource can't send headers).
+    `GET /api/teams/me/events` is a deprecated alias of it (Bearer only).
 
     ⚠ `POST /api/teams/me/state/scans` takes the raw 4-digit waypoint ID until QR verification exists.
 
@@ -362,30 +364,50 @@ paths:
           $ref: "#/components/responses/Error"
           description: "Codes: `not_in_game`, `no_shape_selected`, `waypoint_already_scanned`, `member_already_scanned`"
 
-  /api/teams/me/events:
+  /api/events:
     get:
       tags: [live]
       summary: Live event stream (server-sent events)
+      security:
+        - bearer: []
+        - tokenCookie: []
       description: |
-        `text/event-stream`. On connect: `team` (or `no_team`), then `team_state` if you're in a team. Then one
-        event per change, each a full snapshot (never a diff), and a `: ping` comment after `live.heartbeat`
-        (25 s) with no event. A client that falls `live.subscriber_buffer` (16) events behind is dropped and
-        should reconnect (EventSource does this itself); the first events after a reconnect are full snapshots.
+        `text/event-stream`, the caller's one stream: it carries events of every scope (the user's own, their
+        team's, and game-wide). On connect: a `retry:` line (a random reconnect delay between `live.retry_min`
+        and `live.retry_max`, 1–6 s, so a restart doesn't bring every client back at once), then `hello`, then
+        `team` (or `no_team`), then `team_state` if you're in a team, then game-wide resources (none yet). Then
+        one event per change, each a full snapshot (never a diff), and a `: ping` comment after
+        `live.heartbeat` (25 s) with no event. A client that falls `live.subscriber_buffer` (16) events behind,
+        or can't take a write within `live.write_timeout` (10 s), is dropped and should reconnect (EventSource
+        does this itself); the first events after a reconnect are full snapshots.
+
+        Nobody subscribes to channels: the server routes each event by user ID, to one user, to a team's
+        current members, or to every stream.
 
         `team_state` is published to every member when the leader starts (the empty state, right after the
         `IN_GAME` `team`), after every accepted selection, clear, scan and cast, and also
         **by the server when a correct scan goes stale** (`game.scan_window` + `game.scan_grace`, 65 s, after
         `scanned_at`), with nobody acting: the stack shrinks on every screen without a request. It carries
         `last_cast`, the team's newest cast. Rejections and no-ops publish nothing. The full reference (every
-        trigger, ordering, heartbeat, reconnection) is `backend/internal/server/README.md`, "The event stream".
+        trigger, ordering, heartbeat, reconnection, and what clients must do) is
+        `backend/internal/server/README.md`, "The event stream".
 
-        | event | data |
-        |---|---|
-        | `team` | `Team` |
-        | `no_team` | `{}` |
-        | `team_state` | `TeamState` |
+        Game-wide events (quizzes, quick-time events; none yet) will each carry `null` when nothing is active,
+        or an object with at least an `id`. Their schemas are not final.
+
+        | event | scope | data |
+        |---|---|---|
+        | `hello` | stream | `Hello` |
+        | `team` | team | `Team` |
+        | `no_team` | user | `{}` |
+        | `team_state` | team | `TeamState` |
 
         ```
+        retry: 3412
+
+        event: hello
+        data: {"server_time":"2026-10-18T12:00:00.123456Z"}
+
         event: team
         data: {"id":"482913","name":"Scanners",…}
 
@@ -402,12 +424,32 @@ paths:
               schema: { type: string }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
+  /api/teams/me/events:
+    get:
+      tags: [live]
+      deprecated: true
+      summary: Deprecated alias of GET /api/events
+      description: |
+        The same stream as `GET /api/events`, Bearer only. Kept until the frontend moves to `/api/events`.
+      responses:
+        "200":
+          description: The stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+
 components:
   securitySchemes:
     bearer:
       type: http
       scheme: bearer
       bearerFormat: JWT (EdDSA)
+    tokenCookie:
+      type: apiKey
+      in: cookie
+      name: labyrinth_token
+      description: The access token in the SvelteKit app's httpOnly cookie. Accepted only by `GET /api/events`.
 
   responses:
     Error:
@@ -443,6 +485,14 @@ components:
                   payload: { $ref: "#/components/schemas/TeamState" }
 
   schemas:
+    Hello:
+      type: object
+      description: |
+        The first event on every stream. Clients compare `server_time` with their own clock to correct
+        countdowns; the server owns time and publishes time-driven changes itself.
+      required: [server_time]
+      properties:
+        server_time: { type: string, format: date-time, description: The server's clock when the stream opened, UTC. }
     Success:
       type: object
       required: [success]

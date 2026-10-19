@@ -28,6 +28,10 @@ login_code_sweep = "10m"
 [live]
 heartbeat = "25s"
 subscriber_buffer = 16
+hub_shards = 64
+write_timeout = "10s"
+retry_min = "1s"
+retry_max = "6s"
 [server]
 read_header_timeout = "10s"
 read_timeout = "30s"
@@ -92,6 +96,10 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"zero login code sweep":             {`login_code_sweep = "10m"`, `login_code_sweep = "0s"`, "auth.login_code_sweep must be positive"},
 		"zero heartbeat":                    {`heartbeat = "25s"`, `heartbeat = "0s"`, "live.heartbeat must be positive"},
 		"zero subscriber buffer":            {"subscriber_buffer = 16", "subscriber_buffer = 0", "live.subscriber_buffer must be at least 1"},
+		"zero hub shards":                   {"hub_shards = 64", "hub_shards = 0", "live.hub_shards must be at least 1"},
+		"zero live write timeout":           {`write_timeout = "10s"`, `write_timeout = "0s"`, "live.write_timeout must be positive"},
+		"zero retry min":                    {`retry_min = "1s"`, `retry_min = "0s"`, "live.retry_min must be at least 1ms"},
+		"retry max below min":               {`retry_max = "6s"`, `retry_max = "500ms"`, "live.retry_max must be at least live.retry_min"},
 		"zero header timeout":               {`read_header_timeout = "10s"`, `read_header_timeout = "0s"`, "server.read_header_timeout must be positive"},
 		"zero idle timeout":                 {`idle_timeout = "2m"`, `idle_timeout = "0s"`, "server.idle_timeout must be positive"},
 		"zero shutdown timeout":             {`shutdown_timeout = "10s"`, `shutdown_timeout = "0s"`, "server.shutdown_timeout must be positive"},

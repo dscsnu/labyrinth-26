@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -9,23 +11,23 @@ import (
 	"labyrinth/internal/platform/live"
 )
 
-// testBuffer returns config.toml's live.subscriber_buffer, the buffer the hub
-// tests use.
-func testBuffer(t *testing.T) int {
+// newHub returns a hub with config.toml's live.hub_shards and
+// live.subscriber_buffer, and that buffer.
+func newHub(t testing.TB) (*live.Hub, int) {
 	t.Helper()
-	return configtest.Settings(t).Live.SubscriberBuffer
+	set := configtest.Settings(t).Live
+	return live.NewHub(set.HubShards, set.SubscriberBuffer), set.SubscriberBuffer
 }
 
 // TestHubDropsSlowSubscriberOnly checks that a subscriber that falls a full
 // buffer behind is dropped while others keep receiving.
 func TestHubDropsSlowSubscriberOnly(t *testing.T) {
-	buffer := testBuffer(t)
-	h := live.NewHub(buffer)
+	h, buffer := newHub(t)
 	user := uuid.New()
 	slow, fast := h.Subscribe(user), h.Subscribe(user)
 
 	for i := range buffer + 1 {
-		h.Send(user, live.Event{Name: "team", Data: []byte{byte('0' + i%10)}})
+		h.Send(user, live.NewEvent("team", []byte{byte('0' + i%10)}))
 		<-fast.C // fast keeps up
 	}
 
@@ -37,8 +39,8 @@ func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 		t.Fatalf("slow subscriber got %d buffered events before being dropped, want %d", n, buffer)
 	}
 
-	h.Send(user, live.Event{Name: "team", Data: []byte("x")})
-	if ev, ok := <-fast.C; !ok || string(ev.Data) != "x" {
+	h.Send(user, live.NewEvent("team", []byte("x")))
+	if ev, ok := <-fast.C; !ok || string(ev.Data()) != "x" {
 		t.Fatalf("fast subscriber stopped receiving: %v %v", ev, ok)
 	}
 	if got := h.Count(); got != 1 {
@@ -49,7 +51,7 @@ func TestHubDropsSlowSubscriberOnly(t *testing.T) {
 // TestHubCloseAndRemove checks that Close is idempotent, that closing the hub
 // ends every stream, and that late subscribers start closed.
 func TestHubCloseAndRemove(t *testing.T) {
-	h := live.NewHub(testBuffer(t))
+	h, _ := newHub(t)
 	a, b := h.Subscribe(uuid.New()), h.Subscribe(uuid.New())
 
 	a.Close()
@@ -62,7 +64,8 @@ func TestHubCloseAndRemove(t *testing.T) {
 	if _, ok := <-b.C; ok {
 		t.Fatal("subscription open after hub close")
 	}
-	b.Close() // safe after hub close
+	b.Close()                                          // safe after hub close
+	h.Broadcast(live.NewEvent("quiz", []byte("null"))) // no-op once closed
 
 	late := h.Subscribe(uuid.New())
 	if _, ok := <-late.C; ok {
@@ -76,17 +79,121 @@ func TestHubCloseAndRemove(t *testing.T) {
 // TestHubSendsOnlyToThatUser checks that events reach only the addressed
 // user's streams.
 func TestHubSendsOnlyToThatUser(t *testing.T) {
-	h := live.NewHub(testBuffer(t))
+	h, _ := newHub(t)
 	alice, bob := uuid.New(), uuid.New()
 	a, b := h.Subscribe(alice), h.Subscribe(bob)
 
-	h.Send(alice, live.Event{Name: "team", Data: []byte("{}")})
-	if ev := <-a.C; ev.Name != "team" {
+	h.Send(alice, live.NewEvent("team", []byte("{}")))
+	if ev := <-a.C; ev.Name() != "team" {
 		t.Fatalf("alice got %v", ev)
 	}
 	select {
 	case ev := <-b.C:
 		t.Fatalf("bob got alice's event %v", ev)
 	default:
+	}
+}
+
+// TestHubBroadcastReachesEveryStream checks that a broadcast reaches every
+// stream of every user, across shards, and that a slow subscriber is dropped
+// without holding back the rest.
+func TestHubBroadcastReachesEveryStream(t *testing.T) {
+	h, buffer := newHub(t)
+	const users = 200 // enough to land on every shard of a small hub
+	var subs []*live.Subscription
+	for range users {
+		id := uuid.New()
+		subs = append(subs, h.Subscribe(id), h.Subscribe(id)) // two tabs each
+	}
+	slow := h.Subscribe(uuid.New())
+
+	for i := range buffer + 1 {
+		h.Broadcast(live.NewEvent("quiz", fmt.Appendf(nil, `{"id":%d}`, i)))
+		for j, s := range subs {
+			if ev := <-s.C; ev.Name() != "quiz" {
+				t.Fatalf("stream %d got %q", j, ev.Name())
+			}
+		}
+	}
+	n := 0
+	for range slow.C {
+		n++
+	}
+	if n != buffer {
+		t.Fatalf("slow subscriber got %d events before being dropped, want %d", n, buffer)
+	}
+	if got := h.Count(); got != len(subs) {
+		t.Fatalf("count = %d, want %d", got, len(subs))
+	}
+}
+
+// TestHubConcurrentUse runs Subscribe, Send, Broadcast and Close side by side;
+// run under -race it checks the hub's locking.
+func TestHubConcurrentUse(t *testing.T) {
+	h, _ := newHub(t)
+	ids := make([]uuid.UUID, 32)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Go(func() {
+			sub := h.Subscribe(id)
+			defer sub.Close()
+			for range 50 {
+				h.Send(id, live.NewEvent("team", []byte("{}")))
+				h.Broadcast(live.NewEvent("quiz", []byte("null")))
+				for len(sub.C) > 0 {
+					<-sub.C
+				}
+			}
+		})
+	}
+	wg.Wait()
+	h.Close()
+}
+
+// BenchmarkHubSend measures Send to one stream per user from many
+// goroutines at once, the team-publish hot path.
+func BenchmarkHubSend(b *testing.B) {
+	h, _ := newHub(b)
+	const users = 10_000
+	ids := make([]uuid.UUID, users)
+	for i := range ids {
+		ids[i] = uuid.New()
+		sub := h.Subscribe(ids[i])
+		go func() { // a reader that keeps up
+			for range sub.C {
+			}
+		}()
+	}
+	defer h.Close()
+	ev := live.NewEvent("team_state", make([]byte, 512))
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			h.Send(ids[i%users], ev)
+			i++
+		}
+	})
+}
+
+// BenchmarkHubBroadcast measures one Broadcast to 10,000 streams: the time
+// to queue the event on every stream, not to write it out.
+func BenchmarkHubBroadcast(b *testing.B) {
+	h, _ := newHub(b)
+	const streams = 10_000
+	for range streams {
+		sub := h.Subscribe(uuid.New())
+		go func() {
+			for range sub.C {
+			}
+		}()
+	}
+	defer h.Close()
+	ev := live.NewEvent("quiz", make([]byte, 256))
+	for b.Loop() {
+		h.Broadcast(ev)
 	}
 }

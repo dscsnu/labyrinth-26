@@ -130,7 +130,7 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish, and time the next expiry
-	s.publish(t.ID, &next)
+	s.publish(e, t.ID, &next)
 	s.scheduleExpiry(e, t.ID, &next)
 	return s.view(t.ID, next), nil
 }
@@ -169,7 +169,7 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish, and time the next expiry
-	s.publish(t.ID, &next)
+	s.publish(e, t.ID, &next)
 	s.scheduleExpiry(e, t.ID, &next)
 	return s.view(t.ID, next), nil
 }
@@ -256,7 +256,7 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish, and time the next expiry
-	s.publish(t.ID, &next)
+	s.publish(e, t.ID, &next)
 	s.scheduleExpiry(e, t.ID, &next)
 	res.State = s.view(t.ID, next)
 	return res, nil
@@ -285,5 +285,5 @@ func (s *Store) PublishTeam(teamID string) {
 	defer e.mu.Unlock()
 
 	// 6. publish
-	s.publish(teamID, e.cur.Load())
+	s.publish(e, teamID, e.cur.Load())
 }

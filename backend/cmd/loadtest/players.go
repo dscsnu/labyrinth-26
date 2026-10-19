@@ -200,7 +200,7 @@ type stream struct {
 // delivery latency for teammates' ready-ups and the leader's start.
 func (c *client) openStream(p player, f *fanout) (*stream, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/api/teams/me/events", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/api/events", nil)
 	req.Header.Set("Authorization", "Bearer "+p.token)
 	res, err := c.sse.Do(req)
 	if err != nil {

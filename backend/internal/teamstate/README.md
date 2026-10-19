@@ -38,6 +38,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Expiry timer** | At most one per team: a `Clock` timer set for the moment the stack's oldest correct scan goes stale (`scanned_at` + 65 s + 1 µs, `Stack.NextExpiry`). When it fires, `expire` drops the stale scans and publishes `team_state`. None is pending when the stack holds no correct scans (empty, cast, purged, or only wrong scans). |
 | **Clock** | Where the store gets time: `Now()` and `AfterFunc(d, f)`. `systemClock` is the real one (`time.Now`, `time.AfterFunc`); tests pass a fake through `Rules.Clock`. |
 | **Cast** | A completion: the moment the stack becomes exactly a pattern of the selected shape. Every cast is logged in `team_cast`, repeats included; `team_pattern` keeps only the first completion of each pattern. The client calls it casting a spell. |
+| **Spell lifecycle** | What the client shows as a spell, read from `team_state` alone, with no event of its own: it **starts** when `selection` is set, members **finish their part** as `stack` grows (each `stack[].user_id` is a member who scanned; its length is how many), and it **finishes** when `last_cast` changes (a new `cast_at`). |
 | **Last cast** | `State.LastCast`, `last_cast` in JSON: the team's newest cast (pattern, shape, who, when, and whether the pattern was already completed). Kept until the next cast; a new selection or a clear doesn't remove it. |
 | **Wrong scan** | A scan whose waypoint, with the correct scans already in the stack, isn't part of any pattern of the selected shape. It's still pushed (never rejected), occupies its member's one scan and its waypoint slot, poisons the selection (it can no longer complete), and **never goes stale**: it stays until the selection is purged. The client is never told which scans are wrong. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection. |
@@ -105,7 +106,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 - **Lock-free checks first** (§6 variation (a)): `Select` resolves the shape with `Atlas.ShapeIndex`, `Scan` the waypoint with `Atlas.WaypointIndex`, both before the team and the lock.
 - **`Scan`'s checks**, in order, over the live scans: same waypoint → `ErrWaypointAlreadyScanned`; same member → `ErrMemberAlreadyScanned`; then `Atlas.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (still pushed, marked `Wrong`). Completion is `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape; a wrong scan can't complete because it's in the set. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, and `next.LastCast` is set to `Cast{Active: true, Pattern: p, By: caller, At: now, AlreadyCompleted}`; `alreadyCompleted` is passed to `insertCompletingScan`.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME`.
-- **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none), `6. publish` (`publish`, which reads the roster through `Teams.ByID`). Not a write: no build, persist or apply, and it doesn't touch the expiry timer. It takes the entry lock so its event is ordered with the team's writes.
+- **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team). Not a write: no build, persist or apply, and it doesn't touch the expiry timer. It takes the entry lock so its event is ordered with the team's writes.
 - **Declared here:** the errors, the `Outcome…` constants, and `ScanResult`.
 
 ### `db.go`: SQL
@@ -153,7 +154,8 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
   5. apply, 6. publish `team_state`, then `scheduleExpiry` for the next oldest correct scan
 
   There's no step 4: it's a **memory-only change** (AGENTS.md §6). Postgres never stores the stack, only `team_scan`; `Load` rebuilds it, and the same scans are stale there by their stored times.
-- **`publish`** and **`event`** send `team_state` to every member.
+- **`publish(e, teamID, st)`**, called with `e.mu` held, sends `team_state` to every member. The recipients are **`e.members`**, the team's roster cached on the first publish that finds the team `IN_GAME` (its roster is frozen from then on, so the cache can't go stale). Until then it reads the roster through `Teams.ByID` each time. So a publish reads nothing outside the entry: no index lock, no lookup.
+- **`event`** encodes the `View` once as a `live.NewEvent("team_state", …)`; every member's stream gets the same bytes.
 - **`now`** returns `clock.Now()`: UTC, truncated to microseconds (Postgres's precision), so a restart reproduces times exactly.
 
 ## Data model: memory
@@ -175,6 +177,9 @@ entry
   cur         atomic.Pointer[State]  the current snapshot; readers load it lock-free
   stopExpiry  func() bool            cancels the pending expiry timer; nil if none.
                                      Guarded by mu
+  members     []uuid.UUID            the user IDs events go to: the frozen roster,
+                                     cached by publish once the team is IN_GAME;
+                                     nil until then. Guarded by mu
 
 State                                (never modified once stored)
   Waypoints  atlas.WaypointSet  uint64      visited waypoints, bit i = waypoint index i
@@ -241,6 +246,7 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 | newest **6** (`game.max_pattern_points`) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag) |
 | (none: built from the atlas and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
 | (none: memory-only) | `entry.stopExpiry`, the expiry timer: re-armed by `Load` for every team from its reloaded stack, so it fires at the same moment it would have |
+| (none: memory-only, from teams) | `entry.members`, the roster cache: refilled from `Teams.ByID` on each team's first publish after a restart. teams reloads rosters from `teammember`, and an `IN_GAME` roster never changes, so the cache always matches |
 
 **Casts before migration `0007` aren't logged**, so a team whose only casts predate it reloads with `last_cast: null` although its `patterns` are non-empty. Every cast since is logged, and the newest row is exactly the `LastCast` memory held, so a restart reproduces it.
 
@@ -474,7 +480,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 - to every member after every change: select, clear, accepted scan, cast, and `reconcile` (never after a rejection or no-op)
 - to every member when the expiry timer drops a stale correct scan, with nobody acting
 - to every member right after the `IN_GAME` `team` event when the leader starts (`PublishTeam`, through teams' `Rules.OnStart`): the empty state
-- right after `team` when a member connects to `GET /api/teams/me/events`
+- right after `team` when a member connects to `GET /api/events`
 
 Every trigger, the ordering guarantees and the wire format: [`internal/server/README.md`, "The event stream"](../server/README.md#the-event-stream).
 
@@ -666,6 +672,8 @@ Checked in this order:
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
   | `TestPublishTeam` | `PublishTeam` sends the empty state to every member of a started team; after a selection it sends the current state (square selected) without changing it; nothing for an unknown team or a lobby team |
+
+- `tests/publish_bench_test.go`: **`BenchmarkTeamStatePublish`**, parallel `PublishTeam` calls across 1,666 `IN_GAME` teams (10,000 players at `teams.size` 6; an in-memory `Teams`, so no team rows), every member with an open subscription. It measures the lock, encoding once and queueing for each member: about **1.0 µs** a publish on a 10-core laptop, down from 4.4 µs before the sharded hub and roster cache (`internal/platform/README.md`, "Performance").
   | `TestStaleScanIsPublished` | walkthrough 6: at exactly the limit nothing is sent; at limit + 1 µs the stale scan is dropped and `team_state` published, memory agrees, one timer pending for the next scan; after the second expiry an empty stack and no timer pending; the member can scan again under the same selection |
   | `TestExpiryTimerFollowsWrites` | one timer after two scans; none after a purge; none for a stack of only a wrong scan; none after a cast |
   | `TestLastCast` | walkthrough 7: `last_cast` null before any cast; set (pattern, shape, `cast_by`, `cast_at`) after a cast; `already_completed` on the repeat; kept by a new selection; two `team_cast` rows; a restart reloads the same `last_cast` (JSON equal) |

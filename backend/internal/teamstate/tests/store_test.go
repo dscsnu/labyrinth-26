@@ -184,7 +184,7 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		ids = append(ids, u.ID)
 	}
 
-	hub := live.NewHub(set.Live.SubscriberBuffer)
+	hub := live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer)
 	ts := pgtest.Must(teams.Load(ctx, db, hub, pgtest.Quiet, teams.Rules{
 		Size: set.Teams.Size, NameMaxLength: set.Teams.NameMaxLength,
 		WriteTimeout: set.Storage.WriteTimeout.Duration, CodeAttempts: set.Teams.CodeAttempts,
@@ -413,7 +413,7 @@ func TestRescanIsRejected(t *testing.T) {
 	}
 	select {
 	case ev := <-sub.C:
-		t.Fatalf("rejected rescan published %s", ev.Name)
+		t.Fatalf("rejected rescan published %s", ev.Name())
 	default:
 	}
 }
@@ -837,10 +837,10 @@ func TestStateIsPublished(t *testing.T) {
 	var sel, scanned teamstate.View
 	for _, v := range []*teamstate.View{&sel, &scanned} {
 		ev := <-sub.C
-		if ev.Name != "team_state" {
-			t.Fatalf("event %q", ev.Name)
+		if ev.Name() != "team_state" {
+			t.Fatalf("event %q", ev.Name())
 		}
-		if err := json.Unmarshal(ev.Data, v); err != nil {
+		if err := json.Unmarshal(ev.Data(), v); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -886,9 +886,9 @@ func TestPublishTeam(t *testing.T) {
 	lobby.state.PublishTeam(lobby.teamID)
 	select {
 	case ev := <-subs[0].C:
-		t.Fatalf("unknown team published %s", ev.Name)
+		t.Fatalf("unknown team published %s", ev.Name())
 	case ev := <-lobbySub.C:
-		t.Fatalf("lobby team published %s", ev.Name)
+		t.Fatalf("lobby team published %s", ev.Name())
 	default:
 	}
 }
@@ -899,11 +899,11 @@ func nextState(t *testing.T, sub *live.Subscription) teamstate.View {
 	t.Helper()
 	select {
 	case ev := <-sub.C:
-		if ev.Name != "team_state" {
-			t.Fatalf("event %q, want team_state", ev.Name)
+		if ev.Name() != "team_state" {
+			t.Fatalf("event %q, want team_state", ev.Name())
 		}
 		var v teamstate.View
-		if err := json.Unmarshal(ev.Data, &v); err != nil {
+		if err := json.Unmarshal(ev.Data(), &v); err != nil {
 			t.Fatal(err)
 		}
 		return v
@@ -929,7 +929,7 @@ func TestStaleScanIsPublished(t *testing.T) {
 	f.clock.at(limit) // exactly limit old: still live, nothing sent
 	select {
 	case ev := <-sub.C:
-		t.Fatalf("published %s before the scan was stale", ev.Name)
+		t.Fatalf("published %s before the scan was stale", ev.Name())
 	default:
 	}
 	f.clock.at(limit + time.Microsecond)

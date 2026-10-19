@@ -36,7 +36,7 @@ Every number below that comes from `config.toml` is shown with its current value
 3. **Join.** Each teammate sends `POST /api/teams/join {"team_id"}` until the team has **6** (`teams.size`). Members are kept in join order.
 4. **Ready.** Each non-leader sends `PUT /api/teams/me/ready {"ready": true}`. They can un-ready, leave and rejoin while in the lobby.
 5. **Start.** The leader sends `POST /api/teams/me/start`. With exactly **6** (`teams.size`) members, all non-leaders ready, the team becomes `IN_GAME` and its roster is frozen. From here `teamstate` takes over: right after the `IN_GAME` `team` event, every member gets the team's (empty) `team_state` through `Rules.OnStart`.
-6. **Live updates.** Every member's event stream (`GET /api/teams/me/events`) gets the whole team after every change, and `no_team` when they leave.
+6. **Live updates.** Every member's event stream (`GET /api/events`) gets the whole team after every change, and `no_team` when they leave.
 
 - **Why the leader doesn't ready up.** Starting is the leader's "ready". A separate flag would only add a state that can disagree with pressing start.
 - **Why join order decides the next leader.** It's stable, visible to everyone, and survives a restart (`joined_at`, ties broken by `user_id`).
@@ -189,7 +189,7 @@ All routes need `Authorization: Bearer <token>` (`401` without).
 ```
 Emails are never included. **Error body:** `{"success": false, "code": "team_full", "message": "team is full"}`.
 
-**Live events** on `GET /api/teams/me/events`: `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar. On a start, `team` is followed by the team's `team_state` (sent by teamstate through `Rules.OnStart`).
+**Live events** on `GET /api/events` (team scope, sent to each member with `Hub.Send`): `team` (the JSON above), or `no_team` (`{}`). `team` is also sent when a member signs in again with a changed name or avatar. On a start, `team` is followed by the team's `team_state` (sent by teamstate through `Rules.OnStart`).
 
 ## Rules and cases
 

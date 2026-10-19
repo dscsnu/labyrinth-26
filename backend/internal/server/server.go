@@ -5,9 +5,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/auth"
@@ -31,8 +34,8 @@ type App struct {
 	Teams      *teams.Store
 	TeamState  *teamstate.Store
 
-	db        *postgres.DB
-	heartbeat time.Duration
+	db     *postgres.DB
+	stream *live.Streamer
 }
 
 // Build loads in-memory state from Postgres and assembles the HTTP routes.
@@ -40,7 +43,7 @@ type App struct {
 // fake in tests).
 func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth.GoogleEndpoints, log *slog.Logger) (*App, error) {
 	set := cfg.Settings
-	hub := live.NewHub(set.Live.SubscriberBuffer)
+	hub := live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer)
 
 	users := user.New(db)
 	tokens := auth.NewTokens(cfg.JWTKey, set.Auth.TokenTTL.Duration)
@@ -84,7 +87,12 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	}
 
 	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore, db: db,
-		heartbeat: set.Live.Heartbeat.Duration}
+		stream: &live.Streamer{
+			Heartbeat:    set.Live.Heartbeat.Duration,
+			WriteTimeout: set.Live.WriteTimeout.Duration,
+			RetryMin:     set.Live.RetryMin.Duration,
+			RetryMax:     set.Live.RetryMax.Duration,
+		}}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", app.health)
@@ -94,6 +102,9 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	user.NewAPI(users, log).Routes(mux, authAPI.Authed)
 	teams.NewAPI(teamStore, log).Routes(mux, authAPI.Authed)
 	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
+	// The one event stream. A browser may reach it directly (cookie); the
+	// old path is a deprecated alias for the SvelteKit proxy, Bearer only.
+	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(http.HandlerFunc(app.events)))
 	mux.Handle("GET /api/teams/me/events", authAPI.Authed(app.events))
 
 	app.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), set.Server.MaxBodyBytes)
@@ -158,17 +169,33 @@ func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]int{"streams": a.Hub.Count()})
 }
 
-// events handles GET /api/teams/me/events, the caller's live stream. It
-// starts with their team ("team" or "no_team") and, if they're in a team, its
-// state ("team_state"), then sends one event per change from either use case.
+// events handles GET /api/events (and its deprecated alias
+// GET /api/teams/me/events), the caller's one live stream. It starts with the
+// snapshot and then sends one event per change, at every scope.
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	userID := identity.UserID(r)
 	sub := a.Hub.Subscribe(userID) // before reading snapshots, so no change slips between
 	defer sub.Close()
+	a.stream.Serve(w, r, sub, a.snapshot(userID))
+}
 
-	initial := []live.Event{a.Teams.Snapshot(userID)}
+// snapshot is everything a new stream starts with, in order: hello, then the
+// user's and team's state (team or no_team, then team_state if in a team),
+// then game-wide state.
+func (a *App) snapshot(userID uuid.UUID) []live.Event {
+	evs := []live.Event{hello(time.Now()), a.Teams.Snapshot(userID)}
 	if ev, ok := a.TeamState.Snapshot(userID); ok {
-		initial = append(initial, ev)
+		evs = append(evs, ev)
 	}
-	live.Serve(w, r, sub, initial, a.heartbeat)
+	// Game-wide snapshots go here, after the user's own.
+	return evs
+}
+
+// hello is the "hello" event that opens every stream: the server's clock, so
+// clients can correct countdowns for their own clock's offset.
+func hello(now time.Time) live.Event {
+	data, _ := json.Marshal(struct {
+		ServerTime time.Time `json:"server_time"`
+	}{now.UTC()}) // can't fail: a struct of one time
+	return live.NewEvent("hello", data)
 }
