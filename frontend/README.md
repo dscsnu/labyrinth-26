@@ -66,7 +66,7 @@ For staff: a screen at a waypoint showing its rotating QR. `src/routes/qr/+page.
 2. It signs `"<waypoint>:<unix seconds>"` locally with Web Crypto (`crypto.subtle`, HMAC-SHA256), base64url-encodes the signature, and renders the token as a QR (`qrcode`), re-signing every `rotate_ms`. `server_time` corrects the display's own clock before signing.
 3. No further requests: the QR rotates from the one key, offline except for the initial fetch.
 
-`src/routes/qr/+page.server.ts` requires a signed-in session. **TODO (dev):** the page and the backend route are temporarily open to any signed-in user so the flow can be tried before roles are set; in production `GET /api/qr/{waypoint_id}` must be staff-only (HELPER/ADMIN, `403 not_staff`), because the page is handed a signing key.
+`src/routes/qr/+page.server.ts` gates the page to staff: it checks the backend role via `GET /api/me` (HELPER/ADMIN), matching the backend route `GET /api/qr/{waypoint_id}` (`403 not_staff`). The page is handed a signing key, so it must not be reachable by players.
 
 ## The `/test-scan` page
 

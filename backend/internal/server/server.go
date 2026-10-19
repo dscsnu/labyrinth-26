@@ -106,6 +106,8 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	// Admin routes: signed in, and ADMIN by the role in the database (never
 	// the token's, which can be stale).
 	admin := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }
+	// Staff routes: signed in, and HELPER or ADMIN by the role in the database.
+	staff := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireStaff(h)) }
 	teamsAPI := teams.NewAPI(teamStore, log)
 	teamsAPI.Routes(mux, authAPI.Authed)
 	teamsAPI.AdminRoutes(mux, admin)
@@ -115,11 +117,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		Tolerance: set.QR.Tolerance.Duration,
 	}, theAtlas), log)
 	qrAPI.Routes(mux, authAPI.Authed)
-	// TEMPORARY (dev): mint is staff-only in production; opened to any
-	// signed-in user so /qr can be tried before roles are set. Restore with:
-	//   staff := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireStaff(h)) }
-	//   qrAPI.StaffRoutes(mux, staff)
-	qrAPI.StaffRoutes(mux, authAPI.Authed)
+	qrAPI.StaffRoutes(mux, staff)
 	// The one event stream. Browsers open it on the shared domain with the
 	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.
 	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(http.HandlerFunc(app.events)))
