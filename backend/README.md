@@ -37,8 +37,8 @@ internal/
   atlas/       static game content: waypoints, shapes, patterns (and their spells); read-only, loaded once
   auth/        Google sign-in, access tokens, the auth middleware
   user/        players, helpers and admins
-  teams/       teams of teams.size (6) players with a leader, lobby → game
-  teamstate/   each team's selection, scan stack, visited waypoints, completed patterns and last cast; publishes team_state, including when a scan goes stale
+  teams/       teams of up to teams.size (6) players with a leader, lobby → game
+  teamstate/   each team's selection, scan stack (wrong scans marked), visited waypoints, completed patterns and cast log; publishes team_state
   spells/      offline geometry and damage formula: projection, TSP tour, convex hull; not imported by server
   server/      wires the use cases together; /healthz and the live event stream
   platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
@@ -152,12 +152,13 @@ Full request and response shapes and every error code: **http://localhost:3000/d
 | POST | `/api/teams/leave` | Bearer | Leave your team (lobby only) |
 | PUT | `/api/teams/me/ready` | Bearer | `{"ready": bool}` → the team (non-leaders, lobby only) |
 | POST | `/api/teams/me/start` | Bearer | Leader only: `LOBBY` → `IN_GAME` → the team. Every member's stream gets the `IN_GAME` `team`, then the team's empty `team_state` |
-| GET | `/api/game/shapes` | Bearer | The selectable shapes (`id`, `name`, `patterns` count, distinct `points` sizes) and the timing rules `scan_window_ms`, `scan_grace_ms`, `max_pattern_points`; the same for every user, static while running |
-| GET | `/api/teams/me/state` | Bearer | Your team's state (`TeamState`, the same JSON as the `team_state` event): visited waypoints, completed patterns and shapes, selection, `last_cast` (the newest cast, or `null`) and live scan stack |
+| GET | `/api/game/shapes` | Bearer | The selectable shapes (`id`, `name`, `patterns` count, distinct `points` sizes) and `max_pattern_points`; the same for every user, static while running |
+| GET | `/api/teams/me/state` | Bearer | Your team's state (`TeamState`, the same JSON as the `team_state` event): visited waypoints, completed patterns and shapes, selection, `last_cast` (the newest cast, or `null`), the scan stack (each scan marked `wrong` or not) and `poisoned` |
+| GET | `/api/teams/me/casts` | Bearer | Your team's cast log: every completed pattern, repeats included (`already_completed`), with its `damage`, newest first |
 | PUT | `/api/teams/me/state/selection` | Bearer | `{"shape"}`: select the shape to attempt; always empties the scan stack |
 | DELETE | `/api/teams/me/state/selection` | Bearer | Give up the selection (and its stack) |
-| POST | `/api/teams/me/state/scans` | Bearer | `{"waypoint_id"}` (4 digits) → `scan_added` or `pattern_completed`; `409` if the waypoint or member is already in the stack. A waypoint that isn't part of the shape's patterns is still pushed (poisoning the selection until a reselect). ⚠ raw ID until QR verification exists |
-| GET | `/api/events` | Bearer or `labyrinth_token` cookie | The one server-sent event stream: `hello`, then `team` or `no_team`, then `team_state` if you're in a team; then one full snapshot per change, including a `team_state` the server sends by itself when a correct scan goes stale (65 s, `game.scan_window` + `game.scan_grace`, after it); `: ping` after **25 s** (`live.heartbeat`) with no event; a stream **16** (`live.subscriber_buffer`) events behind, or not taking a write within **10 s** (`live.write_timeout`), is dropped; it reconnects after a random 1–6 s (`live.retry_min`, `live.retry_max`). Full reference: [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream) |
+| POST | `/api/teams/me/state/scans` | Bearer | `{"waypoint_id"}` (4 digits) → `scan_added`, `wrong_scan` or `pattern_completed`. No time limit; any member may scan any number of points. `409 waypoint_already_scanned` if the waypoint is in the stack; a waypoint that can't be part of any pattern of the shape is pushed marked wrong (`wrong_scan`), and later scans get `409 selection_poisoned` until a reselect. ⚠ raw ID until QR verification exists |
+| GET | `/api/events` | Bearer or `labyrinth_token` cookie | The one server-sent event stream: `hello`, then `team` or `no_team`, then `team_state` if you're in a team; then one full snapshot per change; `: ping` after **25 s** (`live.heartbeat`) with no event; a stream **16** (`live.subscriber_buffer`) events behind, or not taking a write within **10 s** (`live.write_timeout`), is dropped; it reconnects after a random 1–6 s (`live.retry_min`, `live.retry_max`). Full reference: [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream) |
 
 Responses use the envelope `{"success": bool, "code"?: string, "message"?: string, "payload"?: any}`. `code` is a stable identifier for errors the frontend should handle, e.g. `team_full`; auth's are `invalid_body`, `invalid_code`, `user_not_found` (`/auth/token`) and `missing_token`, `invalid_token` (any Bearer route). `user_not_found` has two statuses: **`404` on `POST /auth/token`** (the login code's user was deleted; no token is involved) and **`401` on `GET /api/me`** (a valid token names a user that no longer exists, so the caller must sign in again). An unknown path is `404 not_found` and a wrong method `405 method_not_allowed`, also as envelopes. A response that fails to encode is a complete `500 internal error`, never a truncated body.
 

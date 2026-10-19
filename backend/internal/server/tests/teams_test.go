@@ -155,7 +155,6 @@ func TestTeamLifecycle(t *testing.T) {
 
 	last := ps[len(ps)-1]
 	expect(t, "member leaves", e.call("POST", "/api/teams/leave", last, nil), http.StatusOK, "")
-	expect(t, "start, 5 members", start(leader), http.StatusConflict, "team_not_full")
 	expect(t, "rejoin", join(last), http.StatusOK, "")
 	expect(t, "start, rejoiner unready", start(leader), http.StatusConflict, "not_all_ready")
 	expect(t, "rejoiner readies", ready(last, true), http.StatusOK, "")
@@ -275,7 +274,8 @@ func TestConcurrentJoinsRespectTeamSize(t *testing.T) {
 }
 
 // TestConcurrentStartAndLeave races the leader's start against a member
-// leaving: exactly one may succeed, with a consistent outcome.
+// leaving: either the start wins (the leave is refused, team_locked) or the
+// leave wins and the smaller team starts; the outcome is always consistent.
 func TestConcurrentStartAndLeave(t *testing.T) {
 	e := setup(t)
 	for round := range 10 {
@@ -297,9 +297,10 @@ func TestConcurrentStartAndLeave(t *testing.T) {
 			if team.payload["status"] != "IN_GAME" || len(members(team)) != e.cfg.Settings.Teams.Size {
 				t.Fatalf("round %d: started but team is %v", round, team.payload)
 			}
-		case leave.status == http.StatusOK && start.code == "team_not_full":
-			if team.payload["status"] != "LOBBY" || len(members(team)) != e.cfg.Settings.Teams.Size-1 {
-				t.Fatalf("round %d: member left but team is %v", round, team.payload)
+		case leave.status == http.StatusOK && start.status == http.StatusOK:
+			// The member left first; any size can start, so the rest started.
+			if team.payload["status"] != "IN_GAME" || len(members(team)) != e.cfg.Settings.Teams.Size-1 {
+				t.Fatalf("round %d: member left, then started, but team is %v", round, team.payload)
 			}
 		default:
 			t.Fatalf("round %d: inconsistent outcome start=%+v leave=%+v", round, start, leave)
@@ -315,4 +316,36 @@ func TestUnroutedRequestsUseEnvelope(t *testing.T) {
 	expect(t, "unknown path", e.call("GET", "/api/nope", p, nil), http.StatusNotFound, "not_found")
 	expect(t, "unknown path, no token", e.call("GET", "/api/nope", player{}, nil), http.StatusNotFound, "not_found")
 	expect(t, "wrong method", e.call("DELETE", "/api/teams", p, nil), http.StatusMethodNotAllowed, "method_not_allowed")
+}
+
+// TestStartWithAnySize checks that a team of any size can start: the leader
+// alone, or a partly filled team once every non-leader is ready.
+func TestStartWithAnySize(t *testing.T) {
+	e := setup(t)
+	solo := e.newPlayer("solo")
+	expect(t, "create", e.call("POST", "/api/teams", solo, map[string]string{"name": "Solo"}), http.StatusCreated, "")
+	r := e.call("POST", "/api/teams/me/start", solo, nil)
+	expect(t, "leader alone starts", r, http.StatusOK, "")
+	if r.payload["status"] != "IN_GAME" || len(members(r)) != 1 {
+		t.Fatalf("solo start: %v", r.payload)
+	}
+
+	if e.cfg.Settings.Teams.Size < 3 {
+		t.Skip("the partial-team case needs teams.size >= 3")
+	}
+	leader, a, b := e.newPlayer("l"), e.newPlayer("a"), e.newPlayer("b")
+	created := e.call("POST", "/api/teams", leader, map[string]string{"name": "Three"})
+	id := created.payload["id"].(string)
+	for _, p := range []player{a, b} {
+		expect(t, "join", e.call("POST", "/api/teams/join", p, map[string]string{"team_id": id}), http.StatusOK, "")
+	}
+	expect(t, "b not ready", e.call("POST", "/api/teams/me/start", leader, nil), http.StatusConflict, "not_all_ready")
+	for _, p := range []player{a, b} {
+		expect(t, "ready", e.call("PUT", "/api/teams/me/ready", p, map[string]bool{"ready": true}), http.StatusOK, "")
+	}
+	r = e.call("POST", "/api/teams/me/start", leader, nil)
+	expect(t, "three of teams.size start", r, http.StatusOK, "")
+	if len(members(r)) != 3 {
+		t.Fatalf("partial start: %v", r.payload)
+	}
 }

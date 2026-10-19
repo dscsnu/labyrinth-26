@@ -30,15 +30,14 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 
 **The players' journey:**
 1. **Sign in** with Google (an `snu.edu.in` account) through the SvelteKit frontend.
-2. **Form a team** in the lobby: one player creates it and shares its 6-digit code; others join. Exactly `teams.size` (6) players, one leader. Members mark themselves ready, and the leader starts. From then on the roster is locked.
+2. **Form a team** in the lobby: one player creates it and shares its 6-digit code; others join. Up to `teams.size` (6) players, one leader. Members mark themselves ready, and the leader starts with however many there are (1 or more). From then on the roster is locked.
 3. **Play:**
    - The team **selects a shape type** (square, triangle, …). Each type has many precomputed valid patterns: sets of 1–6 waypoints.
-   - Members **scan waypoints**, each point by a **different member**, within **1 m + 5 s** of each other.
-   - A scan of a waypoint that's already in, or from a member who already scanned, is **rejected**.
-   - A scan that doesn't fit any pattern of the type is **accepted but marked wrong**, without telling the player: it takes that member's and that waypoint's slots and **poisons** the selection. A wrong scan never goes stale, so the attempt can't complete until the team selects again.
-   - When the scans are exactly one valid pattern, it **completes**. Every new selection and every completion **purges** the scans.
-   - **The client counts down** to a deadline on the server's clock: the bottom scan's `scanned_at` + **1 m** (`game.scan_window`), the same on every phone. It estimates server time from the stream's `hello` and sends nothing after the deadline; the server's **5 s** (`game.scan_grace`) covers the `hello` delay plus the request delay of a scan sent just before the end. The rule is `frontend/src/lib/game/scanGate.ts` and `serverClock.ts`, mirrored by the simulation tests in `internal/server/tests/simulation_test.go`; the bound is derived in `internal/teamstate/README.md`.
-4. Progress (patterns and shapes completed, waypoints visited) is the team's score.
+   - Members **scan waypoints**. There's **no time limit**, and any member may scan any number of the points.
+   - A scan of a waypoint that's already in the attempt is **rejected** (`waypoint_already_scanned`).
+   - A scan that can't be part of any pattern of the type (with the scans already in) is **accepted, marked wrong, and reported** (`wrong_scan`, `stack[].wrong`, `poisoned`). It **poisons** the attempt: every later scan is refused (`selection_poisoned`) until someone selects again.
+   - When the scans are exactly one valid pattern, it **completes** (a cast, logged in `team_cast` and listed by `GET /api/teams/me/casts`). Every new selection and every completion **purges** the scans.
+4. Progress (patterns and shapes completed, waypoints visited, the cast log) is the team's score.
 
 **Scale and constraints:**
 - Up to ~10,000 players on one day, all at once.
@@ -160,8 +159,8 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **Rejections and no-ops return before step 4:** nothing written, nothing published.
 - **A memory-only change** skips step 4 and says so in its doc comment. Only two kinds qualify:
   - data another use case already saved (`teams.RefreshProfile`: the user use case wrote the profile)
-  - a change `Load` reproduces from what's already stored (`teamstate.expire`: it drops correct scans that went stale. Postgres never stores the stack, only `team_scan`; after a restart the same scans are stale by their stored times, and the timer `Load` arms drops them at once)
-- **The database is a backstop:** mirror invariants as constraints (unique, check, foreign key), and map violations to rule errors in `db.go` (`mapMemberInsertErr`). When a rule can't be a constraint (it depends on time, like teamstate's stack), say so in the README's concurrency section.
+  - a change `Load` reproduces from what's already stored (none today; a time-driven change, if one is ever added, would be one)
+- **The database is a backstop:** mirror invariants as constraints (unique, check, foreign key), and map violations to rule errors in `db.go` (`mapMemberInsertErr`). When a rule can't be a constraint (it depends on other rows' history, like teamstate's stack), say so in the README's concurrency section.
 - **`execOne`** for writes that must affect exactly one row, so memory/Postgres disagreement is detected rather than ignored.
 - **Multi-statement writes** go in one `pgx.BeginFunc` transaction.
 
@@ -212,8 +211,8 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 - **Hot events stay small.** Data that never changes while the backend runs (atlas content, game rules) comes from GET routes once and never rides in events.
 - **Never publish** on a rejection or no-op.
 - **A new event that must arrive on connect** needs a snapshot on the use case (`Snapshot(userID)`, or `Snapshot()` for game scope), added to `server.snapshot` in its place: `hello`, then user and team events, then game-wide ones.
-- **The server owns time.** Changes caused by time passing are published by the server when they happen (a `Clock` timer, like teamstate's `expire`). Clients never decide state from time. See §17.
-- **`hello {server_time}` is the one way clients measure time against the game.** Every stream opens with it, so the offset (server time − the client's monotonic clock) is re-measured on every connect (`frontend/src/lib/game/serverClock.ts`). Client countdowns are deadlines in server time computed from state timestamps: the scan countdown is the bottom scan's `scanned_at` + **1 m** (`game.scan_window`). `hello` carries nothing else; game rules come from `GET /api/game/shapes`.
+- **The server owns time.** If a change is ever caused by time passing, the server publishes it when it happens (a timer). Clients never decide state from time. See §17. (The game has none today: no time limit.)
+- **`hello {server_time}` is the one way clients measure time against the game.** Every stream opens with it, so the offset (server time − the client's monotonic clock) is re-measured on every connect (`frontend/src/lib/game/serverClock.ts`). Anything a client shows relative to now ("scanned 2 min ago", a future countdown) uses it, so every phone agrees. `hello` carries nothing else; game rules come from `GET /api/game/shapes`.
 - **Admin-triggered game events** read the caller's role from `user.Get`, never from the token (roles in tokens can be stale), then follow §6 with `Broadcast` as step 6.
 - **The wire-level reference** (endpoint, scopes, format, every event, triggers, ordering, heartbeat, reconnection, client integration) is [`internal/server/README.md`, "The event stream"](internal/server/README.md#the-event-stream). Update it with any change to what is published, or when.
 
@@ -226,7 +225,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
   3. Add it to `validTOML` in `internal/platform/config/tests/settings_test.go`, and a `TestLoadSettingsRejects` case if it can be invalid.
   4. Pass it into the use case through its `Rules` (or constructor) in `internal/server/server.go`. **Use cases never read the file.**
   5. In tests, read values with `configtest.Settings(t)`, never by repeating the number. If a test only makes sense for some values, skip with a named minimum (`minTestTeam`).
-  6. In docs, write the value with its key: **1 m** (`game.scan_window`).
+  6. In docs, write the value with its key: **6** (`game.max_pattern_points`).
 - **Allowed in code**, each as a **named constant** whose comment says why it isn't in config.toml:
   - formats and security parameters (4-digit waypoint IDs, 6-digit team codes, 256-bit random tokens)
   - Go type sizes (64-bit sets, `config.MaxTeamSize`)
@@ -272,7 +271,7 @@ Each use case's `README.md` documents it **completely enough to rebuild it witho
 15. **Not decided yet:** open questions and known gaps (security gaps marked ⚠).
 16. **Tests:** a table of every test and what it covers.
 
-**Extra sections** specific to a use case go after the data model sections (after 7), in the Contents like the rest: atlas's "How waypoints and patterns are stored" and "Spells", teamstate's "The client countdown and latency".
+**Extra sections** specific to a use case go after the data model sections (after 7), in the Contents like the rest: atlas's "How waypoints and patterns are stored" and "Spells", teamstate's "Wrong scans".
 
 **Style:** short sentences, tables over paragraphs, real values over placeholders.
 
@@ -281,7 +280,7 @@ Each use case's `README.md` documents it **completely enough to rebuild it witho
 ## 13. Tests
 - **Where tests live:** `internal/<package>/tests/`, a separate package named `tests`, holding a `doc.go` (package comment: whose tests these are) and the `*_test.go` files (Go only runs tests from files with that suffix). Run one package's with `go test ./internal/<package>/...`.
 - **Tests are black-box:** they import the package and use only its exported API, so they test exactly what other packages rely on, and refactoring internals doesn't break them.
-- **Exporting a seam for a test** is allowed only when it's a sensible API in its own right, documented like any other: `atlas.New(Source, Rules)` (build an atlas from given content, which `Load` also uses), `teamstate.Rules.Clock` (a `teamstate.Clock` interface, `Now()` and `AfterFunc(d, f) (stop func() bool)`; nil means the real one, `time.Now` and `time.AfterFunc`. Tests pass a fake whose timers fire only when the test advances it, never from inside `AfterFunc`), `teamstate.Rules.Limit()`, `teamstate.NewStack`, `teams.Store.All()`, `auth.Issuer` / `auth.AccessAudience` (the frontend must match them). Never export a field or a "ForTesting" function just to reach inside. If a behaviour can only be reached through internals, test it end to end instead (auth's state-vs-access token tests live in `internal/server/tests`).
+- **Exporting a seam for a test** is allowed only when it's a sensible API in its own right, documented like any other: `atlas.New(Source, Rules)` (build an atlas from given content, which `Load` also uses), `teamstate.Rules.Clock` (a `teamstate.Clock` interface, `Now()`; nil means the real one. Tests pass a fake they set by hand), `teamstate.NewStack`, `teams.Store.All()`, `auth.Issuer` / `auth.AccessAudience` (the frontend must match them). Never export a field or a "ForTesting" function just to reach inside. If a behaviour can only be reached through internals, test it end to end instead (auth's state-vs-access token tests live in `internal/server/tests`).
 - **Test every edge case.** Every rule, error code and boundary in the README's case tables gets a test: exactly at a limit and just past it, retries, concurrent duplicates, the smallest and largest content (1-point and 6-point patterns), and config values from `configtest.Settings`.
 - **Store tests** run against real Postgres via `pgtest`, each package in its own schema:
   ```go
@@ -339,13 +338,14 @@ Everything a team's players see about the game loop reaches them as **one struct
 - **One struct, sent whole.** Per-team gameplay state lives in `teamstate.State`. Clients get it as one JSON object, the `View`, which is the `team_state` event. It's sent whole over the event stream on connect and after every change, and it's the response of every teamstate route (`GET /api/teams/me/state`, both selection routes, and `ScanResult.state` on a scan).
 - **Clients never poll.** Everything the play screen shows about the team's game comes from the latest `View`. Its other inputs, and the only ones, are:
   - the static `GET /api/game/shapes` (rules and content, fetched once)
+  - `GET /api/teams/me/casts` (the cast log, fetched once on load; each new cast then arrives as `team_state.last_cast`, which the client prepends)
   - the `team` event (the roster)
   - `hello` (the clock, §9)
   - **game-wide events** (§9): resources identical for every player, such as a quiz or a quick-time event, each its own game-scope event carrying `null` or an object with an `id`. They're the one deliberate exception to "one struct": something every player sees the same way is one broadcast, not a copy in every team's `team_state`. **What a team does with them** (its answers, its score from them) is per-team, so it goes in `team_state` like any other result.
 - **Static vs per-team.** Static definitions (waypoints, shapes, patterns, spell values) belong to `atlas`. Per-team gameplay state belongs in `State`.
-- **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them.
-- **The server publishes time-driven changes.** A correct scan going stale is a change like any other. The store arms a `Clock` timer for it and `expire` publishes the new `team_state`. Clients never infer such a change. They use timestamps (`scanned_at`, `expires_at`, `cast_at`) only for display and for countdowns, never to change the state they show. A countdown is a deadline in server time computed from a state timestamp (the scan countdown: the bottom scan's `scanned_at` + `game.scan_window`, in `frontend/src/lib/game/scanGate.ts`), compared against server time estimated from `hello` (`serverClock.ts`, §9).
-- **Rejected or no-op requests publish nothing** (§6, §9). That includes `409`s, clearing with nothing selected, and an expiry timer that finds nothing stale.
+- **New per-team results go inside `team_state`.** A future module with per-team results (points, damage, powerups) surfaces them as fields of `team_state`. Teamstate reads them through a small interface it declares (§4), the way it reads `Teams` and `Atlas`. Don't add a separate event or endpoint for them. The one exception is a **history** too long to resend on every change (the cast log): a read endpoint for the load, with each new entry carried live in `team_state` (`last_cast`).
+- **Nothing changes with time alone.** There's no time limit. Clients use timestamps (`scanned_at`, `cast_at`) only for display, against server time estimated from `hello` (`serverClock.ts`, §9), never to change the state they show. If a time-driven change is ever added, the server publishes it (§9); clients never infer it.
+- **Rejected or no-op requests publish nothing** (§6, §9). That includes `409`s and clearing with nothing selected. A wrong scan is not a rejection: it's pushed and published.
 - **Spells are already in `team_state`.** Clients derive the spell lifecycle from it, with no event of its own: a spell **starts** when `selection` is set, members **finish their part** as `stack` grows (`stack[].user_id` says who, its length how many), and a spell **finishes** when `last_cast` changes (`cast_at`, `shape`, `cast_by`).
 
 **A new gameplay feature isn't done until it has all of these:**

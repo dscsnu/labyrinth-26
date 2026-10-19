@@ -24,6 +24,7 @@ func NewAPI(store *Store, log *slog.Logger) *API {
 // middleware.
 func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.Handle("GET /api/teams/me/state", authed(a.getMine))
+	mux.Handle("GET /api/teams/me/casts", authed(a.casts))
 	mux.Handle("PUT /api/teams/me/state/selection", authed(a.selectShape))
 	mux.Handle("DELETE /api/teams/me/state/selection", authed(a.clearSelection))
 	mux.Handle("POST /api/teams/me/state/scans", authed(a.scan))
@@ -43,7 +44,7 @@ var errorCodes = []struct {
 	{ErrNotInGame, http.StatusConflict, "not_in_game"},
 	{ErrNoShapeSelected, http.StatusConflict, "no_shape_selected"},
 	{ErrWaypointAlreadyScanned, http.StatusConflict, "waypoint_already_scanned"},
-	{ErrMemberAlreadyScanned, http.StatusConflict, "member_already_scanned"},
+	{ErrSelectionPoisoned, http.StatusConflict, "selection_poisoned"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or
@@ -59,10 +60,21 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 	httpx.Error(w, http.StatusInternalServerError, "internal error")
 }
 
-// shapes handles GET /api/game/shapes: the shapes a team can select and the
-// timing rules for the client's countdown. Any signed-in user may read it.
+// shapes handles GET /api/game/shapes: the shapes a team can select. Any
+// signed-in user may read it.
 func (a *API) shapes(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, a.store.Game())
+}
+
+// casts handles GET /api/teams/me/casts: every pattern the caller's team has
+// completed, repeats included, newest first, or 404 not_in_team.
+func (a *API) casts(w http.ResponseWriter, r *http.Request) {
+	cs, err := a.store.CastsForUser(identity.UserID(r))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	httpx.OK(w, cs)
 }
 
 // getMine handles GET /api/teams/me/state: the caller's team state, or 404

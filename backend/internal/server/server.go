@@ -77,8 +77,6 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL)
 	}, log)
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, teamStore, hub, log, teamstate.Rules{
-		ScanWindow:       set.Game.ScanWindow.Duration,
-		ScanGrace:        set.Game.ScanGrace.Duration,
 		MaxPatternPoints: set.Game.MaxPatternPoints,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 	})
@@ -190,7 +188,8 @@ func (a *App) snapshot(userID uuid.UUID) []live.Event {
 }
 
 // hello is the "hello" event that opens every stream: the server's clock, so
-// clients can correct countdowns for their own clock's offset.
+// clients can correct anything they show relative to now ("2 min ago") for
+// their own clock's offset.
 func hello(now time.Time) live.Event {
 	data, _ := json.Marshal(struct {
 		ServerTime time.Time `json:"server_time"`
