@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,13 +48,25 @@ type Settings struct {
 
 // SpellSettings is config.toml's [spell] table.
 type SpellSettings struct {
-	// PerPoint is damage per waypoint in the pattern (one per member involved).
-	PerPoint float64 `toml:"per_point"`
-	// Per100m is damage per 100 m of estimated walking distance.
-	Per100m float64 `toml:"per_100m"`
 	// Walkability scales straight-line distance to estimated walking distance.
 	Walkability float64 `toml:"walkability"`
+	// Per100m is damage per 100 m of estimated walking distance.
+	Per100m float64 `toml:"per_100m"`
+	// Base is base coordination damage by pattern point count ([spell.base]).
+	Base map[string]int `toml:"base"`
+	// Bonus holds bonus damage for difficult geometries ([spell.bonus]).
+	Bonus SpellBonusSettings `toml:"bonus"`
 }
+
+// SpellBonusSettings is config.toml's [spell.bonus] table.
+type SpellBonusSettings struct {
+	// ConcaveQuad is bonus damage awarded to 4-point patterns whose convex hull has size 3.
+	ConcaveQuad int `toml:"concave_quad"`
+}
+
+// BaseDamage returns Base keyed by point count as an int. validate has checked
+// every key is a size from 1 to game.max_pattern_points.
+func (s SpellSettings) BaseDamage() map[int]int { return intKeys(s.Base) }
 
 // TeamSettings is config.toml's [teams] table.
 type TeamSettings struct {
@@ -97,14 +110,27 @@ type BossAttackSettings struct {
 
 // BossDamage returns Damage keyed by serial as an int. validate has checked
 // every key is a serial from 1 to game.bosses.
-func (b BossAttackSettings) BossDamage() map[int]int {
-	out := make(map[int]int, len(b.Damage))
-	for k, v := range b.Damage {
-		var serial int
-		fmt.Sscanf(k, "%d", &serial)
-		out[serial] = v
+func (b BossAttackSettings) BossDamage() map[int]int { return intKeys(b.Damage) }
+
+// intKeys returns m with its keys as ints. TOML table keys are strings, so
+// tables keyed by a number ([game.boss_attack.damage], [spell.base]) decode as
+// map[string]int; validate has checked every key with intKey, so none is
+// skipped here in practice.
+func intKeys(m map[string]int) map[int]int {
+	out := make(map[int]int, len(m))
+	for k, v := range m {
+		if n, ok := intKey(k); ok {
+			out[n] = v
+		}
 	}
 	return out
+}
+
+// intKey parses k as a plain decimal int, as it would be written: "6", not
+// "+6", "06" or "6x". ok is false otherwise.
+func intKey(k string) (int, bool) {
+	n, err := strconv.Atoi(k)
+	return n, err == nil && strconv.Itoa(n) == k
 }
 
 // QRSettings is config.toml's [qr] table.
@@ -255,17 +281,25 @@ func (s Settings) validate() []error {
 		check(hasKey(s.Game.BossAttack.Damage, fmt.Sprint(serial)), "game.boss_attack.damage has no entry for boss %d", serial)
 	}
 	for k, v := range s.Game.BossAttack.Damage {
-		var serial int
-		_, err := fmt.Sscanf(k, "%d", &serial)
-		check(err == nil && fmt.Sprint(serial) == k && serial >= 1 && serial <= s.Game.Bosses,
+		serial, ok := intKey(k)
+		check(ok && serial >= 1 && serial <= s.Game.Bosses,
 			"game.boss_attack.damage.%s is not a boss serial (1-%d, game.bosses)", k, s.Game.Bosses)
 		check(v >= 0, "game.boss_attack.damage.%s must not be negative", k)
 	}
 	check(s.QR.Rotate.Duration > 0, "qr.rotate must be positive")
 	check(s.QR.Tolerance.Duration > 0, "qr.tolerance must be positive")
-	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")
-	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
 	check(s.Spell.Walkability >= 1.0, "spell.walkability must be at least 1.0")
+	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
+	for pts := 1; pts <= s.Game.MaxPatternPoints; pts++ {
+		check(hasKey(s.Spell.Base, fmt.Sprint(pts)), "spell.base has no entry for size %d", pts)
+	}
+	for k, v := range s.Spell.Base {
+		pts, ok := intKey(k)
+		check(ok && pts >= 1 && pts <= s.Game.MaxPatternPoints,
+			"spell.base.%s is not a valid pattern size (1-%d, game.max_pattern_points)", k, s.Game.MaxPatternPoints)
+		check(v > 0, "spell.base.%s must be positive", k)
+	}
+	check(s.Spell.Bonus.ConcaveQuad >= 0, "spell.bonus.concave_quad must not be negative")
 	check(s.Auth.TokenTTL.Duration > 0, "auth.token_ttl must be positive")
 	check(s.Auth.LoginCodeTTL.Duration > 0, "auth.login_code_ttl must be positive")
 	check(s.Auth.OAuthStateTTL.Duration >= time.Second, "auth.oauth_state_ttl must be at least 1s")

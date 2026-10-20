@@ -399,8 +399,12 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	if !ok || damage <= 0 {
 		t.Fatalf("expected positive damage in last_cast, got %v", lastCast["damage"])
 	}
-	if int(damage) != 65 {
-		t.Fatalf("expected damage 65 for pattern 1, got %v", damage)
+	var want int
+	if err := e.db.Pool().QueryRow(context.Background(), "SELECT damage FROM pattern WHERE id = 1").Scan(&want); err != nil {
+		t.Fatal(err)
+	}
+	if int(damage) != want {
+		t.Fatalf("expected pattern 1's stored damage %d, got %v", want, damage)
 	}
 }
 

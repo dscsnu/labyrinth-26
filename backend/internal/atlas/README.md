@@ -89,9 +89,8 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 ### `store.go`: layout, `Rules`, `Load`, validation
 - **Layout comment** drawing the `Atlas` (below).
 - **`waypointIDPattern`** `^[0-9]{4}$`: a format, not a tunable; matches the `waypoint.id` CHECK in migration 0003.
-- **`Rules`**: `MaxPatternPoints` (`game.max_pattern_points`) and `Spell` (`SpellRules`, not in config.toml yet; zero).
-- **`SpellRules`**: `PerPoint`, `Per100m`, `Walkability` (see [Spells](#spells)). Unread.
-- **`Load(ctx, pg, log, rules)`**: `selectAtlas` (error → `load atlas: …`), then `New(src, rules)` (error → `invalid atlas: …`), then the marked comment where spells will be computed, then the `loaded atlas` log line. Called once, by `server.Build`, and by the tests.
+- **`Rules`**: `MaxPatternPoints` (`game.max_pattern_points`). Damage isn't computed here: it's precomputed offline by `cmd/spells` and read from `pattern.damage` (see [Spells](#spells)).
+- **`Load(ctx, pg, log, rules)`**: `selectAtlas` (error → `load atlas: …`), then `New(src, rules)` (error → `invalid atlas: …`), then the `loaded atlas` log line. Called once, by `server.Build`, and by the tests.
 - **`New(src, rules)`**: builds an Atlas from a `Source`, validating in the order of [Loading at startup](#loading-at-startup) and builds every slice and map. Waypoints and shapes take their index from their row order (ID order, from the query); patterns from theirs (key order).
 - **`checkNesting(shape, patterns)`**: for every pair of the shape's patterns, refuses one that's smaller than and contained in another. O(n²) per shape: 156² ≈ 24,000 AND-compares for the seed's triangles, once at startup.
 
@@ -262,14 +261,15 @@ What completing a pattern casts: the team's reward for it. **One per pattern**, 
 
 ### Single source of truth
 - Coordinates come **only from Postgres** (`waypoint.latitude`, `waypoint.longitude`).
-- Damage values come **only from Postgres** (`pattern.damage`).
-- No separate JSON files in the repository.
+- Damage values come **only from Postgres** (`pattern.damage`) at runtime.
+- The one other file is **`damage_lookup.json`** (repository root): the 2026 damage table, every combination of the 10 2026 checkpoints. Nothing reads it at runtime. It's the reference `config.toml`'s `[spell]` values are tuned to, and `TestDamageLookupMatchesConfig` fails if the two disagree.
 
 ### Config
-The generator's coefficients live in `config.toml` under `[spell]`:
-- `per_point` (**15**): base damage per waypoint in the pattern (one per member involved).
-- `per_100m` (**2**): damage per 100 m of walking distance.
-- `walkability` (**1.5**): straight-line to walking distance ratio.
+The generator's coefficients live in `config.toml` under `[spell]` (the formula: [`internal/spells/README.md`](../spells/README.md)):
+- `spell.base` (**1: 15, 2: 22, 3: 58, 4: 186, 5: 384, 6: 1200**): base damage by waypoint count. The biggest size (`game.max_pattern_points`, **6**) deals its base flat.
+- `spell.bonus.concave_quad` (**75**): added for a 4-point pattern whose convex hull has 3 corners.
+- `spell.per_100m` (**0.8**): damage per 100 m of walking distance.
+- `spell.walkability` (**1.5**): straight-line to walking distance ratio.
 
 ### Drift prevention
 The test `TestPatternDamageDrift` in `internal/spells/tests/` recomputes every pattern's damage from database waypoints and coefficients and verifies it matches `pattern.damage`. Any change to coordinates or coefficients without re-running `go run ./cmd/spells` fails the test.

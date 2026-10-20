@@ -69,15 +69,28 @@ rotate = "5s"
 tolerance = "5s"
 
 [spell]
-# Base damage awarded per waypoint in the pattern (one per member involved).
-# Allowed: more than 0.
-per_point = 15
-# Damage awarded per 100 meters of estimated walking distance.
-# Allowed: 0 or more.
-per_100m = 2
 # Campus walkability multiplier (ratio of walking distance to straight-line distance).
 # Allowed: at least 1.0.
 walkability = 1.5
+# Damage awarded per 100 meters of estimated walking distance.
+# Allowed: 0 or more.
+per_100m = 0.8
+
+[spell.base]
+# Base coordination damage by pattern waypoint count (1 to game.max_pattern_points).
+# Allowed: each at least 1.
+1 = 15
+2 = 22
+3 = 58
+4 = 186
+5 = 384
+6 = 1200
+
+[spell.bonus]
+# Bonus damage awarded to difficult geometries.
+# concave_quad: awarded to 4-point patterns whose convex hull has size 3.
+# Allowed: 0 or more.
+concave_quad = 75
 
 [auth]
 # How long an access token (JWT) is valid. A role change applies at the next
