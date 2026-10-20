@@ -64,6 +64,13 @@ var (
 	// team has unlocked (game.locked_pattern_points, until it has defeated
 	// game.unlock_after_bosses bosses).
 	ErrShapeLocked = errors.New("this shape's patterns are locked until your team defeats more bosses")
+	// ErrShapeOnCooldown means every pattern of the shape the team has
+	// unlocked is of the spell class of its last cast: it must cast a spell
+	// of another class first.
+	ErrShapeOnCooldown = errors.New("every spell of this shape is on cooldown: cast a spell of another class first")
+	// ErrWaypointOnCooldown means the waypoint was in one of the team's
+	// casts less than game.qr_cooldown ago: the team can't scan it yet.
+	ErrWaypointOnCooldown = errors.New("your team cast a spell with this QR code recently: it opens again soon")
 	// ErrKnockedOut means the team's health is 0 (boss attacks): it can't
 	// select or scan until an admin revives it.
 	ErrKnockedOut = errors.New("your team is knocked out; an admin must revive it")
@@ -157,6 +164,9 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	}
 	if s.shapeLocked(shape, s.unlockedPoints(*cur)) {
 		return View{}, ErrShapeLocked
+	}
+	if s.shapeOnCooldown(shape, s.unlockedPoints(*cur), s.cooldown(*cur)) {
+		return View{}, ErrShapeOnCooldown
 	}
 
 	// 3. build
@@ -289,12 +299,18 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 		}
 		set = set.With(sc.Waypoint)
 	}
+	// The waypoint was in one of the team's casts less than
+	// game.qr_cooldown ago: refused, nothing written or published.
+	if _, ok := cur.qrCooldownUntil(w, now); ok {
+		return ScanResult{}, ErrWaypointOnCooldown
+	}
 	set = set.With(w)
 	// A scan that doesn't fit isn't rejected: it's pushed, marked wrong, the
 	// player is told, and the attempt is poisoned until the team reselects.
-	// Patterns the team hasn't unlocked don't count: a scan that could only
-	// grow into one is wrong too.
-	wrong := !s.atlas.FitsShapeWithin(cur.Selection.Shape, set, s.unlockedPoints(*cur))
+	// Patterns the team can't cast now don't count: those it hasn't unlocked
+	// and those of its cooldown class (its last cast's). A scan that could
+	// only grow into one of them is wrong too.
+	wrong := !s.atlas.FitsShapeCastable(cur.Selection.Shape, set, s.unlockedPoints(*cur), s.cooldown(*cur))
 
 	// 3. build
 	next := *cur
@@ -326,6 +342,9 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 		}
 		// Copy-on-write: never append to the current snapshot's slice.
 		next.Casts = append(slices.Clip(cur.Casts), cast)
+		// The cast's waypoints are disabled for the team for
+		// game.qr_cooldown.
+		next.QRCooldowns = s.qrCooldowns(next.Casts, now)
 	}
 
 	// 4. persist
@@ -340,8 +359,8 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 
 	// 5. apply
 	e.cur.Store(&next)
-	// 6. publish, and re-arm the attack timer: a defeat starts the next
-	// boss's clock
+	// 6. publish, and re-arm the timer: a defeat starts the next boss's
+	// clock, and the cast's QR cooldowns end at their own time
 	s.publish(e, t.ID, &next, typ)
 	if isComplete {
 		s.schedule(e, t.ID, &next)
@@ -404,42 +423,55 @@ func (s *Store) PublishTeam(teamID string) {
 	s.schedule(e, teamID, e.cur.Load())
 }
 
-// catchUp applies any boss attack that has fallen due on teamID's state and
-// returns the current state. The caller holds e.mu. Every write calls it
-// before validating, and so does the attack timer, so an attack is never
-// lost to a late timer or a write that got the lock first.
+// catchUp applies whatever has fallen due on teamID's state by itself, and
+// returns the current state: boss attacks, and QR cooldowns that have ended.
+// The caller holds e.mu. Every write calls it before validating, and so does
+// the timer, so a change is never lost to a late timer or a write that got
+// the lock first.
 //
-// Applying attacks is a memory-only change (AGENTS.md §6): health is derived
-// from the stored phase (PhaseStart, PhaseHealth) and the clock, so there's
-// nothing to persist, and Load reproduces it exactly. It still bumps the
-// version and publishes boss_attacked, or knocked_out when health reaches 0.
+// Both are memory-only changes (AGENTS.md §6): health is derived from the
+// stored phase (PhaseStart, PhaseHealth) and the clock, and QR cooldowns
+// from the cast log and the clock, so there's nothing to persist, and Load
+// reproduces them exactly. It still bumps the version and publishes one
+// event: boss_attacked (knocked_out when health reaches 0) if an attack fell
+// due, else qr_cooldown_ended.
 func (s *Store) catchUp(e *entry, teamID string) *State {
 	cur := e.cur.Load()
-	p := cur.Boss.at(s.now(), s.bosses)
-	if p.Attacks == cur.Boss.Attacks && p.Health == cur.Boss.Health {
+	now := s.now()
+	p := cur.Boss.at(now, s.bosses)
+	attacked := p.Attacks != cur.Boss.Attacks || p.Health != cur.Boss.Health
+	cooldowns := cur.QRCooldowns
+	ended := len(cooldowns) > 0 && !now.Before(cooldowns[0].Until) // soonest first
+	if !attacked && !ended {
 		return cur // nothing fell due
 	}
 
 	// 3. build
 	next := *cur
 	next.Boss = p
+	if ended {
+		next.QRCooldowns = s.qrCooldowns(cur.Casts, now)
+	}
 	next.Version = cur.Version.Next(s.rules.Epoch)
 	// 4. persist: none, memory-only (see above)
 	// 5. apply
 	e.cur.Store(&next)
 	// 6. publish
-	typ := BossAttacked
-	if p.KnockedOut() {
+	typ := QRCooldownEnded
+	switch {
+	case p.KnockedOut() && attacked:
 		typ = KnockedOut
+	case attacked:
+		typ = BossAttacked
 	}
 	s.publish(e, teamID, &next, typ)
 	return &next
 }
 
-// attack is the attack timer's callback for teamID: it applies whatever
-// attacks have fallen due (catchUp) and arms the timer for the next. Run by
-// the Clock in its own goroutine; does nothing once the store is closed.
-func (s *Store) attack(teamID string) {
+// due is the timer's callback for teamID: it applies whatever has fallen due
+// (catchUp) and arms the timer for the next. Run by the Clock in its own
+// goroutine; does nothing once the store is closed.
+func (s *Store) due(teamID string) {
 	// 1. lock
 	e := s.lockTeam(teamID)
 	defer e.mu.Unlock()

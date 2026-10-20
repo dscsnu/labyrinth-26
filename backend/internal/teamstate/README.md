@@ -1,6 +1,6 @@
 # teamstate
 
-What each team does in the game: the shape it has selected, its stack of scans toward a pattern of that shape, the waypoints it has visited, the patterns and shapes it has completed, its cast log, its progress through the bosses, and its health under their attacks. There is **no time limit** on an attempt. The one change caused by time passing is a **boss attack**: every boss attacks on a clock, lowering the team's health, published by the server with nobody acting.
+What each team does in the game: the shape it has selected, its stack of scans toward a pattern of that shape, the waypoints it has visited, the patterns and shapes it has completed, its cast log, its progress through the bosses, and its health under their attacks. There is **no time limit** on an attempt. Two changes are caused by time passing, both published by the server with nobody acting: a **boss attack** (every boss attacks on a clock, lowering the team's health) and a **QR cooldown ending** (a cast's waypoints are disabled for the team for **5 min**, `game.qr_cooldown`, then open again).
 
 Every number below that comes from `config.toml` is shown with its current value and its key, e.g. **6** (`game.max_pattern_points`). Change the file, not the code.
 
@@ -14,15 +14,16 @@ Every number below that comes from `config.toml` is shown with its current value
 7. [Wrong scans and poisoned attempts](#wrong-scans-and-poisoned-attempts)
 8. [Bosses](#bosses)
 9. [Boss attacks and health](#boss-attacks-and-health)
-10. [Walkthroughs](#walkthroughs)
-11. [The write-through](#the-write-through)
-12. [API](#api)
-13. [Rules and cases](#rules-and-cases)
-14. [Concurrency and locking](#concurrency-and-locking)
-15. [Failure and recovery](#failure-and-recovery)
-16. [Limits and how to change them](#limits-and-how-to-change-them)
-17. [Not decided yet](#not-decided-yet)
-18. [Tests](#tests)
+10. [QR cooldown](#qr-cooldown)
+11. [Walkthroughs](#walkthroughs)
+12. [The write-through](#the-write-through)
+13. [API](#api)
+14. [Rules and cases](#rules-and-cases)
+15. [Concurrency and locking](#concurrency-and-locking)
+16. [Failure and recovery](#failure-and-recovery)
+17. [Limits and how to change them](#limits-and-how-to-change-them)
+18. [Not decided yet](#not-decided-yet)
+19. [Tests](#tests)
 
 The waypoints, shapes and patterns themselves are static content owned by the **atlas** use case: how they're loaded, validated and stored (indexes, bitmasks, `FitsShape`) is in [`internal/atlas/README.md`](../atlas/README.md). The bosses (name, HP, asset, attack interval and damage) are static content owned by the **bosses** use case ([`internal/bosses/README.md`](../bosses/README.md)). This README covers what teams do with them: a team's progress through the bosses, and its health, are part of its `State`.
 
@@ -37,7 +38,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Selection** | The shape a team is currently attempting. At most one per team. |
 | **Attempt** | Everything between a selection and the next selection, clear or cast. Its scans are the stack. |
 | **Stack** | The attempt's accepted scans, oldest at the **bottom**, newest on **top**. It holds **one scan per waypoint**; any member may scan any number of them. Its correct scans always fit inside one pattern of the selected shape, so there are at most **6** (`game.max_pattern_points`) of them, plus at most **one wrong scan**, always on top. Capacity: **7** (`game.max_pattern_points` + 1). Scans never leave on their own: only a selection, clear or cast empties it. |
-| **Wrong scan** | A scan whose waypoint, together with the scans already in the stack, isn't part of any pattern of the selected shape that the team has unlocked (`!FitsShapeWithin(shape, set, unlocked points)`). It's **pushed** (not rejected), marked `wrong`, and the player is **told**: outcome `wrong_scan`, and `stack[].wrong: true` on every phone. |
+| **Wrong scan** | A scan whose waypoint, together with the scans already in the stack, isn't part of any pattern of the selected shape that the team can cast now: unlocked, and not of its cooldown class (`!FitsShapeCastable(shape, set, unlocked points, cooldown)`). It's **pushed** (not rejected), marked `wrong`, and the player is **told**: outcome `wrong_scan`, and `stack[].wrong: true` on every phone. |
 | **Poisoned** | The stack holds a wrong scan (`State.Poisoned()`, `poisoned: true` in JSON). The attempt can't cast, and every further scan is refused with `409 selection_poisoned` until someone selects again (which purges the stack). See [Wrong scans and poisoned attempts](#wrong-scans-and-poisoned-attempts). |
 | **Cast** | A completion: the moment the stack becomes exactly a pattern of the selected shape. The client calls it casting a spell. Every cast is logged, repeats included: in memory (`State.Casts`) and in `team_cast`. `team_pattern` keeps only the first completion of each pattern. |
 | **Cast log** | `State.Casts`: every cast the team has made, oldest first, loaded from `team_cast` at startup. `GET /api/teams/me/casts` returns it newest first. |
@@ -53,32 +54,35 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Attack** | Every **10 min** (`game.boss_attack.interval`) of the phase, the current boss takes its damage (`game.boss_attack.damage`, by serial: its serial number for now) off the team's health. The k-th is at exactly `PhaseStart + k × interval`. See [Boss attacks and health](#boss-attacks-and-health). |
 | **Health** | Per team, **10** (`game.health`) at the start. **Derived, never stored per attack:** `Attacks = min(floor((now − PhaseStart) / interval), ceil(PhaseHealth / attack_damage))`, `Health = max(0, PhaseHealth − Attacks × attack_damage)`. `health` in JSON. |
 | **Knocked out** | Health 0 (`BossProgress.KnockedOut()`, `knocked_out` in JSON): selecting and scanning are refused (`409 knocked_out`), clearing still works, and attacks stop, until an admin revives the team (`POST /api/admin/teams/{team_id}/revive`). |
-| **Catch-up** | `catchUp`: applies any attack that has fallen due, as its own change. The attack timer calls it, and so does every write before validating, so an attack is never lost to a late timer. |
+| **Catch-up** | `catchUp`: applies any attack and any QR cooldown end that has fallen due, as its own change. The team's timer calls it, and so does every write before validating, so neither is ever lost to a late timer. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection, wrong scans included. |
-| **Clock** | Where the store gets time: `Now()` (the time selections, scans and casts are stamped with, and what health is derived against) and `AfterFunc(d, f)` (the boss attack timers). `systemClock` is the real one (`time.Now`, `time.AfterFunc`); tests pass a fake through `Rules.Clock`, whose timers fire only when the test moves its time. |
-| **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts, counts by size (`patterns_by_points`), sizes and damage ranges, plus `health` (starting health), `locked_pattern_points`, `unlock_after_bosses` and `max_pattern_points`. Static while the backend runs. |
+| **Clock** | Where the store gets time: `Now()` (the time selections, scans and casts are stamped with, and what health and QR cooldowns are derived against) and `AfterFunc(d, f)` (the teams' timers, for attacks and QR cooldown ends). `systemClock` is the real one (`time.Now`, `time.AfterFunc`); tests pass a fake through `Rules.Clock`, whose timers fire only when the test moves its time. |
+| **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts, counts by size (`patterns_by_points`), sizes, spell classes (`classes`) and damage ranges, every spell class (`spell_classes`), plus `health` (starting health), `locked_pattern_points`, `unlock_after_bosses` and `max_pattern_points`. Static while the backend runs. |
 | **Leader** | The team's leader (teams' `Team.LeaderID`). **Only the leader selects a shape and clears the selection** (`403 not_leader` for anyone else), so only the leader restarts a poisoned attempt; every member scans. Checked under the entry lock against teams' current roster (`isLeader`): an admin removing the leader names a new one. |
 | **Big pattern** | A pattern of at least **5** (`game.locked_pattern_points`) waypoints. **Locked** until the team has defeated **5** (`game.unlock_after_bosses`) bosses: it can't be cast, a shape made only of big patterns can't be selected (`409 shape_locked`), and in a shape mixing sizes a scan that could only grow into a big pattern is a wrong scan. The 2025 seed has none (all its patterns have 3 or 4 points), so this only matters for content that does. |
+| **Spell cooldown** | `cooldown(State)`, `cooldown_class` in JSON: the spell class the team can't cast now, its last cast's (`class_4` after a 4-point spell), until it casts a spell of another class. Its patterns count as unavailable: a shape made only of them can't be selected (`409 shape_on_cooldown`, listed in `cooldown_shapes`), and a scan that could only grow into one is wrong. Derived from the cast log, so nothing new is stored and a restart rebuilds it; a defeated boss doesn't clear it. |
+| **QR cooldown** | `State.QRCooldowns`, `qr_cooldowns` in JSON: the waypoints the team can't scan now. A cast at *T* disables every waypoint of its pattern for the team until *T* + **5 min** (`game.qr_cooldown`); scanning one is refused (`409 waypoint_on_cooldown`), recording nothing. Other waypoints stay open and selecting isn't affected. Ends with nobody acting (`qr_cooldown_ended`). Derived from the cast log and the clock, so nothing new is stored and a restart rebuilds it. See [QR cooldown](#qr-cooldown). |
 | **Unlocked points** | `unlockedPoints(State)`, `unlocked_points` in JSON: the most waypoints a pattern the team can cast may have. **4** (`game.locked_pattern_points` − 1) until it has defeated `game.unlock_after_bosses` bosses, then **6** (`game.max_pattern_points`). `locked_shapes` lists the shapes whose every pattern is bigger. |
 
 **Client words.** The client's **"type"** is our **Shape**, its **"shape"** is our **Pattern**, its **"point"** is our **Waypoint**, and its **"buffer"** is our **Stack**. This README and the code always use the code's words. The full vocabulary, spells included, is in [`internal/atlas/README.md`](../atlas/README.md).
 
 ## The game flow
 0. **Start.** When the leader starts the team (teams' `Start`; any size from 1 to **6** (`teams.size`) may start, once every non-leader is ready), every member's stream gets the `IN_GAME` `team` and then the team's `team_state`, empty: no selection, no stack, no progress, `poisoned: false`, health **10** (`game.health`), and boss 1's attack clock started at the team's start. teams calls `PublishTeam` through its `Rules.OnStart` hook, wired in `server.Build`, because teams may not import teamstate (AGENTS.md §4). The play screen has its state at once, without reconnecting.
-1. **Select.** **The leader** selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}` (anyone else: `403 not_leader`). **Every selection purges the stack**, reselecting the same shape included. Reselecting is how a team restarts an attempt. A shape whose patterns are all bigger than the team's unlocked points is refused (`409 shape_locked`) until it has defeated **5** (`game.unlock_after_bosses`) bosses.
+1. **Select.** **The leader** selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}` (anyone else: `403 not_leader`). **Every selection purges the stack**, reselecting the same shape included. Reselecting is how a team restarts an attempt. A shape whose patterns are all bigger than the team's unlocked points is refused (`409 shape_locked`) until it has defeated **5** (`game.unlock_after_bosses`) bosses. A shape whose unlocked patterns are all of the team's **cooldown class** (its last cast's) is refused too (`409 shape_on_cooldown`) until the team casts a spell of another class.
 2. **Scan.** Members scan waypoints: `POST /api/teams/me/state/scans {"qr":"1001:1760000000.…"}`. The token is verified first (signature and freshness, through the `qr` use case); then the waypoint it names is used exactly as the raw ID was. No time limit, and any member may scan any number of the pattern's waypoints (one player can scan a whole pattern). A scan is **rejected with an error and not pushed** if:
    - the token is malformed or tampered: `400 invalid_qr`
    - the token is outside its validity window: `409 qr_expired`
    - no shape is selected: `409 no_shape_selected`
-   - no shape is selected: `409 no_shape_selected`
    - the attempt is **poisoned**: `409 selection_poisoned`
    - its **waypoint is already in the stack**, whoever scanned it, the same member included: `409 waypoint_already_scanned`
+   - the team cast a spell with that waypoint less than **5 min** ago (`game.qr_cooldown`): `409 waypoint_on_cooldown`
 
    Otherwise it's pushed on top. If the waypoint, with the stack, can't be part of any pattern of the selected shape **that the team has unlocked**, it's pushed **marked wrong**, the response says `wrong_scan`, and the attempt is poisoned.
-3. **Complete (cast).** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, the cast is appended to the cast log (`State.Casts`, `team_cast`) and becomes `last_cast`, its damage (× the team's multiplier) goes to the current **boss** (a defeat moves the team to the next; see [Bosses](#bosses)), and **the stack and the selection are purged**. The team selects again for its next attempt.
+3. **Complete (cast).** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, the cast is appended to the cast log (`State.Casts`, `team_cast`) and becomes `last_cast`, its damage (× the team's multiplier) goes to the current **boss** (a defeat moves the team to the next; see [Bosses](#bosses)), its waypoints go on the team's **QR cooldown** for **5 min** (`game.qr_cooldown`), and **the stack and the selection are purged**. The team selects again for its next attempt.
 4. **Restart.** After a wrong scan, the leader reselects (the same shape or another): the stack, wrong scan included, is purged and the team scans again.
 5. **Give up.** The leader's `DELETE /api/teams/me/state/selection` clears the selection and the stack.
 6. **The boss attacks** every **10 min** (`game.boss_attack.interval`) of the phase, for its `game.boss_attack.damage`, with nobody acting: the server lowers health and publishes `boss_attacked` (`knocked_out` when health reaches 0). Defeating the boss starts the next boss's clock. A knocked-out team can't select or scan until an admin revives it. See [Boss attacks and health](#boss-attacks-and-health).
+7. **QR codes open again** **5 min** (`game.qr_cooldown`) after the cast that used them, with nobody acting: the server drops them from `qr_cooldowns` and publishes `qr_cooldown_ended`. See [QR cooldown](#qr-cooldown).
 
 **"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is correct if it's in *any* pattern of the shape. Each later scan must keep the stack inside at least one pattern of the shape that contains everything already scanned. A scan that doesn't is wrong.
 
@@ -93,6 +97,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 **Why only the leader selects.** A selection purges the stack, so any member selecting could wipe teammates' scans mid-attempt, by accident or in a race. One person choosing the type (and deciding when to restart or give up) makes the team's plan unambiguous; scanning stays open to everyone.
 
 **Why big patterns are locked, and why as "they don't exist yet".** 5- and 6-point patterns are the hardest and deal the most damage, so they're a reward for getting through boss 5. Treating a locked pattern as absent (the fit check counts only unlocked patterns) keeps one rule for everything: a scan that can only lead to a locked pattern is simply wrong, so a team can't half-build one and wait.
+
+**Why a cooling QR code is refused, not pushed as wrong.** The team can't help that the waypoint is cooling, and it's in `qr_cooldowns` for everyone to see: refusing it (nothing recorded, no event) lets the team wait or walk elsewhere without losing its attempt. A wrong scan is a mistake about the shape, so it costs a restart; a cooling scan is just early.
 
 **Retries.** A phone resending a scan gets `409 waypoint_already_scanned` (or `selection_poisoned`, if its first copy was wrong); the app should treat that as "already in" and refresh from the returned state or the live event.
 
@@ -119,12 +125,16 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `BossProgress`: a team's progress (`Defeated`, `Damage`, `Multiplier`) and its phase (`PhaseStart`, `PhaseHealth`, and the derived `Attacks`, `Health`); a value inside `State`.
   - `BossProgress.KnockedOut()`: `Health <= 0`.
   - `BossProgress.at(now, bosses)`: the progress with `Attacks` and `Health` as of `now`: `Attacks = floor((now − PhaseStart) / interval)` (0 if `now` is before `PhaseStart`), capped at the knockout attack `ceil(PhaseHealth / attack_damage)` (no cap when `attack_damage` is 0), and `Health = max(0, PhaseHealth − Attacks × attack_damage)`. Returns the progress unchanged if every boss is defeated. A pure function of the stored phase and the time, so the timer, a write and `Load` all get the same answer for the same time, however they got there: the cap is what makes a knocked-out team's `Attacks` the same live (where attacks stopped at the knockout) and after a restart (where `Load` computes it fresh).
+  - `QRCooldown`: one waypoint on the team's QR cooldown (`Waypoint`, its atlas index; `Until`, when it opens). `State.qrCooldownUntil(w, now)` returns `w`'s `Until` and true while `now` is before it.
+  - `Store.qrCooldowns(casts, now)`: the active QR cooldowns, derived from the cast log: walking it newest first, each cast's waypoints not already seen, until `cast.At + Rules.QRCooldown`, stopping at the first cast whose cooldown has ended at `now` (every older one has too); sorted by `Until`, then waypoint index. `nil` when `Rules.QRCooldown` is 0. Used by `stateOf`, `Scan` (on a cast) and `catchUp` (on an expiry).
   - `BossProgress.nextAttack(bosses)`: `PhaseStart + (Attacks + 1) × interval`; `ok` false if every boss is defeated or the team is knocked out.
   - `deal(progress, damage, now, bosses)`: applies one cast: returns the new progress, the damage dealt (`math.Round(damage × Multiplier)`), the serial of the boss hit, and whether it was defeated. If every boss is already defeated it returns the progress unchanged, 0, 0, false. On a defeat it increments `Defeated`, resets `Damage` to 0 (the rest of the cast is lost), and **starts the next boss's phase**: `PhaseStart` = `now`, `PhaseHealth` = the current `Health`, `Attacks` = 0. The progress passed in must already be at `now` (`Scan` caught up first). Called by `Scan`.
-  - `View`, `SelectionView`, `CastView`, `BossView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast` and each entry of the cast log: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`, `damage`, `dealt`, `boss` (serial, or `null`), `defeated_boss`. `StackScanView` carries `wrong`; `View` carries `poisoned`, `bosses_defeated`, `boss` (`BossView{serial, damage, phase_started_at, attacks, next_attack_at}`, or `null`), `damage_multiplier`, `health`, `knocked_out`, `unlocked_points` and `locked_shapes`.
-  - `Game`, `GameShape`, `DamageRange`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`) and `patterns_by_points` (its patterns counted by size), and the game's `health` (`game.health`), `locked_pattern_points` and `unlock_after_bosses`.
+  - `View`, `SelectionView`, `CastView`, `BossView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast` and each entry of the cast log: `pattern` (sorted waypoint IDs), `shape`, `class` (the pattern's spell class ID, e.g. `class_4`), `cast_by`, `cast_at`, `already_completed`, `damage`, `dealt`, `boss` (serial, or `null`), `defeated_boss`. `StackScanView` carries `wrong`; `View` carries `poisoned`, `bosses_defeated`, `boss` (`BossView{serial, damage, phase_started_at, attacks, next_attack_at}`, or `null`), `damage_multiplier`, `health`, `knocked_out`, `unlocked_points`, `locked_shapes`, and `qr_cooldowns` (`QRCooldownView{waypoint_id, until}`).
+  - `Game`, `GameShape`, `DamageRange`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`), `patterns_by_points` (its patterns counted by size) and `classes` (the spell class of each size, in `points` order), the game's `spell_classes` (every class, ascending by points), and the game's `health` (`game.health`), `locked_pattern_points` and `unlock_after_bosses`.
   - `Store.unlockedPoints(State)`: `Rules.MaxPatternPoints` once `State.Boss.Defeated` ≥ `Rules.UnlockAfterBosses`, else `Rules.LockedPatternPoints` − 1. Used by `view`, `Select` and `Scan`.
   - `Store.shapeLocked(shape, unlocked)`: true if the shape's smallest pattern (`Game.Shapes[shape].Points[0]`, the sizes being ascending) is bigger than `unlocked`. A shape with no patterns isn't locked.
+  - `Store.cooldown(State)`: the spell class of `State.LastCast()`'s pattern (`Atlas.Pattern(p).Spell.Class`), or `""` before the first cast.
+  - `Store.shapeOnCooldown(shape, unlocked, cooldown)`: true if the shape has sizes of at most `unlocked` and every one's class (`Game.Shapes[shape].Classes`, aligned with `Points`) is `cooldown`. False when `cooldown` is `""` or the shape is locked.
 - **`Stack` methods** (all on values; none modifies the receiver):
   - `NewStack(maxPoints)` is an empty stack with `Cap` = `maxPoints` + 1 (exported so tests can build one).
   - `Len()` counts scans.
@@ -137,23 +147,23 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `ForUser(userID)` → `View`, or `ErrNotInTeam`
   - `CastsForUser(userID)` → `[]CastView`, newest first, or `ErrNotInTeam`; `[]` before the first cast
   - `Snapshot(userID)`: the live event for a new stream, of type `snapshot`
-- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast()` (`null` when the log is empty), lists every stack scan with its `wrong` flag, sets `poisoned` from `State.Poisoned()`, and sets the boss fields: `bosses_defeated`, `damage_multiplier`, `health` and `knocked_out` from `State.Boss`, `unlocked_points` from `unlockedPoints` and `locked_shapes` (every shape `shapeLocked` at that size, in index order; `[]` when none), and `boss` from `Bosses.At(Defeated).Serial` with `Damage`, `PhaseStart`, `Attacks` and `next_attack_at` (`nextAttack`, `null` when knocked out), or `null` when `Defeated` ≥ `Bosses.Count()`.
-- **`castView`** turns one `Cast` into a `CastView`, the shape being the pattern's `Shape` `damage` the pattern's precomputed `Spell.Damage` (from `pattern.damage`, loaded by the atlas), and `dealt`, `boss` (`null` when the cast's `Boss` is 0) and `defeated_boss` from the `Cast`. Used by `view` and `CastsForUser`.
+- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast()` (`null` when the log is empty), lists every stack scan with its `wrong` flag, sets `poisoned` from `State.Poisoned()`, and sets the boss fields: `bosses_defeated`, `damage_multiplier`, `health` and `knocked_out` from `State.Boss`, `unlocked_points` from `unlockedPoints` and `locked_shapes` (every shape `shapeLocked` at that size, in index order; `[]` when none), `cooldown_class` from `cooldown` (`null` when `""`) and `cooldown_shapes` (every shape not locked but `shapeOnCooldown`, in index order), `qr_cooldowns` from `State.QRCooldowns` in its order (`[]` when none), and `boss` from `Bosses.At(Defeated).Serial` with `Damage`, `PhaseStart`, `Attacks` and `next_attack_at` (`nextAttack`, `null` when knocked out), or `null` when `Defeated` ≥ `Bosses.Count()`.
+- **`castView`** turns one `Cast` into a `CastView`, the shape being the pattern's `Shape`, `class` its `Spell.Class` and `damage` its precomputed `Spell.Damage` (both from `pattern`, loaded by the atlas), and `dealt`, `boss` (`null` when the cast's `Boss` is 0) and `defeated_boss` from the `Cast`. Used by `view` and `CastsForUser`.
 
 ### `write.go`: writes, each written through
 - **`Select`**, **`ClearSelection`**, **`Scan`** and **`Revive`** each follow the [write-through](#the-write-through) steps, numbered in the code.
-- **Catch-up first.** Right after `1. lock` and `isMember`, `Select`, `ClearSelection` and `Scan` call **`catchUp`**, which applies any boss attack that has fallen due (its own change and its own event) and returns the current state; the write validates against that. Then `Select` and `ClearSelection` refuse anyone but the leader (`isLeader`, `ErrNotLeader`, `403 not_leader`); `Select` and `Scan` refuse a knocked-out team (`ErrKnockedOut`, `409 knocked_out`); `ClearSelection` doesn't (giving up is harmless); and `Select` refuses a shape whose patterns are all locked (`shapeLocked`, `ErrShapeLocked`, `409 shape_locked`). `Revive` catches up too, so the event order is the attack, then the revive.
-- **`catchUp(e, teamID)`**: `cur.Boss.at(now)`; if `Attacks` and `Health` are unchanged, returns `cur`. Otherwise it builds the next state with the new progress and `Version.Next`, **skips persist** (memory-only, AGENTS.md §6: health is derived from the stored phase and the clock, and `Load` reproduces it exactly), applies, and publishes **`boss_attacked`**, or **`knocked_out`** if health is now 0. Several due attacks become **one** change and one event.
-- **`attack(teamID)`**: the attack timer's callback, run by the `Clock` in its own goroutine. `1. lock`, then nothing if the store is closed (`entry.closed`), else `catchUp` and `schedule` for the next attack. A timer that fires early finds nothing due and re-arms; one that fires late applies everything due.
+- **Catch-up first.** Right after `1. lock` and `isMember`, `Select`, `ClearSelection` and `Scan` call **`catchUp`**, which applies any boss attack or QR cooldown end that has fallen due (its own change and its own event) and returns the current state; the write validates against that. Then `Select` and `ClearSelection` refuse anyone but the leader (`isLeader`, `ErrNotLeader`, `403 not_leader`); `Select` and `Scan` refuse a knocked-out team (`ErrKnockedOut`, `409 knocked_out`); `ClearSelection` doesn't (giving up is harmless); and `Select` refuses a shape whose patterns are all locked (`shapeLocked`, `ErrShapeLocked`, `409 shape_locked`), then one whose unlocked patterns are all of the cooldown class (`shapeOnCooldown`, `ErrShapeOnCooldown`, `409 shape_on_cooldown`). `Scan`'s wrong-scan check is `Atlas.FitsShapeCastable(shape, stack ∪ {w}, unlockedPoints, cooldown)`. `Revive` catches up too, so the event order is the attack, then the revive.
+- **`catchUp(e, teamID)`**: `cur.Boss.at(now)`, and whether the soonest QR cooldown (`QRCooldowns[0]`) has ended (`now` ≥ its `Until`). If neither changed, returns `cur`. Otherwise it builds the next state with the new progress, the QR cooldowns re-derived (`qrCooldowns(Casts, now)`) if one ended, and `Version.Next`, **skips persist** (memory-only, AGENTS.md §6: health is derived from the stored phase and the clock, QR cooldowns from the cast log and the clock, and `Load` reproduces both exactly), applies, and publishes **one** event: **`boss_attacked`** (or **`knocked_out`** if health is now 0) if an attack fell due, else **`qr_cooldown_ended`**. Several due attacks and expiries become one change.
+- **`due(teamID)`**: the team timer's callback, run by the `Clock` in its own goroutine. `1. lock`, then nothing if the store is closed (`entry.closed`), else `catchUp` and `schedule` for whatever is next. A timer that fires early finds nothing due and re-arms; one that fires late applies everything due.
 - **`Revive(ctx, teamID)`**: an admin's revive. `2. validate, before 1. lock`: `Teams.ByID` (unknown → `ErrTeamNotFound`, `404 team_not_found`), `IN_GAME` (else `ErrNotInGame`, `409 not_in_game`). `1. lock`, `catchUp`, `3. build`: a new phase of the same boss, `PhaseStart` = now, `PhaseHealth` = `Health` = `Rules.Health`, `Attacks` = 0. `4. persist`: `upsertBossPhase`. `5. apply`, `6. publish` **`revived`**, and `schedule`. Allowed whether or not the team is knocked out, so it also heals; `Defeated`, `Damage` and the multiplier are kept.
 - **Lock-free checks first** (§6 variation (a)): `Scan` verifies the token (`QR.Verify`, mapping its errors to `ErrInvalidQR` / `ErrExpiredQR`) and resolves the waypoint with `Atlas.WaypointIndex`, `Select` the shape with `Atlas.ShapeIndex`, all before the team and the lock.
-- **`Scan`'s checks**, in order, under the lock: no selection → `ErrNoShapeSelected`; `cur.Poisoned()` → `ErrSelectionPoisoned`; the waypoint already in the stack → `ErrWaypointAlreadyScanned`. Then `Atlas.FitsShapeWithin(shape, stack ∪ {w}, unlockedPoints(cur))` decides whether the scan is **wrong** (pushed, marked `Wrong`, outcome `wrong_scan`): only patterns the team has unlocked count, so a scan that could only grow into a locked one is wrong too. Completion is `!wrong` and `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, the cast's damage goes to the boss (`deal(cur.Boss, Pattern(p).Spell.Damage, bosses)` sets `next.Boss` and the cast's `Dealt`, `Boss`, `DefeatedBoss`; a defeat makes the event type `boss_defeated` instead of `spell_cast`, and starts the next boss's phase, after which `Scan` calls `schedule`), and the new `Cast` is appended to the log **copy-on-write**: `append(slices.Clip(cur.Casts), cast)`. `Clip` sets the slice's capacity to its length, so `append` always allocates a new backing array and the current snapshot's slice is never written to.
+- **`Scan`'s checks**, in order, under the lock: no selection → `ErrNoShapeSelected`; `cur.Poisoned()` → `ErrSelectionPoisoned`; the waypoint already in the stack → `ErrWaypointAlreadyScanned`; the waypoint on the team's QR cooldown (`cur.qrCooldownUntil(w, now)`) → `ErrWaypointOnCooldown`. Then `Atlas.FitsShapeWithin(shape, stack ∪ {w}, unlockedPoints(cur))` decides whether the scan is **wrong** (pushed, marked `Wrong`, outcome `wrong_scan`): only patterns the team has unlocked count, so a scan that could only grow into a locked one is wrong too. Completion is `!wrong` and `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, the cast's damage goes to the boss (`deal(cur.Boss, Pattern(p).Spell.Damage, bosses)` sets `next.Boss` and the cast's `Dealt`, `Boss`, `DefeatedBoss`; a defeat makes the event type `boss_defeated` instead of `spell_cast`, and starts the next boss's phase), the new `Cast` is appended to the log, its waypoints' QR cooldowns are re-derived from it (`next.QRCooldowns = qrCooldowns(next.Casts, now)`: each until `now` + `game.qr_cooldown`), and after publishing `Scan` calls `schedule`. The log is appended **copy-on-write**: `append(slices.Clip(cur.Casts), cast)`. `Clip` sets the slice's capacity to its length, so `append` always allocates a new backing array and the current snapshot's slice is never written to.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME` (lock-free: a started team's status never goes back).
 - **`isMember(teamID, userID)`** reads the team's current roster through `Teams.ByID` (lock-free) and reports whether the user is in it. `Select`, `ClearSelection` and `Scan` call it **again under the entry lock**, right after `1. lock`, and refuse with `ErrNotInTeam` (`404 not_in_team`) if an admin removed the caller since `inGameTeam` looked them up. A started team's roster can shrink (teams' `RemoveMember`), so the lock-free lookup alone isn't enough.
 - **`isLeader(teamID, userID)`** reads the team through `Teams.ByID` (lock-free) and reports whether the user is its leader **now**. `Select` and `ClearSelection` call it under the entry lock, after `catchUp`: an admin removing the leader names a new one (teams' `RemoveMember`), and from then on only the new leader passes.
 - **`RosterChanged(teamID)`** is teams' `Rules.OnRosterChange` (wired in `server.Build`): an admin removed a member from a started team. It locks the entry (`lockTeam`) and drops `entry.members`, the roster cache, so the next publish re-reads the roster from teams and no longer reaches the removed player. **Memory-only** (AGENTS.md §6): the roster is teams' data, already saved. **Publishes nothing:** the team's `State` didn't change (the removed player's scans and casts stay), and teams has already sent the rest `team` and the removed player `no_team`.
-- **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing, and arms the team's first attack timer. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none, its phase starting at the team's `started_at`), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team), then `schedule`. Not a write: no build, persist or apply. It takes the entry lock so its event is ordered with the team's writes.
-- **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`, `ErrInvalidQR`, `ErrExpiredQR`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
+- **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing, and arms the team's first timer. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none, its phase starting at the team's `started_at`), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team), then `schedule`. Not a write: no build, persist or apply. It takes the entry lock so its event is ordered with the team's writes.
+- **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrShapeOnCooldown`, `ErrWaypointOnCooldown`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`, `ErrInvalidQR`, `ErrExpiredQR`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
 
 ### `db.go`: SQL
 Only the per-team tables. The content tables are read by the atlas (`internal/atlas/db.go`).
@@ -169,7 +179,7 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
 - **`deleteSelection`**: deletes `team_selection`, and fails unless exactly one row went (memory had a selection, so Postgres must too).
 - **`upsertBossPhase`**: `Revive`'s write: one `upsertBoss` on the pool (the new phase, at full health).
 - **`upsertBoss(ctx, q, teamID, progress)`**: the one `team_boss` upsert, on the pool or inside a transaction: `defeated`, `damage`, `phase_health`, `phase_started_at`. The multiplier is never written here.
-- **Attacks write nothing.** `catchUp` and the timer have no `db.go` call: health is derived from the stored phase.
+- **Attacks and QR cooldowns write nothing.** `catchUp` and the timer have no `db.go` call: health is derived from the stored phase, QR cooldowns from `team_cast`.
 
 ### `store.go`: the in-memory layout
 - **`Teams`** is what team state needs from the teams use case: `ForUser(userID)`, `ByID(teamID)`, and `All()` (every team: `Load` creates an entry for, and arms the timer of, every `IN_GAME` team, including those with nothing stored).
@@ -192,18 +202,18 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
 - **`Bosses`** is what team state needs from the bosses use case, satisfied by `*bosses.Bosses`: `Count()` (how many) and `At(i)` (the boss at index `i`, serial `i+1`). Static, so lock-free. Used by `deal` (the current boss's HP and serial), `at` and `nextAttack` (its `AttackInterval()` and `AttackDamage`), `view` (`boss.serial`) and `stateOf` (the load check).
 - **`Clock`** is the store's time source, an interface with `Now()` (UTC, truncated to microseconds) and `AfterFunc(d, f) (stop func() bool)` (call `f` in its own goroutine after `d`; `stop` cancels it). **`systemClock`** is the real one: `time.Now().UTC().Truncate(time.Microsecond)` and `time.AfterFunc(d, f).Stop`.
 - **`QR`** is what team state needs from the qr use case, declared here (AGENTS.md §4) and satisfied by `*qr.Verifier`: one method, `Verify(token) → (waypoint ID, error)`. It holds no state (the token is derived from the secret and the clock), so `Scan` calls it lock-free. It doesn't check the waypoint exists: `Scan` does that through `Atlas.WaypointIndex`.
-- **`Rules`** are the settings from `config.toml`: `MaxPatternPoints` (`game.max_pattern_points`; the stack holds that many plus one wrong scan), `Health` (`game.health`: starting health and what a revive restores), `WriteTimeout` (`storage.write_timeout`), and `Clock` and `Epoch` (not in config.toml; nil `Clock` means `systemClock`; tests pass a fake).
+- **`Rules`** are the settings from `config.toml`: `MaxPatternPoints` (`game.max_pattern_points`; the stack holds that many plus one wrong scan), `Health` (`game.health`: starting health and what a revive restores), `QRCooldown` (`game.qr_cooldown`: how long a cast's waypoints stay disabled for the team; 0 turns it off), `WriteTimeout` (`storage.write_timeout`), and `Clock` and `Epoch` (not in config.toml; nil `Clock` means `systemClock`; tests pass a fake).
 - **`Load(ctx, pg, atlas, bosses, teams, qr, hub, log, rules)`** reads every team's stored state (`selectTeams` with `stackSize` = `MaxPatternPoints` + 1), checking it against the atlas and bosses, and builds the `Game` (`newGame`). Then it creates an entry for every `IN_GAME` team in `Teams.All()` that had nothing stored (`lockTeam`), so every started team is attacked, and only once the map is complete arms each entry's attack timer (`schedule`). Every state is brought up to now as it's built (`emptyState` and `stateOf` call `at`), so attacks that fell due while the backend was down are applied at load (and published to nobody: no stream is open yet; clients get them in their `snapshot`). It runs after `atlas.Load` and `bosses.Load` (it's handed both) and after `teams.Load`.
-- **`Close()`** stops every pending attack timer and marks every entry `closed`, so no timer re-arms and one already running does nothing. `main.go` registers it with `srv.RegisterOnShutdown` (after `Hub.Close`); tests call it before loading another store on the same database.
+- **`Close()`** stops every pending timer and marks every entry `closed`, so no timer re-arms and one already running does nothing. `main.go` registers it with `srv.RegisterOnShutdown` (after `Hub.Close`); tests call it before loading another store on the same database.
 - **`emptyState(teamID)`** is a `State` with an empty stack of capacity `MaxPatternPoints` + 1 and `Boss: {Defeated: 0, Damage: 0, Multiplier: 1, PhaseStart: the team's started_at (from Teams.ByID; now if it has none), PhaseHealth: Rules.Health}`, then brought up to now (`at`): a team without a `team_boss` row is at boss 1 with multiplier 1, attacked since its start.
-- **`stateOf(teamID, teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes. Every `team_cast` row becomes a `Cast` in `State.Casts`, oldest first (`cast: unknown pattern N` if the atlas lacks it). Stack rows are pushed oldest first, with their `wrong` flag. A `team_boss` row becomes `State.Boss` (`defeated`, `damage`, `multiplier`, and `phase_health` / `phase_started_at` where not `NULL`, else `emptyState`'s full health and team start), then `at(now)`; if its `defeated` is more than `Bosses.Count()` (game.bosses lowered mid-event) the load fails (`team_boss: N bosses defeated, but game.bosses is M`).
-- **`schedule(e, teamID, st)`** (caller holds `e.mu`) stops the entry's pending timer (`stopAttack`) and, unless the entry is `closed` or nothing will attack (`nextAttack` not ok: knocked out, or every boss defeated), arms `Clock.AfterFunc(nextAttack − now, attack)`. Called after every apply that can move the next attack: a cast (`Scan` on completion), the timer itself, `Revive`, `reconcile`, `PublishTeam` and `Load`. A timer isn't re-armed after an ordinary scan or selection: catching up never moves the schedule forward, and a stale timer is harmless.
+- **`stateOf(teamID, teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes. Every `team_cast` row becomes a `Cast` in `State.Casts`, oldest first (`cast: unknown pattern N` if the atlas lacks it). Stack rows are pushed oldest first, with their `wrong` flag. A `team_boss` row becomes `State.Boss` (`defeated`, `damage`, `multiplier`, and `phase_health` / `phase_started_at` where not `NULL`, else `emptyState`'s full health and team start), then `at(now)`; `State.QRCooldowns` is `qrCooldowns(Casts, now)`, so cooldowns that ended while the backend was down are gone; if its `defeated` is more than `Bosses.Count()` (game.bosses lowered mid-event) the load fails (`team_boss: N bosses defeated, but game.bosses is M`).
+- **`schedule(e, teamID, st)`** (caller holds `e.mu`) stops the entry's pending timer (`stopTimer`) and, unless the entry is `closed`, arms **one** `Clock.AfterFunc(next − now, due)` for the earliest of `nextAttack` (not ok when knocked out or every boss is defeated) and the soonest QR cooldown's `Until`; nothing if neither exists. Called after every apply that can move either: a cast (`Scan` on completion: new cooldowns, maybe a new phase), the timer itself, `Revive`, `reconcile`, `PublishTeam` and `Load`. A timer isn't re-armed after an ordinary scan or selection: catching up never moves the schedule forward, and a stale timer is harmless. So a knocked-out team still gets its `qr_cooldown_ended`.
 - **`lockTeam`** gets or creates a team's entry (with `emptyState(teamID)`) and locks it.
 - **`persist`** runs a `db.go` write detached from the request, capped at **5 s** (`storage.write_timeout`).
 - **`reconcile`** reloads one team's state from Postgres after a failed write (brought up to now, like `Load`), sets its `Version` to the in-memory one's `Next` (a reload never goes back), publishes it as type `resync`, and re-arms the attack timer (`schedule`). If the reload fails too, memory stays as it was.
 - **`publish(e, teamID, st, typ)`**, called with `e.mu` held, sends `team_state` of type `typ` to every member. The recipients are **`e.members`**, the team's roster cached on the first publish that finds the team `IN_GAME` (its roster then only changes by an admin's removal, and `RosterChanged` drops the cache when it does). Until then, and after a drop, it reads the roster through `Teams.ByID`. So a publish reads nothing outside the entry: no index lock, no lookup.
 - **`event(teamID, st, typ)`** encodes the envelope once, `live.NewEvent("team_state", typ, view)`; every member's stream gets the same bytes.
-- **The type constants** (`GameStarted`, `ShapeSelected`, `SelectionCleared`, `ScanAdded`, `WrongScan`, `SpellCast`, `BossDefeated`, `BossAttacked`, `KnockedOut`, `Revived`) are declared beside `event`; `live.Snapshot` and `live.Resync` come from `platform/live`. `Scan` picks its type from its outcome: `scan_added` → `ScanAdded`, `wrong_scan` → `WrongScan`, `pattern_completed` → `SpellCast`, or `BossDefeated` when that cast defeated the boss.
+- **The type constants** (`GameStarted`, `ShapeSelected`, `SelectionCleared`, `ScanAdded`, `WrongScan`, `SpellCast`, `BossDefeated`, `BossAttacked`, `KnockedOut`, `QRCooldownEnded`, `Revived`) are declared beside `event`; `live.Snapshot` and `live.Resync` come from `platform/live`. `Scan` picks its type from its outcome: `scan_added` → `ScanAdded`, `wrong_scan` → `WrongScan`, `pattern_completed` → `SpellCast`, or `BossDefeated` when that cast defeated the boss.
 - **`Rules.Epoch`** is the process's epoch (from `server.Build`). `emptyState` starts a team at `{epoch, 0}`; `Select`, `ClearSelection`, `Scan`, `Revive` and `catchUp` set `next.Version = cur.Version.Next(epoch)` in their build step. `PublishTeam` resends the current version.
 - **`now`** returns `clock.Now()`: UTC, truncated to microseconds (Postgres's precision), so a restart reproduces times exactly.
 
@@ -221,7 +231,7 @@ Store
   log      *slog.Logger
   mu       sync.RWMutex              guards the map below; never held during I/O
   states   map[teamID]*entry         created on a team's first write (or PublishTeam)
-  clock    Clock                     Rules.Clock, or systemClock: Now, and AfterFunc for attack timers
+  clock    Clock                     Rules.Clock, or systemClock: Now, and AfterFunc for team timers
 
 entry
   mu          sync.Mutex             writers to this team queue here
@@ -230,7 +240,8 @@ entry
                                      by publish once the team is IN_GAME, dropped
                                      by RosterChanged on an admin's removal; nil
                                      until the next publish refills it. Guarded by mu
-  stopAttack  func() bool            cancels the pending attack timer, or nil. Guarded by mu
+  stopTimer   func() bool            cancels the pending timer (next attack or QR
+                                     cooldown end), or nil. Guarded by mu
   closed      bool                   set by Close: no timer re-arms or acts. Guarded by mu
 
 State                                (never modified once stored)
@@ -259,6 +270,10 @@ State                                (never modified once stored)
     PhaseHealth int                  health when it began (stored)
     Attacks     int                  attacks this phase, as of the last catch-up (derived)
     Health      int                  health as of the last catch-up (derived); 0 = knocked out
+  QRCooldowns []QRCooldown           waypoints the team can't scan, soonest Until first;
+                                     derived from Casts and the clock; never modified
+    Waypoint  int                    the waypoint's index in the atlas
+    Until     time.Time              when it opens: its latest cast's At + game.qr_cooldown
   Version    live.Version            {Epoch, Seq}; memory-only
 
 Stack                                a value; Push returns a new one
@@ -274,9 +289,10 @@ StackScan
   Wrong    bool                      didn't fit the selected shape; poisons the
                                      attempt; exposed as stack[].wrong
 ```
-- **Size:** a `State` is a fixed **1352 bytes** (`Stack` 912, `Selection` 56, the `Casts` slice header 24, `Boss` 72; measured with `unsafe.Sizeof`, linux/amd64), so a new snapshot is a plain struct copy. The cast log's backing array is on the heap, **80 bytes per cast**. 10,000 teams' states are about 13.5 MB, plus 0.8 MB for every 1 cast per team on average (20 casts each: about 16.5 MB). Each started team also holds one pending timer (a `time.Timer`, about 100 bytes).
+- **Size:** a `State` is a fixed **1376 bytes** (`Stack` 912, `Selection` 56, the `Casts` and `QRCooldowns` slice headers 24 each, `Boss` 72; measured with `unsafe.Sizeof`, 64-bit), so a new snapshot is a plain struct copy. The cast log's backing array is on the heap, **80 bytes per cast**; the QR cooldowns' **32 bytes per cooling waypoint** (at most the waypoints of the casts of the last 5 minutes). 10,000 teams' states are about 13.5 MB, plus 0.8 MB for every 1 cast per team on average (20 casts each: about 16.5 MB). Each started team also holds one pending timer (a `time.Timer`, about 100 bytes).
 - **Why health is derived, not stored.** Storing it would make every attack a database write: up to one per team per boss interval, all day, with nobody acting, and a write that can fail with no player to report it to. Deriving it from the phase (`PhaseStart`, `PhaseHealth`) and the clock makes an attack a memory-only change that `Load` reproduces exactly: only a defeat and a revive, which a player or admin caused, write.
 - **Why the cast log is a slice and copy-on-write.** Its length isn't bounded, so it can't be a fixed array. Snapshots share the backing array until a cast: `Scan` builds the new log with `append(slices.Clip(cur.Casts), cast)`, which always copies, so a reader holding the old snapshot keeps seeing the old log. A cast costs one copy of the log (80 bytes per earlier cast), and only casts pay it: selections and scans copy the slice header only.
+- **Why QR cooldowns are a field, not computed on every check.** `Scan` checks them on every scan and `view` shows them on every publish; deriving them each time would walk the cast log. They're re-derived only when they change (a cast, an expiry) and at load, and replaced, never modified, so snapshots share them like `Casts`.
 - **`LastCast()` is derived**, not stored: the log's last element. So `last_cast` and the log can never disagree.
 - **The sets are the atlas's types** (`atlas.WaypointSet`, `atlas.PatternSet`, `atlas.ShapeSet`), over the atlas's indexes. How they're laid out and why: [`internal/atlas/README.md`](../atlas/README.md), "How waypoints and patterns are stored".
 - **Why a plain array, not a circular buffer.** Scans only ever leave the stack all at once (a purge builds a new empty stack), so nothing is dropped from the bottom and `At(i)` is just `scans[i]`.
@@ -312,14 +328,15 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 | `team_boss` | `State.Boss` (`Defeated`, `Damage`, `Multiplier`, `PhaseHealth`, `PhaseStart`); no row → boss 1, 0, multiplier 1, full health from the team's `started_at` |
 | `team.started_at` (through `Teams.ByID`) | `PhaseStart` when `phase_started_at` is `NULL` or there's no row |
 | (none: derived from the phase, `game.boss_attack.interval`, the boss's `game.boss_attack.damage` and the clock) | `BossProgress.Attacks`, `Health`: recomputed by `at(now)` at `Load`, so attacks that fell due while the backend was down are applied at once |
-| (none: memory-only) | `entry.stopAttack` (the pending timer): re-armed by `Load` for every started team |
+| (none: derived from `team_cast`, `game.qr_cooldown` and the clock) | `State.QRCooldowns`: every waypoint of a cast with `cast_at` + `game.qr_cooldown` after now, the latest such cast per waypoint; recomputed at `Load`, so cooldowns that ended while the backend was down are gone |
+| (none: memory-only) | `entry.stopTimer` (the pending timer): re-armed by `Load` for every started team |
 | `boss` | Not here: the bosses use case, loaded by `bosses.Load` before this `Load` ([`internal/bosses/README.md`](../bosses/README.md)) |
 | newest **7** (`game.max_pattern_points` + 1) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag, so `poisoned` comes back too) |
 | (none: built from the atlas and `config.toml`) | `Store.game`, rebuilt by `newGame` at every `Load` |
 | (none: memory-only, from teams) | `entry.members`, the roster cache: refilled from `Teams.ByID` on each team's first publish after a restart. teams reloads rosters from `teammember` (an admin's removal deleted the row), and `RosterChanged` drops the cache on every removal, so the cache always matches |
 | (none: memory-only) | `State.Version`: `Load` starts every team at seq 0 in the new process's epoch, which clients treat as newer than anything from the old process, so nothing needs storing |
 
-**Nothing else is held only in memory.** The attack timers are rebuilt by `Load`, and health is a function of what's stored and the clock, so a restart reproduces memory exactly at the same moment, versions aside: `TestRestartRestoresEverything`, `TestCastLog`, `TestCastsDamageBosses` and `TestAttacksAcrossRestart` compare the JSON before and after.
+**Nothing else is held only in memory.** The timers are rebuilt by `Load`, and health and QR cooldowns are functions of what's stored and the clock, so a restart reproduces memory exactly at the same moment, versions aside: `TestRestartRestoresEverything`, `TestCastLog`, `TestCastsDamageBosses` and `TestAttacksAcrossRestart` compare the JSON before and after.
 
 **Casts before migration `0007` aren't logged**, so a team whose only casts predate it reloads with an empty log and `last_cast: null` although its `patterns` are non-empty. Every cast since is logged, in the same order memory appended it (`id` is an identity column, and casts for one team are written under its entry lock), so a restart reproduces the log exactly.
 
@@ -363,7 +380,7 @@ Every team fights the same **6** (`game.bosses`) bosses in serial order. The bos
 **What the client shows** (`/play`): the current boss from `GET /api/game/bosses` by `boss.serial` (image, name, description), an HP bar of `hp − boss.damage` of `hp`, the multiplier when it isn't 1, "Every boss defeated!" when `boss` is `null`; a `boss_defeated` event shows "<name> defeated!" on every phone; the cast log shows each cast's `dealt` and the boss it hit.
 
 ## Boss attacks and health
-Every team has health, **10** (`game.health`) at the start. Its current boss attacks it every **10 min** of the phase (`game.boss_attack.interval`, the same for every boss), for its damage (`[game.boss_attack.damage]` by serial: boss 1 does 1 … boss 6, Gideon, does 6, for now). Both come from `config.toml` through `bosses.Rules`, filled into each `bosses.Boss` (`AttackInterval()`, `AttackDamage`). At full health a team stalled on boss 1 lasts 100 min (10 attacks); on the twins or Gideon, 20 min (2 attacks); health carries over between bosses. This is the game's one change caused by time passing, so the server applies and publishes it with nobody acting (AGENTS.md §9: the server owns time).
+Every team has health, **10** (`game.health`) at the start. Its current boss attacks it every **10 min** of the phase (`game.boss_attack.interval`, the same for every boss), for its damage (`[game.boss_attack.damage]` by serial: boss 1 does 1 … boss 6, Gideon, does 6, for now). Both come from `config.toml` through `bosses.Rules`, filled into each `bosses.Boss` (`AttackInterval()`, `AttackDamage`). At full health a team stalled on boss 1 lasts 100 min (10 attacks); on the twins or Gideon, 20 min (2 attacks); health carries over between bosses. It's one of the game's two changes caused by time passing (the other is a [QR cooldown](#qr-cooldown) ending), so the server applies and publishes it with nobody acting (AGENTS.md §9: the server owns time).
 
 **Health is derived, never stored per attack.** The phase is what's stored (`team_boss.phase_started_at`, `phase_health`), and at any time `now`:
 
@@ -385,7 +402,7 @@ So an attack writes nothing: it's a memory-only change that `Load` reproduces ex
 | Every boss defeated | none: nothing attacks | the defeating cast |
 
 **How an attack is applied.**
-1. **The timer.** `schedule` arms `Clock.AfterFunc` for `nextAttack` = `PhaseStart + (attacks + 1) × interval`. When it fires, `attack` locks the entry, calls `catchUp` and re-arms.
+1. **The timer.** `schedule` arms `Clock.AfterFunc` for `nextAttack` = `PhaseStart + (attacks + 1) × interval` (or a QR cooldown's end, if sooner). When it fires, `due` locks the entry, calls `catchUp` and re-arms.
 2. **`catchUp`** computes `at(now)`; if anything fell due it bumps the version, applies, and publishes `boss_attacked`, or `knocked_out` if health hit 0. No persist.
 3. **Every write catches up first.** `Select`, `ClearSelection`, `Scan` and `Revive` call `catchUp` right after taking the lock. So a timer that's late (a busy process, or the lock held by a write) never loses an attack: the write applies it first, with its own event, and then validates against the real health. A cast that defeats a boss is dealt after the attacks due before it.
 4. **Several due attacks are one change.** A late timer, or a restart after downtime, applies every attack due as one `boss_attacked` (or `knocked_out`) event, with `boss.attacks` up by that many.
@@ -397,6 +414,37 @@ So an attack writes nothing: it's a memory-only change that `Load` reproduces ex
 **Config changes apply retroactively.** Health is recomputed from the phase start, so `game.boss_attack.interval` or a boss's damage changed in `config.toml` between restarts changes every current phase against it (see [Not decided yet](#not-decided-yet)).
 
 **What the client shows** (`/play`): a health bar of `health` of `Game.health`; the current boss's interval and damage, and a countdown to `boss.next_attack_at` on the server's clock (`hello`, `ServerClock`); when `knocked_out`, a red banner and the type buttons and scan form disabled; on `boss_attacked`, `knocked_out` and `revived`, a message on every phone. The client only displays: the server applies attacks.
+
+## QR cooldown
+For **5 min** (`game.qr_cooldown`) after a cast, the waypoints of its pattern are disabled for the team that cast it. Nobody on the team can scan them; other waypoints stay open, and other teams aren't affected. So a team can't stand at the same four QR codes and cast over and over: it has to move.
+
+**The rule.**
+- A cast at *T* puts each waypoint of its pattern on cooldown until *T* + `game.qr_cooldown`. A waypoint in several recent casts takes its latest cast's (possible only if `game.qr_cooldown` was raised between restarts: while it's enforced, a cooling waypoint can't be in a new cast).
+- A waypoint is cooling while `now < until`. At exactly `until` it opens again.
+- `Scan` refuses a cooling waypoint with `409 waypoint_on_cooldown`: nothing written, pushed or published, so the attempt isn't spoiled. The check comes after `waypoint_already_scanned` and before the wrong-scan check.
+- **Not affected:** selecting (a team may select a shape whose patterns all need cooling waypoints: it just can't scan those yet, and there's no time limit); wrong scans, clears and failed casts (only a completed cast starts a cooldown); revives and boss defeats (neither clears it).
+- `game.qr_cooldown = 0` turns it off: `qr_cooldowns` is always `[]`.
+
+**Derived, never stored.** The cast log already holds each cast's time and pattern, so `qrCooldowns(Casts, now)` rebuilds the list: newest cast first, each of its waypoints not seen yet, until the first cast whose cooldown has ended. `Load` and `reconcile` (`stateOf`) call it, so a restart reproduces it exactly and drops what ended while down; `Scan` calls it on a cast.
+
+**Expiry is published by the server.** It's a change caused by time passing (AGENTS.md §9), handled exactly like an attack:
+1. **One timer per team** for every time-driven change: `schedule` arms it for the earliest of the next attack and the soonest `until`.
+2. **`catchUp`** finds the soonest `until` ≤ now, re-derives the list, bumps the version, applies and publishes `qr_cooldown_ended`. No persist. If an attack fell due at the same moment, the one event is `boss_attacked` (or `knocked_out`), carrying both changes.
+3. **Every write catches up first**, so a late timer never keeps a waypoint closed: a scan at `until` first applies the expiry (`qr_cooldown_ended`), then is accepted.
+
+| Time | What happens | `qr_cooldowns` after | Event |
+|---|---|---|---|
+| 12:00:12 | A's scan casts the square `1001 1002 1007 1008` | 1001, 1002, 1007, 1008, each until 12:05:12; timer armed for 12:05:12 (sooner than the 12:10:00 attack) | `spell_cast` (or `boss_defeated`) |
+| 12:01:00 | F selects `triangle` | unchanged | `shape_selected` |
+| 12:01:10 | B scans `1001` | unchanged | `409 waypoint_on_cooldown`, none |
+| 12:01:20 | B scans `1003` | unchanged | `scan_added` |
+| 12:05:11.999999 | (nothing due) | unchanged | none |
+| 12:05:12 | the timer: `catchUp` finds the cooldowns ended | `[]`; timer armed for the 12:10:00 attack | `qr_cooldown_ended` |
+| 12:05:30 | B scans `1001`, C scans `1002`: the triangle casts | 1001, 1002, 1003, each until 12:10:30 | `scan_added`, `spell_cast` |
+
+**A restart** at 12:03:00 reloads the square's cast from `team_cast` and rebuilds the same four entries; one at 12:06:00 finds them ended and loads `[]`.
+
+**What the client shows** (`/play`, not built yet): each cooling waypoint with a countdown to its `until` on the server's clock (`hello`), and scanning it disabled; on `qr_cooldown_ended` (or any state without it), enabled again. The countdown only displays: the waypoint opens when the server's event arrives.
 
 ## Walkthroughs
 Team `482913`, members A–F, **F the leader** (only F selects and clears), 2025 seed (square = `1001 1002 1007 1008` = indexes 0, 1, 6, 7, bitmask 195; `square` = shape 2), config.toml as shipped. Times are `mm:ss` after 12:00. Stacks are written bottom → top as `waypoint/member@time`; a wrong scan is marked ✗.
@@ -441,7 +489,7 @@ F selects `square`. D scans `1001`, `1002`, `1007`, `1008` in turn: `scan_added`
 | Time | Request | `last_cast` after | `GET /api/teams/me/casts` | `patterns` | `team_cast` rows | `team_pattern` rows |
 |---|---|---|---|---|---|---|
 | (start) | | `null` | `[]` | `[]` | 0 | 0 |
-| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":205,"dealt":205,"boss":1,"defeated_boss":true}` (205 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
+| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","class":"class_4","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":205,"dealt":205,"boss":1,"defeated_boss":true}` (205 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
 | 01:00 | F selects `triangle` | **unchanged** (a selection doesn't clear it) | unchanged | unchanged | 1 | 1 |
 | 02:00 | F selects `square` again | unchanged | unchanged | unchanged | 1 | 1 |
 | 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true,"dealt":205,"boss":2,"defeated_boss":true}` (205 ≥ boss 2's 100 HP) | `[02:04 cast (already_completed: true), 00:12 cast]` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
@@ -485,11 +533,11 @@ Every write in `write.go` (`Select`, `ClearSelection`, `Scan`, `Revive`) runs th
 1. **lock** the team's entry (`lockTeam`)
 2. **validate**:
    - first the atlas lookup (shape or waypoint ID) and the team, **before** the lock (an `IN_GAME` team's status never goes back). This is AGENTS.md §6 variation (a); the code labels it `2. validate, before 1. lock`
-   - then, under the lock, membership again (`isMember`: an admin may have removed the caller since the lookup), then `catchUp` (any due boss attack, its own change), then the `State` (`2. validate (state)`: knocked out first for `Select` and `Scan`)
+   - then, under the lock, membership again (`isMember`: an admin may have removed the caller since the lookup), then `catchUp` (any due boss attack or QR cooldown end, its own change), then the `State` (`2. validate (state)`: knocked out first for `Select` and `Scan`)
 3. **build** the next `State` (a copy; the cast log copy-on-write)
 4. **persist**: one `db.go` call (`insertScan`, `insertCompletingScan`, `upsertSelection`, `deleteSelection` or `upsertBossPhase`), detached from the request and capped at **5 s** (`storage.write_timeout`)
 5. **apply**: `entry.cur.Store(&next)`
-6. **publish** `team_state` to every member, still holding the lock so a team's events are in order; a cast or revive then re-arms the attack timer (`schedule`)
+6. **publish** `team_state` to every member, still holding the lock so a team's events are in order; a cast or revive then re-arms the team's timer (`schedule`)
 
 | Write | `db.go` call (step 4) |
 |---|---|
@@ -498,12 +546,12 @@ Every write in `write.go` (`Select`, `ClearSelection`, `Scan`, `Revive`) runs th
 | `Scan`, no completion (wrong included) | `insertScan` |
 | `Scan` that casts | `insertCompletingScan` (`team_scan`, `team_pattern`, `team_cast`, upsert `team_boss`, delete `team_selection`, one transaction) |
 | `Revive` (admin) | `upsertBossPhase` |
-| `catchUp` (the attack timer, and the start of every write) | none: **memory-only** (AGENTS.md §6). Health is derived from the stored phase, so `Load` reproduces the change. Steps 3, 5 and 6 |
+| `catchUp` (the team's timer, and the start of every write) | none: **memory-only** (AGENTS.md §6). Health is derived from the stored phase and QR cooldowns from the cast log, so `Load` reproduces the change. Steps 3, 5 and 6 |
 | `PublishTeam` (start hook) | none: not a write. Only steps 2, 1 and 6; the state is published as it is, then the timer is armed |
 
 **On a failed persist:** `reconcile` reloads the team from Postgres (Postgres wins), publishes the result, and returns the error, which becomes a `500`. Nothing from the failed write is applied.
 
-**Rejections and no-ops return before step 4:** every `409` (`selection_poisoned` and `knocked_out` included) and clearing when there's nothing to clear. A rejection after a `catchUp` that applied an attack still leaves that attack applied and published: it's its own change. Nothing is written and nothing is published. A **wrong scan is not a rejection**: it's written and published. Reselecting is **not** a no-op: it always purges, writes and publishes.
+**Rejections and no-ops return before step 4:** every `409` (`selection_poisoned`, `knocked_out` and `waypoint_on_cooldown` included) and clearing when there's nothing to clear. A rejection after a `catchUp` that applied an attack or an expiry still leaves it applied and published: it's its own change. Nothing is written and nothing is published. A **wrong scan is not a rejection**: it's written and published. Reselecting is **not** a no-op: it always purges, writes and publishes.
 
 ## API
 All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1 MiB** (`server.max_body_bytes`) get `400 invalid_body`.
@@ -526,7 +574,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "patterns": [["1003", "1004", "1005", "1006"]],
   "shapes": ["square"],
   "selection": {"shape": "square", "selected_by": "6f1c…", "selected_at": "2026-10-17T12:00:00Z"},
-  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 198, "dealt": 198, "boss": 3, "defeated_boss": false},
+  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "class": "class_4", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 198, "dealt": 198, "boss": 3, "defeated_boss": false},
   "stack": [
     {"waypoint_id": "1001", "user_id": "9a2b…", "scanned_at": "2026-10-17T12:00:01Z", "wrong": false},
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:02Z", "wrong": false},
@@ -540,25 +588,29 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "knocked_out": false,
   "unlocked_points": 4,
   "locked_shapes": [],
+  "cooldown_class": "class_4",
+  "cooldown_shapes": ["lightning", "square", "tree"],
+  "qr_cooldowns": [],
   "cast_count": 1,
   "version": {"epoch": 1760702400000, "seq": 4}
 }
 ```
 - `selection` is `null` when nothing is selected.
-- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow), and `damage` is what the cast spell deals (`pattern.damage`). It stays until the next cast: selecting or clearing doesn't remove it.
+- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `class` its spell class ID (`class_4` for a 4-point pattern: the class of its waypoint count), `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow), and `damage` is what the cast spell deals (`pattern.damage`). It stays until the next cast: selecting or clearing doesn't remove it.
 - `stack` is the attempt's scans, bottom (oldest) first; `[]` when empty. `wrong` is true for the scan that didn't fit (at most one, always the top).
 - `poisoned` is true while the stack holds a wrong scan: scans are refused with `selection_poisoned` until a reselect.
 - `last_cast.dealt` is what the cast dealt to a boss (`damage` × the multiplier then, rounded; 0 if none), `boss` the serial it hit (`null` if none), `defeated_boss` whether it finished it.
 - `bosses_defeated` is how many bosses the team has defeated. `boss` is the one it's fighting: its `serial` (name, HP and asset are in `GET /api/game/bosses`) and the `damage` dealt to it so far, always below its HP; `null` once every boss is defeated (or none are loaded). `damage_multiplier` is what each cast's damage is multiplied by, 1 by default.
 - `boss.phase_started_at` is when the team began fighting it (or was last revived); `boss.attacks` how many times it has attacked since; `boss.next_attack_at` when it attacks next, or `null` if the team is knocked out. Clients count down to it on the server's clock (`hello`).
 - `health` is the team's health (**10**, `game.health`, at the start, less every attack); `knocked_out` is true at 0.
+- `qr_cooldowns` are the waypoints the team can't scan now (`409 waypoint_on_cooldown`): `{"waypoint_id": "1001", "until": "2026-10-17T12:05:12Z"}` for each waypoint of a cast less than **5 min** (`game.qr_cooldown`) ago, sorted by `until`, then ID; `[]` when none (above: the last cast was at 11:58:40, so its cooldown ended at 12:03:40). An entry leaves at its `until`, with a `qr_cooldown_ended` event.
 - `unlocked_points` is the most waypoints a pattern the team can cast may have: **4** (`game.locked_pattern_points` − 1) until it has defeated **5** (`game.unlock_after_bosses`) bosses, then **6** (`game.max_pattern_points`). `locked_shapes` are the shapes it can't select yet (every pattern bigger), in index order; `[]` with the 2025 seed, whose patterns are all 3- or 4-point.
 
 **Cast log** (`GET /api/teams/me/casts`), after walkthrough 6:
 ```json
 [
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 205, "dealt": 205, "boss": 2, "defeated_boss": true},
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 205, "dealt": 205, "boss": 1, "defeated_boss": true}
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "class": "class_4", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 205, "dealt": 205, "boss": 2, "defeated_boss": true},
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "class": "class_4", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 205, "dealt": 205, "boss": 1, "defeated_boss": true}
 ]
 ```
 - Newest first; `[]` before the first cast, or for a team in the lobby.
@@ -568,16 +620,17 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 ```json
 {
   "shapes": [
-    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 66, "max": 83}, "patterns_by_points": {"3": 9}},
-    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 196, "max": 282}, "patterns_by_points": {"4": 77}},
-    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 199, "max": 214}, "patterns_by_points": {"4": 18}},
-    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 196, "max": 288}, "patterns_by_points": {"4": 99}},
-    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 64, "max": 85}, "patterns_by_points": {"3": 156}}
+    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 66, "max": 83}, "patterns_by_points": {"3": 9}, "classes": ["class_3"]},
+    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 196, "max": 282}, "patterns_by_points": {"4": 77}, "classes": ["class_4"]},
+    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 199, "max": 214}, "patterns_by_points": {"4": 18}, "classes": ["class_4"]},
+    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 196, "max": 288}, "patterns_by_points": {"4": 99}, "classes": ["class_4"]},
+    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 64, "max": 85}, "patterns_by_points": {"3": 156}, "classes": ["class_3"]}
   ],
   "health": 10,
   "locked_pattern_points": 5,
   "unlock_after_bosses": 5,
-  "max_pattern_points": 6
+  "max_pattern_points": 6,
+  "spell_classes": [{"id": "class_1", "name": "Class 1", "points": 1}, {"id": "class_2", "name": "Class 2", "points": 2}, …, {"id": "class_15", "name": "Class 15", "points": 15}]
 }
 ```
 - `shapes`: every selectable shape (the client's "types"), in index order (by ID). `id` is what `PUT …/selection` takes; `name` is for display; `patterns` is how many valid patterns the shape has; `points` is the distinct sizes of those patterns, ascending (a shape mixing 3- and 4-point patterns shows `[3, 4]`); `damage` is the minimum and maximum damage across the shape's patterns; `patterns_by_points` counts its patterns by size (JSON keys are the sizes): a team can cast those of at most its `team_state.unlocked_points`.
@@ -608,10 +661,12 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | `ErrUnknownShape` | 404 | `unknown_shape` |
 | `ErrNoShapeSelected` | 409 | `no_shape_selected` |
 | `ErrWaypointAlreadyScanned` | 409 | `waypoint_already_scanned` |
+| `ErrWaypointOnCooldown` (`Scan`) | 409 | `waypoint_on_cooldown` |
 | `ErrSelectionPoisoned` | 409 | `selection_poisoned` |
 | `ErrKnockedOut` | 409 | `knocked_out` |
 | `ErrNotLeader` (`Select`, `ClearSelection`) | 403 | `not_leader` |
 | `ErrShapeLocked` (`Select`) | 409 | `shape_locked` |
+| `ErrShapeOnCooldown` (`Select`) | 409 | `shape_on_cooldown` |
 | `ErrTeamNotFound` (`Revive`) | 404 | `team_not_found` |
 | `ErrInvalidQR` | 400 | `invalid_qr` |
 | `ErrExpiredQR` | 409 | `qr_expired` |
@@ -633,12 +688,13 @@ The revive route also answers `401` (`missing_token`, `invalid_token`, `user_not
 | `Scan`, outcome `pattern_completed`, and the cast defeated the boss (`bosses_defeated` + 1, `boss` the next or `null`) | `boss_defeated` | members |
 | a boss attack falls due (`catchUp`, from the timer or the start of a write), with **nobody acting** | `boss_attacked` | members |
 | ... and it brought health to 0 | `knocked_out` | members |
+| a QR cooldown ends (`catchUp`, from the timer or the start of a write), with **nobody acting**, and no attack fell due at the same moment | `qr_cooldown_ended` | members |
 | an admin's `Revive` | `revived` | members |
 | `reconcile` | `resync` | members |
 
 Never after a rejection or no-op. Every change bumps `version.seq` by one; `snapshot` and `game_started` repeat the current version. The responses (`GET` state, both selection routes, `ScanResult.state`) carry the same `version`, so a client keeps whichever copy is newest.
 
-The only events published with nobody acting are boss attacks (`boss_attacked`, `knocked_out`), from the attack timer. Every trigger, the ordering guarantees and the wire format: [`internal/server/README.md`, "The event stream"](../server/README.md#the-event-stream).
+The only events published with nobody acting are boss attacks (`boss_attacked`, `knocked_out`) and QR cooldowns ending (`qr_cooldown_ended`), from the team's timer. Every trigger, the ordering guarantees and the wire format: [`internal/server/README.md`, "The event stream"](../server/README.md#the-event-stream).
 
 ## Rules and cases
 
@@ -671,6 +727,8 @@ Checked in this order:
 | Caller isn't the team's leader (read now, under the lock) | `403 not_leader`: nothing written, no event |
 | Team knocked out | `409 knocked_out`: nothing written, no event |
 | Every pattern of the shape has more waypoints than the team's `unlocked_points` (before `game.unlock_after_bosses` defeats: 5+ points) | `409 shape_locked`: nothing written, no event |
+| Every unlocked pattern of the shape is of the team's cooldown class (its last cast's; with the 2025 seed, every square, tree and lightning after a 4-point cast) | `409 shape_on_cooldown`: nothing written, no event |
+| A shape mixing the cooldown class and another | Allowed: only its patterns of other classes can be cast (see Scan) |
 | A shape mixing locked and unlocked sizes | Allowed: only its unlocked patterns can be cast (see Scan) |
 | Same shape already selected | `200`: **stack purged** (a wrong scan included: `poisoned: false`), selection re-stamped with the caller and now; written; event |
 | A different shape, or nothing selected | `200`: selection set; stack purged; written; event |
@@ -698,14 +756,18 @@ Checked in this order. Every rejection changes nothing, isn't logged and sends n
 | Waypoint unknown (the token names a waypoint the atlas doesn't have) | `404 unknown_waypoint` |
 | Caller not in a team | `404 not_in_team` |
 | Team not `IN_GAME` | `409 not_in_game` |
-| (any boss attack that fell due is applied first: `boss_attacked` / `knocked_out`) | |
+| (any boss attack or QR cooldown end that fell due is applied first: `boss_attacked` / `knocked_out` / `qr_cooldown_ended`) | |
 | Team knocked out | `409 knocked_out` |
 | No shape selected (including right after a completion) | `409 no_shape_selected` |
 | The stack holds a wrong scan (poisoned), whatever the waypoint, whoever scans | `409 selection_poisoned` |
 | Waypoint already in the stack, by anyone (a retry included) | `409 waypoint_already_scanned` |
+| Waypoint in a cast of the team's less than **5 min** ago (`game.qr_cooldown`), by any member | `409 waypoint_on_cooldown`: nothing pushed, logged or published; the attempt is untouched |
+| ... 1 µs before its `until` | `409 waypoint_on_cooldown` |
+| ... exactly at its `until` | Allowed (the expiry is applied first: `qr_cooldown_ended`) |
+| A waypoint another team cast | Allowed: each team has its own cooldowns |
 | Caller already has scans in the stack | Allowed: any member may scan any number of waypoints |
 | Any time since the selection or the last scan, however long | Allowed: there's no time limit |
-| The waypoint, with the stack, isn't part of any pattern of the selected shape **of at most `unlocked_points` waypoints** (a set only a locked pattern contains is wrong) | `200 wrong_scan`: pushed with `wrong: true`, `poisoned: true`; logged with `wrong = true`; event |
+| The waypoint, with the stack, isn't part of any pattern of the selected shape **of at most `unlocked_points` waypoints and not of the cooldown class** (a set only a locked or cooled-down pattern contains is wrong) | `200 wrong_scan`: pushed with `wrong: true`, `poisoned: true`; logged with `wrong = true`; event |
 | Stack plus this scan is exactly a pattern of the **selected** shape | `200 pattern_completed`: pattern and shape marked; **stack and selection purged**; cast appended to the log and `last_cast` (`already_completed: false`); `team_cast` +1; the damage × multiplier dealt to the current boss, `team_boss` upserted; event `spell_cast` |
 | ... and the damage brings the boss to its HP | The boss is defeated: `bosses_defeated` + 1, `boss` the next one at 0 damage (or `null` after the last); the excess is lost; `defeated_boss: true`; the next boss's phase starts now with the current health (`team_boss.phase_*`), timer re-armed; event `boss_defeated` |
 | ... and every boss is already defeated (or none are loaded) | Cast as usual with `dealt: 0`, `boss: null`; progress unchanged; event `spell_cast` |
@@ -715,9 +777,11 @@ Checked in this order. Every rejection changes nothing, isn't logged and sends n
 | 1-point pattern | Completes on its only scan |
 | 6-point pattern, after the unlock | Completes on the sixth scan (the stack never needs its seventh slot for correct scans) |
 | 5- or 6-point pattern before the unlock | Can't complete: the scan that would leave the 4-point patterns is wrong |
+| A pattern of the cooldown class (the last cast's) | Can't complete: the scan that leaves every pattern of other classes is wrong. After a cast of another class it can again |
+| A cast | Its pattern's class becomes the cooldown (`cooldown_class`), and its waypoints go in `qr_cooldowns` until now + `game.qr_cooldown`, in the same event |
 | A non-leader scanning | Allowed: every member scans |
 | Any accepted scan (wrong included) | Logged in `team_scan` (with `wrong`); waypoint added to visited `waypoints` |
-| Postgres write fails | `500`; state reloaded from Postgres; nothing applied |
+| Postgres write fails | `500`; state reloaded from Postgres; nothing applied (a failed cast starts no QR cooldown) |
 
 ### Start: `PublishTeam`, no request (teams' `Rules.OnStart`)
 Checked in this order:
@@ -751,12 +815,12 @@ Checked in this order:
 | Case | Result |
 |---|---|
 | Caller not in a team | `404 not_in_team` |
-| Team in the lobby or with no activity | `200`, empty lists, `selection` and `last_cast` null, `poisoned: false`, `bosses_defeated: 0`, `boss: {serial: 1, damage: 0, …}` (or `null` with no bosses loaded), `damage_multiplier: 1`, `health: 10` less any attacks since the start, `knocked_out: false`, `unlocked_points: 4`, `locked_shapes` (`[]` with the 2025 seed) |
+| Team in the lobby or with no activity | `200`, empty lists, `selection` and `last_cast` null, `poisoned: false`, `bosses_defeated: 0`, `boss: {serial: 1, damage: 0, …}` (or `null` with no bosses loaded), `damage_multiplier: 1`, `health: 10` less any attacks since the start, `knocked_out: false`, `unlocked_points: 4`, `locked_shapes` (`[]` with the 2025 seed), `qr_cooldowns: []` |
 | Knocked out | `200`, `health: 0`, `knocked_out: true`, `boss.next_attack_at: null` |
 | Reads never catch up | Health is as of the last `catchUp`; the timer keeps it current, so a read can only lag a due attack by the timer's delay |
 | Poisoned attempt | `200`, the stack with its wrong scan marked, `poisoned: true` |
 
-### Boss attacks: the timer, and `catchUp`
+### Time-driven changes: the timer, and `catchUp`
 | Case | Result |
 |---|---|
 | Before the first interval of the phase | No attack; `next_attack_at` = phase start + interval |
@@ -771,6 +835,10 @@ Checked in this order:
 | No bosses loaded | Nothing attacks |
 | A timer fires early (nothing due) | No change, no event; re-armed |
 | The store is closed (`Close`) | A running timer does nothing; nothing re-arms |
+| A QR cooldown ends (its `until` reached) | Dropped from `qr_cooldowns`, `qr_cooldown_ended`; nothing written. Several ending at once are one change |
+| A QR cooldown ends at the same moment as an attack | One change, one event: `boss_attacked` (or `knocked_out`) |
+| Knocked out, with QR cooldowns | No attacks, but the timer still runs for the cooldowns: `qr_cooldown_ended` |
+| `game.qr_cooldown` 0 | No QR cooldowns; the timer follows attacks only |
 
 ### Revive: `POST /api/admin/teams/{team_id}/revive`
 Checked in this order:
@@ -781,9 +849,9 @@ Checked in this order:
 | Caller isn't `ADMIN` in Postgres (whatever the token says) | `403 not_admin` |
 | No team with that ID (any malformed ID too) | `404 team_not_found` |
 | Team not `IN_GAME` | `409 not_in_game` |
-| (any boss attack that fell due is applied first) | |
+| (any boss attack or QR cooldown end that fell due is applied first) | |
 | Knocked out | `200`: health **10** (`game.health`), a new phase of the current boss from now, `attacks: 0`, timer re-armed; `team_boss` upserted; event `revived` |
-| Not knocked out | The same: it also heals, and restarts the boss's clock |
+| Not knocked out | The same: it also heals, and restarts the boss's clock. QR cooldowns are kept |
 | Every boss defeated | Health restored; nothing attacks |
 | Postgres write fails | `500`; state reloaded; nothing applied |
 
@@ -806,9 +874,10 @@ Checked in this order:
 - **The unlock versus a select or scan.** `unlocked_points` is derived from `State.Boss.Defeated` in the same snapshot the write validates against, under the entry lock: a scan racing the cast that defeats boss 5 runs either before it (the old limit) or after it (the new one), never half.
 
   So no write by a removed player is accepted once the removal is visible, and none is half-applied. Their earlier scans stay in the stack and still count toward a pattern (`TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`). After `RosterChanged`, publishes go to the remaining members only. Lock order is the same as the start hook's: teams entry → teamstate entry.
-- **The attack timer versus writes.** The timer's callback (`attack`) takes `entry.mu` like a write, so an attack and a write never interleave. Whichever takes the lock first applies due attacks (`catchUp`); the other finds nothing more due. So every attack is applied exactly once, before any write that comes after its time, and its `boss_attacked` precedes that write's event. A timer delayed behind a held lock costs nothing: the write catches up.
+- **The team's timer versus writes.** The timer's callback (`due`) takes `entry.mu` like a write, so an attack or expiry and a write never interleave. Whichever takes the lock first applies what's due (`catchUp`); the other finds nothing more due. So every attack and every QR cooldown end is applied exactly once, before any write that comes after its time, and its event precedes that write's. A timer delayed behind a held lock costs nothing: the write catches up.
 - **A cast versus a due attack.** If an attack fell due before a cast but hadn't been applied, the cast's `catchUp` applies it first, so the cast's `deal` sees the real health and a defeat starts the next phase with it.
-- **Timers and restarts.** Timers live in memory only. `Close` stops them (on shutdown, and in tests before a second store loads); `Load` re-arms every started team. Because attacks write nothing, even a stray timer of an old store could only change that store's memory, never Postgres.
+- **Two members scan a cooling waypoint, or one scans it as the cooldown ends.** The check runs under `entry.mu` against the snapshot after `catchUp`, so a scan at or after `until` always sees it ended, and one before always sees it cooling.
+- **Timers and restarts.** Timers live in memory only. `Close` stops them (on shutdown, and in tests before a second store loads); `Load` re-arms every started team. Because attacks and expiries write nothing, even a stray timer of an old store could only change that store's memory, never Postgres.
 - **The memory checks are the only enforcement** of the stack rules (one scan per waypoint per attempt, nothing after a wrong scan): they depend on the selection's `after_scan_id` window, which a unique constraint can't express. They all run under `entry.mu`, and Postgres has one writer (the instance lock in `platform/postgres`).
 
 ## Failure and recovery
@@ -817,8 +886,9 @@ Checked in this order:
 | Postgres times out or drops during a write | `500`. `reconcile` re-reads the team (the write may or may not have committed) and memory matches Postgres |
 | Memory and Postgres disagree (rows edited by hand) | The next write that notices (e.g. `deleteSelection` finding no row) fails, reconciles, and members get the corrected state |
 | Postgres unreachable | Reads keep working from memory (the cast log included); writes fail |
-| Backend restarts | Progress, selections, stacks (with their `wrong` flags, so `poisoned` too), the cast log and `last_cast`, the boss progress, multiplier and phase reload exactly. Health is recomputed from the phase and the clock: **attacks that fell due while the backend was down are applied at load**, as if it had stayed up (a team can come back knocked out). Timers are re-armed |
+| Backend restarts | Progress, selections, stacks (with their `wrong` flags, so `poisoned` too), the cast log and `last_cast`, the boss progress, multiplier and phase reload exactly. Health is recomputed from the phase and the clock: **attacks that fell due while the backend was down are applied at load**, as if it had stayed up (a team can come back knocked out). QR cooldowns are rebuilt from the cast log, without those that ended while down. Timers are re-armed |
 | `game.boss_attack.interval` or a boss's damage changed in `config.toml` between restarts | Applies retroactively to every current phase against that boss: health jumps to what the new values give from the phase start |
+| `game.qr_cooldown` changed between restarts | Applies retroactively: every recent cast's waypoints cool until its `cast_at` + the new value (raising it can bring back ones that had ended; 0 clears them all) |
 | `game.health` changed between restarts | A stored `phase_health` keeps its value; a `NULL` one (a team still in its first phase, never revived) uses the new value, from the team's start |
 | `config.toml` changes between restarts | A larger `game.max_pattern_points` loads the same stacks. A smaller one refuses content with bigger patterns (`atlas.Load`); a stored stack longer than the new capacity loads only its newest scans. Don't change it mid-game |
 | `game.bosses` or boss HP changed between restarts | See [`internal/bosses/README.md`](../bosses/README.md), "Failure and recovery". A team that had defeated more bosses than the new count refuses the start |
@@ -835,7 +905,8 @@ Checked in this order:
 | Starting health **10** | `config.toml` `game.health` (at least 1) | Edit and restart |
 | Attack interval **10 min** | `config.toml` `game.boss_attack.interval` (positive; whole seconds, checked by `bosses.New`) | Edit, restart; applies retroactively (above) |
 | Attack damage, by boss (**= serial**, 1…6) | `config.toml` `[game.boss_attack.damage]` (exactly serials 1…`game.bosses`, each ≥ 0) | Edit, restart; applies retroactively |
-| One pending timer per started team | `time.AfterFunc` | ~100 bytes and no goroutine while waiting; 1,666 teams at 10,000 players is negligible |
+| QR cooldown **5 min** | `config.toml` `game.qr_cooldown` (≥ 0; 0 turns it off) | Edit, restart; applies retroactively (above) |
+| One pending timer per started team (attacks and QR cooldowns share it) | `time.AfterFunc` | ~100 bytes and no goroutine while waiting; 1,666 teams at 10,000 players is negligible |
 | 64 waypoints, 64 shapes, 2048 patterns | the atlas's set types (`atlas.MaxWaypoints`, `atlas.MaxShapes`, `atlas.MaxPatterns`) | See [`internal/atlas/README.md`](../atlas/README.md), "Limits and how to change them". `State` holds one of each set, so a wider set makes every snapshot bigger |
 
 ## Not decided yet
@@ -847,6 +918,9 @@ Checked in this order:
 - **Boss content changes mid-event apply retroactively.** Health is derived from the phase start with the boss's *current* interval and damage; storing them in the phase would freeze them.
 - **What being knocked out costs.** Only the wait for an admin: progress, patterns and the cast log are kept, and a revive restores full health (and restarts the current boss's clock). No automatic revive, no penalty.
 - **Clients see attacks no earlier than the server applies them.** `next_attack_at` is a countdown; the attack itself arrives as `boss_attacked` (at most the timer's delay later).
+- **Content with one castable class would trap a team.** The cooldown assumes a team always has another class to cast: true with the 2025 seed (3- and 4-point patterns), and once big patterns unlock. Content whose only unlocked patterns are of a single class would leave a team, after its first cast, with nothing it can cast. Nothing checks for that at startup.
+- **No admin reset of the cooldown.** It changes only by casting; a revive doesn't touch it. The same goes for QR cooldowns: only time ends them.
+- **Small maps and the QR cooldown.** With the 2025 seed's 11 waypoints, a team casting 3- and 4-point patterns can cool most of the map within a few casts, and the big patterns need 5–6 specific waypoints free at once. The game-loop simulation uses a 2-minute cooldown for this reason; the real map's size decides whether 5 minutes is right.
 
 ## Tests
 - The content lookups teamstate relies on (`PatternFor`, `FitsShape`, `SetOf`, validation, the seed loading, `BenchmarkLookups`) are tested in the atlas: [`internal/atlas/README.md`](../atlas/README.md), "Tests".
@@ -856,7 +930,7 @@ Checked in this order:
   |---|---|
   | `TestStack` | `NewStack(3)` has `Cap` 4 (a pattern's points plus one wrong scan); bottom-to-top order; a wrong scan on top keeps its flag; `Push` leaves the original alone; a push onto a full stack panics |
 
-- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load` and `bosses.Load`, config.toml's rules including `game.health`, a fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` records a timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, earliest first (never from inside `AfterFunc`, since the store calls it holding the team's lock); `pending()` counts live timers. Every helper (`scanAt`, `selectAt`) sets the clock first, so stored times are predictable. Times are written with `tick` (seconds). The fixture pins the team's `started_at` to `start` (and reloads teams), so boss 1's attacks fall at exactly `start` + k × interval. **Bosses don't attack unless a test asks** (`fixtureOptions.attacks`): otherwise `bossRules(set, attacks)` builds the fixture's `bosses.Rules` from `config.toml` (`game.bosses`, `[game.boss_attack]`) with the interval set to `neverAttack` (10 years), so tests that move the clock by minutes see no attacks. `fixtureOptions.bossRules` adjusts those rules for one test (an interval or a boss's damage). The tests use up to 6 members (`minTestTeam`), and the seed's 6 bosses (`seedBosses`); with a smaller `teams.size`, or another `game.bosses`, in `config.toml` they **skip** rather than fail:
+- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load` and `bosses.Load`, config.toml's rules including `game.health`, a fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` records a timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, earliest first (never from inside `AfterFunc`, since the store calls it holding the team's lock); `pending()` counts live timers. Every helper (`scanAt`, `selectAt`) sets the clock first, so stored times are predictable. Times are written with `tick` (seconds). The fixture pins the team's `started_at` to `start` (and reloads teams), so boss 1's attacks fall at exactly `start` + k × interval. **Bosses don't attack unless a test asks** (`fixtureOptions.attacks`): otherwise `bossRules(set, attacks)` builds the fixture's `bosses.Rules` from `config.toml` (`game.bosses`, `[game.boss_attack]`) with the interval set to `neverAttack` (10 years), so tests that move the clock by minutes see no attacks. `fixtureOptions.bossRules` adjusts those rules for one test (an interval or a boss's damage). **The QR cooldown is off unless a test asks** (`fixtureOptions.qrCooldown` keeps `game.qr_cooldown`), since most tests cast the square and the triangle (sharing 1001 and 1002) seconds apart. The tests use up to 6 members (`minTestTeam`), and the seed's 6 bosses (`seedBosses`); with a smaller `teams.size`, or another `game.bosses`, in `config.toml` they **skip** rather than fail:
 
   | Test | Covers |
   |---|---|
@@ -870,31 +944,48 @@ Checked in this order:
   | `TestConcurrentRescansAddOneScan` | 8 simultaneous copies → one pushed, seven `waypoint_already_scanned` |
   | `TestWrongScanIsReported` | a waypoint in no square: `wrong_scan`, marked wrong in the stack, `poisoned`, logged; later scans by the scanner and a teammate get `selection_poisoned` |
   | `TestWrongScanPoisonsSelection` | walkthrough 2: a poisoned attempt refuses the rest of the square; a reselect clears it and the square then completes |
-  | `TestCompletionPurges` | stack and selection purged; rescans need a new selection |
+  | `TestCompletionPurges` | stack and selection purged; rescans need a new selection (the triangle: the square is on cooldown after its cast) |
   | `TestOutOfOrderScanning` | a square completes when scanned in reverse order (a pattern is an unordered set) |
   | `TestSinglePointPattern` | a 1-point pattern |
   | `TestSixPointPatternAtCapacity` | a 6-point pattern (`game.max_pattern_points`) completes on the sixth scan (run with `unlock_after_bosses` 0, so big patterns are unlocked) |
   | `TestBigPatternsUnlock` | a 5-point pentagon and a shape mixing a 4- and a 5-point pattern (added by SQL; every boss at 1 HP): before 5 defeats `unlocked_points` is 4, the pentagon is in `locked_shapes` and selecting it is `ErrShapeLocked`, and in the mixed shape a point only in the 5-point pattern is a wrong scan; after `game.unlock_after_bosses` casts `unlocked_points` is `max_pattern_points`, nothing is locked, and the pentagon casts |
   | `TestOnlyLeaderSelects` | a member's select and clear are `ErrNotLeader` and change nothing; the leader's select works and members still scan |
-  | `TestCompletingAgain` | `already_completed`, progress counted once |
+  | `TestCompletingAgain` | the square, a triangle (the cooldown forbids two squares in a row), the square again: `already_completed` on the repeat, progress counted once |
+  | `TestSpellCooldown` (`tests/cooldown_test.go`) | the spell cooldown, with a shape `mixed` added by SQL (a 3-point and a 4-point pattern through a new waypoint 1012): no cooldown before a cast; after the square, `cooldown_class` `class_4` and `cooldown_shapes` `lightning, square, tree`; selecting the square or the tree is `shape_on_cooldown` with nothing written or published; `mixed` selects, but a point only in its 4-point pattern is a wrong scan; its 3-point pattern casts, and the cooldown becomes `class_3` (`collinear, triangle`); a restart rebuilds it from the cast log; the square casts again after that; boss 1's defeat by the first cast didn't clear it |
+  | `TestCooldownFailedCastKeepsIt` | with the database closed, the triangle that would clear the square's cooldown fails: the cooldown, the last cast and `cast_count` stay the square's |
+  | `TestCooldownKnockedOutFirst` | every boss hitting for 100: knocked out by boss 2 with the square on cooldown, selecting the square (or the triangle) is `knocked_out`, not `shape_on_cooldown` |
+  | `TestCooldownOnBigPatterns` | after the unlock (every boss at 1 HP), casting a pentagon added by SQL puts `class_5` on cooldown: the pentagon moves to `cooldown_shapes`, not `locked_shapes`, and is `shape_on_cooldown`; a square opens it again |
+  | `TestCooldownAfterEveryBoss` | a cast after every boss is defeated deals nothing but still sets the cooldown |
   | `TestClearSelection` | clear with and without a selection; waypoints kept |
   | `TestRestartRestoresEverything` | restart reproduces the JSON view exactly, except `version`, which restarts at seq 0 in the new epoch; rescans still rejected |
   | `TestConcurrentScans` | two members at one waypoint (one accepted); one member at two waypoints (both accepted) |
   | `TestFailedWriteReconciles` | reload after a hand-edited database, published as `resync` one version on |
-  | `TestVersionAndTypes` | (boss 1 given huge HP, so the cast stays a plain `spell_cast`) each publish's type (`game_started`, `shape_selected`, `scan_added`, `spell_cast`, `wrong_scan`, `selection_cleared`) and version: `PublishTeam` repeats it, every change adds one, a rejected scan and a no-op clear publish nothing and keep it; `cast_count` 0 until the cast, then 1; `Snapshot` is of type `snapshot` |
+  | `TestVersionAndTypes` | (boss 1 given huge HP, so the cast stays a plain `spell_cast`) each publish's type (`game_started`, `shape_selected`, `scan_added`, `spell_cast`, `wrong_scan`, `selection_cleared`) and version: `PublishTeam` repeats it, every change adds one, a rejected scan, a no-op clear and a selection refused for the cooldown publish nothing and keep it; `cast_count` 0 until the cast, then 1; `Snapshot` is of type `snapshot` |
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
   | `TestPublishTeam` | `PublishTeam` sends the empty state to every member of a started team; after a selection it sends the current state (square selected) without changing it; nothing for an unknown team or a lobby team |
-  | `TestCastLog` | walkthrough 6: no casts before; `last_cast` (pattern, shape, `cast_by`, `cast_at`, `damage`) after each of two casts, the repeat marked `already_completed`; a new selection keeps them; `CastsForUser` newest first; two `team_cast` rows; a restart reloads the same log (JSON equal) |
+  | `TestCastLog` | walkthrough 6: no casts before; `last_cast` (pattern, shape, `class`, `cast_by`, `cast_at`, `damage`) after each of three casts (square, triangle, square: the cooldown forbids two squares in a row), the repeat marked `already_completed`; a new selection keeps them; `CastsForUser` newest first with their classes; three `team_cast` rows; a restart reloads the same log (JSON equal) |
 
 - `tests/boss_test.go` (same fixture; `castSquare` selects and scans the seed square, `restart` closes the store and loads a new one from the same database):
 
   | Test | Covers |
   |---|---|
-  | `TestCastsDamageBosses` | walkthrough 7 against a model built from the seed's HPs: casts until two bosses fall, checking after each `dealt`, `boss`, `defeated_boss`, `boss.serial`/`damage`, `bosses_defeated`, the event type (`spell_cast`, then `boss_defeated` on a defeat), the excess lost; `team_boss` in Postgres; a restart reproduces the view (except `version`) and the cast log |
+  | `TestCastsDamageBosses` | walkthrough 7 against a model built from the seed's HPs: casts the square and the triangle in turn (the cooldown) until two bosses fall, checking after each `dealt`, `boss`, `defeated_boss`, `boss.serial`/`damage`, `bosses_defeated`, the event type (`spell_cast`, then `boss_defeated` on a defeat), the excess lost; `team_boss` in Postgres; a restart reproduces the view (except `version`) and the cast log |
   | `TestDamageMultiplier` | `team_boss.multiplier = 1.5` set in Postgres, restart: `damage_multiplier` 1.5; a cast's `dealt` is `round(damage × 1.5)` while `damage` is the pattern's; the multiplier survives the cast's upsert and another restart |
-  | `TestEveryBossDefeated` | every boss at 1 HP: each cast defeats one; after the last, `boss` null and `bosses_defeated` = the count; one more cast counts (`cast_count`) but deals 0 and hits no boss |
+  | `TestEveryBossDefeated` | every boss at 1 HP: each cast (square and triangle in turn) defeats one; after the last, `boss` null and `bosses_defeated` = the count; one more cast counts (`cast_count`) but deals 0 and hits no boss |
   | `TestLoadRefusesTooManyDefeated` | a `team_boss` row with `defeated` above `game.bosses` stops `Load` |
+
+- `tests/qrcooldown_test.go` (same fixture with `qrCooldown: true` through `qrStarted`, which skips if `game.qr_cooldown` is under 30 s, `minQRCooldown`):
+
+  | Test | Covers |
+  |---|---|
+  | `TestQRCooldown` | `qr_cooldowns` `[]` before a cast; the square's cast puts 1001, 1002, 1007, 1008 in it, each until `cast_at` + `game.qr_cooldown`; with the triangle selected, each scanned by a different member is `ErrWaypointOnCooldown` with no event, no version change, nothing logged; 1003 scans; 1 µs before `until` still refused; at `until` the timer publishes one `qr_cooldown_ended` (version + 1, list empty, the stack kept); 1001 then scans and the triangle casts, cooling its three waypoints from its cast |
+  | `TestQRCooldownWriteCatchesUp` | with the timers off (`Close`), a scan at `until` publishes `qr_cooldown_ended` then `scan_added` and is accepted |
+  | `TestQRCooldownAndAttackTogether` | `game.qr_cooldown` set to boss 2's interval: the square defeats boss 1, so its cooldown ends exactly at boss 2's first attack: one event, `boss_attacked`, with `attacks` 1 and `qr_cooldowns` empty |
+  | `TestQRCooldownFailedCast` | with the database closed, the square's completing scan fails: `qr_cooldowns` stays empty, `cast_count` 0 |
+  | `TestQRCooldownRestart` | a restart mid-cooldown rebuilds `qr_cooldowns` (JSON equal); a restart after it ended (the store closed meanwhile) loads `[]`, and 1001 scans |
+  | `TestQRCooldownLatestCastWins` | the square, then a triangle one cooldown later, then a restart with three times the cooldown: 1007 and 1008 until the square's end, 1001–1003 until the triangle's, sorted by `until` |
+  | `TestQRCooldownOff` | `game.qr_cooldown` 0: `qr_cooldowns` `[]` after the square and 1001 scans straight away |
 
 - `tests/attack_test.go` (same fixture with `attacks: true`; `expectType` reads the next event's type, `expectNoEvent` fails on a waiting one):
 
@@ -909,14 +1000,14 @@ Checked in this order:
 
   | Strategy | What it does |
   |---|---|
-  | `steady` | casts a random pattern every 2 steps, members taking turns |
+  | `steady` | casts a random pattern every 2 steps, members taking turns; every 7 steps tries a pattern of its cooldown class instead (`tryCooldown`): `shape_on_cooldown` if its shape is all that class, else a wrong scan before it could complete, then a clear |
   | `rush` | casts every step: defeats every boss, then casts for nothing |
   | `solo` | one member scans every point, every 3 steps |
   | `idle` | never plays: knocked out by boss 1 (10 attacks × 5 min), revived at step 110, attacked again |
   | `sloppy` | a wrong scan (`wrong_scan`, `poisoned`), a refused scan (`selection_poisoned`), a reselect, a cast |
   | `retrier` | sends every scan twice: the resend gets `waypoint_already_scanned` (`no_shape_selected` after the completing one) |
   | `quitter` | gives up half its attempts after one scan (`ClearSelection`: no selection, empty stack) |
-  | `repeater` | casts the same pattern every time: `already_completed` after the first |
+  | `repeater` | casts the first castable pattern in atlas order (`repeated`): the spell and QR cooldowns move it along the first few patterns and back, so it repeats them (`already_completed`) |
   | `slowpoke` | casts every 8 steps: attacked mid-fight, knocked out, revived 3 steps later |
   | `racer` | two members (one member twice, for a team of one) scan the same point at once: exactly one accepted |
   | `shrinking` | an admin removes a member at step 40 (the leader, with member 1 as the new leader, for even teams), or is refused the last member (`ErrLastMember`); the removed member's scans get `ErrNotInTeam` |
@@ -924,7 +1015,7 @@ Checked in this order:
 
   | Test | Covers |
   |---|---|
-  | `TestGameLoopSimulation` | **180 steps of 30 s** (90 min of game time). Each step moves the fake clock (firing every due attack), then all 100 teams act at once by strategy, every call's error checked. After each step every team's state is compared with **`model`**, an independent re-implementation of the rules: `bosses_defeated`, `boss` (serial, damage, `attacks`, `phase_started_at`, `next_attack_at`), `health`, `knocked_out`, `damage_multiplier`, `cast_count`, `unlocked_points` and whether the pentagon and hexagon are in `locked_shapes` (`model.unlocked`); and each cast's `dealt`, `boss`, `defeated_boss`, `already_completed`. At the end, every team's watcher (a member never removed, subscribed to the hub) must hold the team's state as its last `team_state`, version included (`converge`). Counters fail the test if any configuration never happened. The league's bosses attack every **`simAttackInterval` (5 min)** with `config.toml`'s damages (shorter than the configured 10 min, so 90 minutes see many attacks and knockouts, yet the fastest teams still get through every boss). Last run (race detector, ~3 s): 2 teams through every boss, 131 knockouts, 48 revives, and every other counter above zero (run with `-v` for all of them). It found the knockout-cap bug ("Boss attacks and health") |
+  | `TestGameLoopSimulation` | **180 steps of 30 s** (90 min of game time). Each step moves the fake clock (firing every due attack), then all 100 teams act at once by strategy, every call's error checked. After each step every team's state is compared with **`model`**, an independent re-implementation of the rules: `bosses_defeated`, `boss` (serial, damage, `attacks`, `phase_started_at`, `next_attack_at`), `health`, `knocked_out`, `damage_multiplier`, `cast_count`, `unlocked_points` and whether the pentagon and hexagon are in `locked_shapes` (`model.unlocked`), `qr_cooldowns` (`model.qr`, each waypoint's latest cast + the league's cooldown); and each cast's `dealt`, `boss`, `defeated_boss`, `already_completed`. At the end, every team's watcher (a member never removed, subscribed to the hub) must hold the team's state as its last `team_state`, version included (`converge`). Counters fail the test if any configuration never happened. Patterns with a cooling waypoint aren't picked (`castable`); a team with none to cast waits for a later step (counted), and an unlocked team that picked a big pattern waits for its waypoints rather than casting something small. One select in three probes a cooling waypoint (`probeQR`), which must be `ErrWaypointOnCooldown`; `tryCooldown` expects it too when its pattern has one. The league's QR cooldown is **`simQRCooldown` (2 min)**: the seed's 11 waypoints would leave config.toml's 5 min too few casts for any team to reach every boss or a big pattern. The league's bosses attack every **`simAttackInterval` (5 min)** with `config.toml`'s damages (shorter than the configured 10 min, so 90 minutes see many attacks and knockouts, yet the fastest teams still get through every boss). Last run: 2 teams through every boss, 11 big casts, 453 QR cooldown refusals, 159 steps with every pattern's QR codes cooling, and every other counter above zero (run with `-v` for all of them). It found the knockout-cap bug ("Boss attacks and health") |
   | `TestGameLoopRestart` | The same league, backend down part way: **45 steps**, then the store waits for every event (`converge`), is closed (no timers fire), the clock moves on by the downtime, and a new store loads in a new epoch; then **45 more steps**. Subtests per downtime: **0** (every view must survive exactly, JSON with version aside), **90 s** (shorter than the league's attack interval, `simAttackInterval`), **15 min** (several attacks of every boss), **1 h** (must knock teams out while down). After the restart every team must equal its `model` at the new time, so the attacks that fell due while down are applied at load, knockouts included; each watcher gets the new store's `Snapshot`, as a reconnecting phone would, and every phone must converge at the end. Last run (race detector, ~10 s for all four): knocked out while down 0, 16, 42 and 51 (90 s can knock out a team at its last health point with an attack due) |
   | `BenchmarkGameLoopCast` | casts per second with the 100 teams playing at once, boss attacks off: each goroutine owns a team and casts random patterns (a select plus every scan, each a Postgres write). **433,873 ns per cast** (`-benchtime 3s`, 16 CPUs, local Postgres 17), about 2,300 casts or 11,000 writes a second |
 
@@ -933,8 +1024,10 @@ Checked in this order:
 
   | Test | Covers |
   |---|---|
-  | `TestSelectAndScanRoutes` | every route and error code over HTTP: `not_in_game`, `not_in_team`, `invalid_body` (the body size limit included), `invalid_qr` (tampered) and `qr_expired` (stale) for a scan, `unknown_shape`, `unknown_waypoint`, `no_shape_selected`, `waypoint_already_scanned`; one member scanning two waypoints; a square completing; a wrong scan (`wrong_scan`, `poisoned`, `stack[].wrong`), then `selection_poisoned`, then a reselect clearing it. Scans submit tokens minted with the test secret (`qrToken`) |
-  | `TestCastLogRoute` | `GET /api/teams/me/casts`: `404 not_in_team`, `[]` before any cast, then two casts newest first with `already_completed`, `shape` and `damage` |
+  | `TestSelectAndScanRoutes` | every route and error code over HTTP: `not_in_game`, `not_in_team`, `invalid_body` (the body size limit included), `invalid_qr` (tampered) and `qr_expired` (stale) for a scan, `unknown_shape`, `unknown_waypoint`, `no_shape_selected`, `waypoint_already_scanned`; one member scanning two waypoints; a square completing; a wrong scan (`wrong_scan`, `poisoned`, `stack[].wrong`), then `selection_poisoned`, then a reselect clearing it. Scans submit tokens minted with the test secret (`qrToken`); after the square's cast, reselecting the square is `409 shape_on_cooldown` |
+  | `TestCastLogRoute` | `GET /api/teams/me/casts`: `404 not_in_team`, `[]` before any cast, then the square, a triangle and the square again (the cooldown forbids two squares in a row), newest first with `already_completed`, `shape`, `class` and `damage` |
+  | `TestQRCooldownOverHTTP` | two started teams over HTTP, `config.toml`'s `game.qr_cooldown`: A's square puts its 4 waypoints in `qr_cooldowns` (each until `cast_at` + `game.qr_cooldown`) in the response and the stream's cast event; with the triangle selected, A scanning 1001 is `409 waypoint_on_cooldown` with no event, 1003 is accepted; B scans 1001 (per team); a restart keeps A's list and 1002 is still refused |
+  | `TestSpellCooldownOverHTTP` | two started teams over HTTP: A's square sets `cooldown_class` `class_4` and `cooldown_shapes` in the response and the stream's cast event; A reselecting the square or the tree is `409 shape_on_cooldown` with no event; B still selects the square (the cooldown is per team); a restart keeps A's cooldown; A's triangle moves it to `class_3`, and the square casts again |
   | `TestGameBosses` | `GET /api/game/bosses`: `401 missing_token`; `[]` before content; after seeding, `game.bosses` bosses in serial order with name, asset and HP; a started team's state shows boss 1 at 0 damage, multiplier 1; after a square over HTTP, `last_cast` hit boss 1 with `dealt` = `damage` and `boss.damage` = `dealt` |
   | `TestGameShapes` | `GET /api/game/shapes`: `401 missing_token` without a token; the seed's 5 shapes, `square` with 18 patterns of 4 points, a valid damage range per shape, `max_pattern_points` from `config.toml`, and no `scan_window_ms` |
 
@@ -945,7 +1038,7 @@ Checked in this order:
   | `TestSimTeamCompletesUnderLatency` | four players scan the square at once with delays up to 150 ms each way: exactly one `pattern_completed`; every screen ends with an empty stack and the square completed |
   | `TestSimRaceSameWaypoint` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every screen converges on a one-scan stack |
   | `TestSimWrongScanReachesEveryone` | a wrong scan racing a teammate's correct one: the wrong one gets `wrong_scan`, the other is accepted or gets `selection_poisoned`; every phone sees `poisoned`; a reselect clears it on every phone |
-  | `TestSim100Teams` | **100 teams** of every size at once over real HTTP and event streams, each player on its own delays (0–30 ms each way), 6 rounds each by one of 7 strategies (`steady`, `solo`, `sloppy` with waypoint `1012`, `racer`, `retrier`, `quitter`, `shrinking` with an admin removal over HTTP); bosses never attack. Every request's status and code is checked; at the end each team's `cast_count` is the casts it made, every phone holds the team's state (same `version`, kept newest-by-version like the frontend), and every removed player got `no_team` |
+  | `TestSim100Teams` | **100 teams** of every size at once over real HTTP and event streams, each player on its own delays (0–30 ms each way), 6 rounds each by one of 7 strategies (`steady`, `solo`, `sloppy` with waypoint `1012`, `racer`, `retrier`, `quitter`, `shrinking` with an admin removal over HTTP); bosses never attack and the QR cooldown is off (back-to-back rounds reuse the seed's waypoints). Every request's status and code is checked; at the end each team's `cast_count` is the casts it made, every phone holds the team's state (same `version`, kept newest-by-version like the frontend), and every removed player got `no_team`. Each team picks its next pattern of another size than its last cast (the spell cooldown) |
 
 - `internal/server/tests/admin_test.go`:
 

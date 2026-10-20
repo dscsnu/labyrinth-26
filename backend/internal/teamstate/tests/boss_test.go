@@ -25,17 +25,53 @@ func (f *fixtureEnv) squareDamage(t *testing.T) int {
 }
 
 // castSquare selects the square and scans it, starting at round × 100 s, and
-// returns the completing scan's result.
+// returns the completing scan's result. The square is class_4: the spell
+// cooldown refuses it right after another class_4 cast.
 func (f *fixtureEnv) castSquare(t *testing.T, round int) teamstate.ScanResult {
 	t.Helper()
+	return f.cast(t, round, "square", square)
+}
+
+// castTriangle casts the triangle (class_3) the same way: what a test casts
+// between two squares to clear the square's cooldown.
+func (f *fixtureEnv) castTriangle(t *testing.T, round int) teamstate.ScanResult {
+	t.Helper()
+	return f.cast(t, round, "triangle", triangle)
+}
+
+// castAlternating casts the square on even rounds and the triangle on odd
+// ones, so the spell cooldown never blocks the next cast, and returns the
+// result and the cast pattern's damage.
+func (f *fixtureEnv) castAlternating(t *testing.T, round int) (teamstate.ScanResult, int) {
+	t.Helper()
+	if round%2 == 0 {
+		return f.castSquare(t, round), f.damageOf(t, square)
+	}
+	return f.castTriangle(t, round), f.damageOf(t, triangle)
+}
+
+// cast selects shape and scans ids, starting at round × 100 s, and returns
+// the completing scan's result.
+func (f *fixtureEnv) cast(t *testing.T, round int, shape string, ids []string) teamstate.ScanResult {
+	t.Helper()
 	t0 := time.Duration(round) * f.tick(100)
-	f.selectAt(t, t0, 0, "square")
+	f.selectAt(t, t0, 0, shape)
 	var res teamstate.ScanResult
-	for i, w := range square {
+	for i, w := range ids {
 		res = f.scanAt(t, t0+f.tick(float64(i+1)), i, w)
 	}
-	expectOutcome(t, "cast", res, teamstate.OutcomePatternCompleted)
+	expectOutcome(t, "cast "+shape, res, teamstate.OutcomePatternCompleted)
 	return res
+}
+
+// damageOf returns the damage of the seed pattern made of ids.
+func (f *fixtureEnv) damageOf(t *testing.T, ids []string) int {
+	t.Helper()
+	p, ok := f.atlas.PatternFor(pgtest.Must(f.atlas.SetOf(ids)))
+	if !ok {
+		t.Fatalf("%v isn't a seed pattern", ids)
+	}
+	return f.atlas.Pattern(p).Spell.Damage
 }
 
 // restart loads a new store from the same database, as a backend restart
@@ -46,14 +82,14 @@ func (f *fixtureEnv) restart(t *testing.T) {
 	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
 }
 
-// TestCastsDamageBosses casts the square until two bosses fall, checking after
+// TestCastsDamageBosses casts the square and the triangle in turn (the spell
+// cooldown forbids two squares in a row) until two bosses fall, checking after
 // every cast, against a model built from the seed's HPs: the damage dealt
 // (the pattern's, multiplier 1), the boss hit, the progress, a defeat moving
 // to the next boss with the excess lost, the event type (spell_cast, or
 // boss_defeated), team_boss in Postgres, and a restart reproducing it all.
 func TestCastsDamageBosses(t *testing.T) {
 	f := started(t)
-	dmg := f.squareDamage(t)
 	sub := f.hub.Subscribe(f.users[2])
 	defer sub.Close()
 
@@ -62,7 +98,7 @@ func TestCastsDamageBosses(t *testing.T) {
 	}
 	defeated, progress := 0, 0
 	for round := 0; defeated < 2; round++ {
-		res := f.castSquare(t, round)
+		res, dmg := f.castAlternating(t, round)
 		hit := defeated + 1
 		progress += dmg
 		wantDefeat := progress >= f.bosses.At(defeated).HP
@@ -81,7 +117,7 @@ func TestCastsDamageBosses(t *testing.T) {
 			wantType = teamstate.BossDefeated
 		}
 		var typ live.EventType
-		for range 5 { // the selection and four scans
+		for range 1 + len(lc.Pattern) { // the selection and one scan per point
 			typ, _ = nextState(t, sub)
 		}
 		if typ != wantType {
@@ -146,7 +182,8 @@ func TestEveryBossDefeated(t *testing.T) {
 	f := started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1"})
 	n := f.bosses.Count()
 	for round := range n {
-		if lc := f.castSquare(t, round).State.LastCast; !lc.DefeatedBoss || *lc.Boss != round+1 {
+		res, _ := f.castAlternating(t, round)
+		if lc := res.State.LastCast; !lc.DefeatedBoss || *lc.Boss != round+1 {
 			t.Fatalf("round %d: %+v", round, lc)
 		}
 	}
@@ -154,7 +191,7 @@ func TestEveryBossDefeated(t *testing.T) {
 	if st.Boss != nil || st.BossesDefeated != n {
 		t.Fatalf("after the last boss: %+v, %d defeated", st.Boss, st.BossesDefeated)
 	}
-	res := f.castSquare(t, n)
+	res, _ := f.castAlternating(t, n)
 	if lc := res.State.LastCast; lc.Dealt != 0 || lc.Boss != nil || lc.DefeatedBoss || res.State.CastCount != n+1 || res.State.BossesDefeated != n {
 		t.Fatalf("a cast after every boss: %+v", res.State)
 	}

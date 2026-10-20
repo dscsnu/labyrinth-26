@@ -103,6 +103,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		Health:              set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints,
 		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
+		QRCooldown:          set.Game.QRCooldown.Duration,
 		WriteTimeout:        set.Storage.WriteTimeout.Duration,
 		Epoch:               epoch,
 	})

@@ -23,14 +23,14 @@ import (
 //	atlas     Atlas                    static waypoints/shapes/patterns (atlas use case), no lock
 //	bosses    Bosses                   the static boss sequence (bosses use case), no lock
 //	qr        QR                       verifies scanned tokens (qr use case), no lock
-//	clock     Clock                    the time scans and casts are stamped with, and boss attack timers
+//	clock     Clock                    the time scans and casts are stamped with, and team timers
 //	Store.mu (RWMutex) guards:
 //	  states  map[teamID]*entry        created on a team's first write
 //	entry
 //	  mu          Mutex                writers to this team's state queue here
 //	  cur         atomic.Pointer[State] the current snapshot; readers load it lock-free
 //	  members     []uuid.UUID          the roster events go to, cached on first publish, dropped by RosterChanged (under mu)
-//	  stopAttack  func() bool          cancels the pending boss attack timer, or nil (under mu)
+//	  stopTimer   func() bool          cancels the pending timer (next attack or QR cooldown end), or nil (under mu)
 //
 // A State is fixed size (bitsets, a selection and a fixed-array stack), so a
 // new snapshot is a plain struct copy.
@@ -44,9 +44,10 @@ type entry struct {
 	// when an admin removes a member. Nil until the next publish refills it.
 	// Guarded by mu.
 	members []uuid.UUID
-	// stopAttack cancels the team's pending boss attack timer (schedule), or
-	// is nil if none is pending. Guarded by mu.
-	stopAttack func() bool
+	// stopTimer cancels the team's pending timer (schedule): its next boss
+	// attack or the end of its soonest QR cooldown, whichever comes first.
+	// Nil if none is pending. Guarded by mu.
+	stopTimer func() bool
 	// closed is set by Close: no timer is armed again, and one already
 	// running does nothing. Guarded by mu.
 	closed bool
@@ -110,13 +111,14 @@ type Atlas interface {
 	SetOf(ids []string) (atlas.WaypointSet, error)
 	PatternFor(set atlas.WaypointSet) (int, bool)
 	FitsShape(shape int, set atlas.WaypointSet) bool
-	FitsShapeWithin(shape int, set atlas.WaypointSet, maxPoints int) bool
+	FitsShapeCastable(shape int, set atlas.WaypointSet, maxPoints int, cooldown string) bool
 	WaypointIDs(set atlas.WaypointSet) []string
 	ShapePatterns(shape int) []int
 	ShapeCount() int
 	Waypoint(i int) atlas.Waypoint
 	Shape(i int) atlas.Shape
 	Pattern(i int) atlas.Pattern
+	SpellClasses() []atlas.SpellClass
 }
 
 // Bosses is what team state needs from the bosses use case: the static
@@ -144,6 +146,9 @@ type Rules struct {
 	UnlockAfterBosses int
 	// WriteTimeout bounds each write-through (storage.write_timeout).
 	WriteTimeout time.Duration
+	// QRCooldown is how long a cast's waypoints stay disabled for the team
+	// that cast it (game.qr_cooldown); 0 turns it off.
+	QRCooldown time.Duration
 	// Clock is the store's time source; nil means the real one
 	// (systemClock). Tests pass a fake. Not in config.toml.
 	Clock Clock
@@ -177,8 +182,8 @@ type Store struct {
 func (s *Store) now() time.Time { return s.clock.Now() }
 
 // Load reads every team's stored state, checking it against a and b, brings
-// each started team's boss attacks up to now (any that fell due while the
-// backend was down), and arms each one's attack timer. Call once at startup,
+// each started team's boss attacks and QR cooldowns up to now (any that fell
+// due while the backend was down), and arms each one's timer. Call once at startup,
 // after atlas.Load, bosses.Load and teams.Load; Close stops the timers. qr
 // verifies the tokens Scan takes.
 func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, qr QR, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
@@ -219,7 +224,7 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, qr Q
 	return s, nil
 }
 
-// Close stops every pending attack timer. Call on shutdown, and before a
+// Close stops every pending team timer (attacks and QR cooldown ends). Call on shutdown, and before a
 // test loads another store on the same database, so a stopped store never
 // attacks.
 func (s *Store) Close() {
@@ -227,9 +232,9 @@ func (s *Store) Close() {
 	defer s.mu.RUnlock()
 	for _, e := range s.states {
 		e.mu.Lock()
-		if e.stopAttack != nil {
-			e.stopAttack()
-			e.stopAttack = nil
+		if e.stopTimer != nil {
+			e.stopTimer()
+			e.stopTimer = nil
 		}
 		e.closed = true
 		e.mu.Unlock()
@@ -299,6 +304,7 @@ func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
 		st.Boss.Health = st.Boss.PhaseHealth
 		st.Boss = st.Boss.at(s.now(), s.bosses)
 	}
+	st.QRCooldowns = s.qrCooldowns(st.Casts, s.now())
 	for _, sc := range rows.stack {
 		w, ok := s.atlas.WaypointIndex(sc.waypointID)
 		if !ok {
@@ -329,25 +335,30 @@ func (s *Store) lockTeam(teamID string) *entry {
 	return e
 }
 
-// schedule arms teamID's attack timer for st's next boss attack, replacing
-// any pending one, or just cancels it if nothing will attack (every boss
-// defeated, the team knocked out) or the store is closed. The caller holds
-// e.mu, and calls it after every apply that can move the next attack: a
-// cast, an attack, a revive, a reconcile, and at load and start. A timer
-// that fires early or late is harmless: attack recomputes from the clock.
+// schedule arms teamID's timer for st's next time-driven change, replacing
+// any pending one: its next boss attack or the end of its soonest QR
+// cooldown, whichever comes first. It just cancels it if neither is due
+// (every boss defeated or the team knocked out, and no QR cooldown) or the
+// store is closed. The caller holds e.mu, and calls it after every apply
+// that can move either: a cast, a time-driven change, a revive, a reconcile,
+// and at load and start. A timer that fires early or late is harmless: due
+// recomputes from the clock.
 func (s *Store) schedule(e *entry, teamID string, st *State) {
-	if e.stopAttack != nil {
-		e.stopAttack()
-		e.stopAttack = nil
+	if e.stopTimer != nil {
+		e.stopTimer()
+		e.stopTimer = nil
 	}
 	if e.closed {
 		return
 	}
 	next, ok := st.Boss.nextAttack(s.bosses)
+	if len(st.QRCooldowns) > 0 && (!ok || st.QRCooldowns[0].Until.Before(next)) {
+		next, ok = st.QRCooldowns[0].Until, true // the soonest QR cooldown to end
+	}
 	if !ok {
 		return
 	}
-	e.stopAttack = s.clock.AfterFunc(next.Sub(s.now()), func() { s.attack(teamID) })
+	e.stopTimer = s.clock.AfterFunc(next.Sub(s.now()), func() { s.due(teamID) })
 }
 
 // persist is the write-through step: it runs a db.go write detached from the
@@ -437,6 +448,10 @@ const (
 	// WrongScan: a scan joined the stack marked wrong; the attempt is
 	// poisoned until a member selects again.
 	WrongScan live.EventType = "wrong_scan"
+	// QRCooldownEnded: by itself, with nobody acting, a QR cooldown ended:
+	// waypoints of a cast game.qr_cooldown ago can be scanned again
+	// (qr_cooldowns shrank). One event per change, however many ended.
+	QRCooldownEnded live.EventType = "qr_cooldown_ended"
 	// SpellCast: a scan completed a pattern: last_cast is the new cast,
 	// cast_count went up, the selection and stack were purged, and the
 	// cast's damage went to the current boss.

@@ -41,6 +41,11 @@ health = 10
 # unlock_after_bosses 0 (nothing locked) to bosses.
 locked_pattern_points = 5
 unlock_after_bosses = 5
+# After a team casts a spell, the waypoints (QR codes) of that spell are
+# disabled for the team for this long: nobody on the team can scan them
+# (409 waypoint_on_cooldown) until it has passed. Other waypoints stay open.
+# Allowed: 0 or more ("0s" turns it off).
+qr_cooldown = "5m"
 
 [game.boss_attack]
 # While a team hasn't defeated a boss, the boss attacks it every interval,
