@@ -40,19 +40,35 @@ type Pattern struct {
 }
 
 // Spell is what a completed pattern casts: the team's reward for it (the
-// "powerup"). Read once at startup from pattern.damage, so reading it
-// during a scan is a plain field access.
+// "powerup"). Read once at startup from pattern.damage and
+// pattern.spell_class_id, so reading it during a scan is a plain field
+// access.
 type Spell struct {
 	// Damage is what the spell deals.
 	Damage int
+	// Class is the ID of its spell class, e.g. "class_4": the class of
+	// patterns with its waypoint count.
+	Class string
+}
+
+// SpellClass groups patterns by how many waypoints they have: every pattern
+// of Points waypoints, whatever its shape, is in this class.
+type SpellClass struct {
+	// ID is the stable identifier clients see, e.g. "class_4".
+	ID string `json:"id"`
+	// Name is for display, e.g. "Class 4".
+	Name string `json:"name"`
+	// Points is the waypoint count of its patterns.
+	Points int `json:"points"`
 }
 
 // Atlas is the static game content and its lookup tables. Never modified
 // after Load returns, so it's safe to read from any goroutine without locks.
 type Atlas struct {
-	waypoints []Waypoint // index → waypoint, in ID order
-	shapes    []Shape    // index → shape, in ID order
-	patterns  []Pattern  // index → pattern, in Postgres key order
+	waypoints []Waypoint   // index → waypoint, in ID order
+	shapes    []Shape      // index → shape, in ID order
+	patterns  []Pattern    // index → pattern, in Postgres key order
+	classes   []SpellClass // spell classes, ascending by points
 
 	waypointIndex map[string]int      // waypoint ID → index
 	shapeIndex    map[string]int      // shape ID → index
@@ -171,3 +187,7 @@ func (a *Atlas) WaypointIDs(set WaypointSet) []string {
 	slices.Sort(ids)
 	return ids
 }
+
+// SpellClasses returns every spell class, ascending by points. The slice is
+// the atlas's own, never modified: callers must not change it.
+func (a *Atlas) SpellClasses() []SpellClass { return a.classes }

@@ -109,7 +109,7 @@ type league struct {
 // of its own: the locked patterns the simulation unlocks.
 const simBigPatterns = `
 	INSERT INTO shape (id, name) VALUES ('pentagon', 'Pentagon'), ('hexagon', 'Hexagon');
-	INSERT INTO pattern (id, shape_id, damage) VALUES (2001, 'pentagon', 150), (2002, 'hexagon', 170);
+	INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (2001, 'pentagon', 150, 'class_5'), (2002, 'hexagon', 170, 'class_6');
 	INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
 		(2001, '1003'), (2001, '1004'), (2001, '1005'), (2001, '1006'), (2001, '1009'),
 		(2002, '1003'), (2002, '1004'), (2002, '1005'), (2002, '1006'), (2002, '1009'), (2002, '1010');`

@@ -619,7 +619,7 @@ func TestOutOfOrderScanning(t *testing.T) {
 func TestSinglePointPattern(t *testing.T) {
 	f := started(t, fixtureOptions{sql: `
 		INSERT INTO shape (id, name) VALUES ('dot', 'Dot');
-		INSERT INTO pattern (id, shape_id, damage) VALUES (1001, 'dot', 15);
+		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1001, 'dot', 15, 'class_1');
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES (1001, '1011');`})
 	f.selectAt(t, 0, 0, "dot")
 	res := f.scanAt(t, f.tick(1), 0, "1011")
@@ -636,7 +636,7 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 	hex := []string{"1003", "1004", "1005", "1006", "1009", "1010"}
 	f := started(t, fixtureOptions{rules: func(r *teamstate.Rules) { r.UnlockAfterBosses = 0 }, sql: `
 		INSERT INTO shape (id, name) VALUES ('hexagon', 'Hexagon');
-		INSERT INTO pattern (id, shape_id, damage) VALUES (1002, 'hexagon', 150);
+		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1002, 'hexagon', 150, 'class_6');
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
 			(1002, '1003'), (1002, '1004'), (1002, '1005'), (1002, '1006'), (1002, '1009'), (1002, '1010');`})
 	if f.rules.MaxPatternPoints != len(hex) {
@@ -920,7 +920,7 @@ func TestCastLog(t *testing.T) {
 			f.scanAt(t, t0+f.tick(float64(i)), i, w)
 		}
 		lc := f.view(t).LastCast
-		if lc == nil || !slices.Equal(lc.Pattern, square) || lc.Shape != "square" || lc.CastBy != f.users[3] ||
+		if lc == nil || !slices.Equal(lc.Pattern, square) || lc.Shape != "square" || lc.Class != "class_4" || lc.CastBy != f.users[3] ||
 			!lc.CastAt.Equal(start.Add(t0+f.tick(3))) || lc.AlreadyCompleted != (round == 1) || lc.Damage <= 0 {
 			t.Fatalf("round %d: last_cast %+v", round, lc)
 		}
@@ -928,7 +928,8 @@ func TestCastLog(t *testing.T) {
 	f.selectAt(t, f.tick(500), 0, "triangle")
 
 	cs := pgtest.Must(f.state.CastsForUser(f.users[2]))
-	if len(cs) != 2 || !cs[0].AlreadyCompleted || cs[1].AlreadyCompleted || !cs[0].CastAt.After(cs[1].CastAt) {
+	if len(cs) != 2 || !cs[0].AlreadyCompleted || cs[1].AlreadyCompleted || !cs[0].CastAt.After(cs[1].CastAt) ||
+		cs[0].Class != "class_4" || cs[1].Class != "class_4" {
 		t.Fatalf("cast log (newest first): %+v", cs)
 	}
 	var rows int
@@ -1023,7 +1024,7 @@ func TestBigPatternsUnlock(t *testing.T) {
 	f := started(t, fixtureOptions{sql: `
 		UPDATE boss SET hp = 1;
 		INSERT INTO shape (id, name) VALUES ('pentagon', 'Pentagon'), ('mixed', 'Mixed');
-		INSERT INTO pattern (id, shape_id, damage) VALUES (1003, 'pentagon', 150), (1004, 'mixed', 100), (1005, 'mixed', 150);
+		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1003, 'pentagon', 150, 'class_5'), (1004, 'mixed', 100, 'class_4'), (1005, 'mixed', 150, 'class_5');
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
 			(1003, '1003'), (1003, '1004'), (1003, '1005'), (1003, '1006'), (1003, '1009'),
 			(1004, '1001'), (1004, '1002'), (1004, '1008'), (1004, '1009'),

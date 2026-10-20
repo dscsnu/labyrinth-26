@@ -327,6 +327,7 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
   "last_cast": {
     "pattern": ["1001", "1002", "1007", "1008"],
     "shape": "square",
+    "class": "class_4",
     "cast_by": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b04",
     "cast_at": "2026-10-17T12:00:12Z",
     "already_completed": false,

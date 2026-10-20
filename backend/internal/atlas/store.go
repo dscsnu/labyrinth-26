@@ -1,10 +1,12 @@
 package atlas
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 
 	"labyrinth/internal/platform/postgres"
 )
@@ -16,7 +18,8 @@ import (
 //	  waypoints []Waypoint          index → waypoint (ID order)
 //	  shapes    []Shape             index → shape (ID order)
 //	  patterns  []Pattern           index → pattern (Postgres key order), each
-//	                                with its Spell
+//	                                with its Spell (damage and class)
+//	  classes   []SpellClass        spell classes, ascending by points
 //	  waypointIndex, shapeIndex     ID → index
 //	  patternByID                   Postgres key → index
 //	  patternBySet                  exact WaypointSet → index
@@ -35,10 +38,12 @@ type Source struct {
 	Shapes []Shape
 	// Patterns are every pattern, in key order.
 	Patterns []PatternSource
+	// SpellClasses are every spell class, in any order.
+	SpellClasses []SpellClass
 }
 
 // PatternSource is one pattern as stored: its key, its shape's ID, its
-// waypoint IDs and its damage.
+// waypoint IDs, its damage and its spell class's ID.
 type PatternSource struct {
 	// ID is pattern.id.
 	ID int
@@ -48,6 +53,8 @@ type PatternSource struct {
 	Waypoints []string
 	// Damage is pattern.damage.
 	Damage int
+	// Class is pattern.spell_class_id, or "" if the pattern has none yet.
+	Class string
 }
 
 // Rules are the atlas's settings from config.toml.
@@ -87,7 +94,12 @@ func New(src Source, rules Rules) (*Atlas, error) {
 		return nil, fmt.Errorf("%d patterns; at most %d fit in a PatternSet", len(src.Patterns), MaxPatterns)
 	}
 
+	classes, classByID, err := spellClasses(src.SpellClasses)
+	if err != nil {
+		return nil, err
+	}
 	a := &Atlas{
+		classes:       classes,
 		waypointIndex: make(map[string]int, len(src.Waypoints)),
 		shapeIndex:    make(map[string]int, len(src.Shapes)),
 		patternByID:   make(map[int]int, len(src.Patterns)),
@@ -123,11 +135,20 @@ func New(src Source, rules Rules) (*Atlas, error) {
 		if p.Damage <= 0 {
 			return nil, fmt.Errorf("pattern %d: damage must be positive, got %d (run cmd/spells, then `go run . seed`, with the backend stopped)", p.ID, p.Damage)
 		}
+		class, ok := classByID[p.Class]
+		switch {
+		case p.Class == "":
+			return nil, fmt.Errorf("pattern %d has no spell class (run `go run . seed`, with the backend stopped)", p.ID)
+		case !ok:
+			return nil, fmt.Errorf("pattern %d: unknown spell class %q", p.ID, p.Class)
+		case class.Points != set.Len():
+			return nil, fmt.Errorf("pattern %d has %d waypoints but spell class %q is for %d", p.ID, set.Len(), p.Class, class.Points)
+		}
 		if other, dup := a.patternBySet[set]; dup {
 			return nil, fmt.Errorf("patterns %d and %d use the same waypoints", a.patterns[other].ID, p.ID)
 		}
 
-		a.patterns = append(a.patterns, Pattern{ID: p.ID, Shape: shape, Waypoints: set, Spell: Spell{Damage: p.Damage}})
+		a.patterns = append(a.patterns, Pattern{ID: p.ID, Shape: shape, Waypoints: set, Spell: Spell{Damage: p.Damage, Class: p.Class}})
 		a.patternByID[p.ID] = i
 		a.patternBySet[set] = i
 		a.shapePatterns[shape] = append(a.shapePatterns[shape], i)
@@ -138,6 +159,29 @@ func New(src Source, rules Rules) (*Atlas, error) {
 		}
 	}
 	return a, nil
+}
+
+// spellClasses validates the spell classes and returns them ascending by
+// points, with an index by ID: each ID and each points value at most once,
+// points at least 1.
+func spellClasses(src []SpellClass) ([]SpellClass, map[string]SpellClass, error) {
+	byID := make(map[string]SpellClass, len(src))
+	byPoints := make(map[int]string, len(src))
+	for _, c := range src {
+		if c.Points < 1 {
+			return nil, nil, fmt.Errorf("spell class %q: points must be at least 1, got %d", c.ID, c.Points)
+		}
+		if _, dup := byID[c.ID]; dup {
+			return nil, nil, fmt.Errorf("spell class %q appears twice", c.ID)
+		}
+		if other, dup := byPoints[c.Points]; dup {
+			return nil, nil, fmt.Errorf("spell classes %q and %q are both for %d waypoints", other, c.ID, c.Points)
+		}
+		byID[c.ID], byPoints[c.Points] = c, c.ID
+	}
+	classes := slices.Clone(src)
+	slices.SortFunc(classes, func(x, y SpellClass) int { return cmp.Compare(x.Points, y.Points) })
+	return classes, byID, nil
 }
 
 // checkNesting rejects a pattern contained in a larger pattern of the same

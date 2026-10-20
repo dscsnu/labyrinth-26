@@ -56,7 +56,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Catch-up** | `catchUp`: applies any attack that has fallen due, as its own change. The attack timer calls it, and so does every write before validating, so an attack is never lost to a late timer. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection, wrong scans included. |
 | **Clock** | Where the store gets time: `Now()` (the time selections, scans and casts are stamped with, and what health is derived against) and `AfterFunc(d, f)` (the boss attack timers). `systemClock` is the real one (`time.Now`, `time.AfterFunc`); tests pass a fake through `Rules.Clock`, whose timers fire only when the test moves its time. |
-| **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts, counts by size (`patterns_by_points`), sizes and damage ranges, plus `health` (starting health), `locked_pattern_points`, `unlock_after_bosses` and `max_pattern_points`. Static while the backend runs. |
+| **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts, counts by size (`patterns_by_points`), sizes, spell classes (`classes`) and damage ranges, every spell class (`spell_classes`), plus `health` (starting health), `locked_pattern_points`, `unlock_after_bosses` and `max_pattern_points`. Static while the backend runs. |
 | **Leader** | The team's leader (teams' `Team.LeaderID`). **Only the leader selects a shape and clears the selection** (`403 not_leader` for anyone else), so only the leader restarts a poisoned attempt; every member scans. Checked under the entry lock against teams' current roster (`isLeader`): an admin removing the leader names a new one. |
 | **Big pattern** | A pattern of at least **5** (`game.locked_pattern_points`) waypoints. **Locked** until the team has defeated **5** (`game.unlock_after_bosses`) bosses: it can't be cast, a shape made only of big patterns can't be selected (`409 shape_locked`), and in a shape mixing sizes a scan that could only grow into a big pattern is a wrong scan. The 2025 seed has none (all its patterns have 3 or 4 points), so this only matters for content that does. |
 | **Unlocked points** | `unlockedPoints(State)`, `unlocked_points` in JSON: the most waypoints a pattern the team can cast may have. **4** (`game.locked_pattern_points` − 1) until it has defeated `game.unlock_after_bosses` bosses, then **6** (`game.max_pattern_points`). `locked_shapes` lists the shapes whose every pattern is bigger. |
@@ -121,8 +121,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `BossProgress.at(now, bosses)`: the progress with `Attacks` and `Health` as of `now`: `Attacks = floor((now − PhaseStart) / interval)` (0 if `now` is before `PhaseStart`), capped at the knockout attack `ceil(PhaseHealth / attack_damage)` (no cap when `attack_damage` is 0), and `Health = max(0, PhaseHealth − Attacks × attack_damage)`. Returns the progress unchanged if every boss is defeated. A pure function of the stored phase and the time, so the timer, a write and `Load` all get the same answer for the same time, however they got there: the cap is what makes a knocked-out team's `Attacks` the same live (where attacks stopped at the knockout) and after a restart (where `Load` computes it fresh).
   - `BossProgress.nextAttack(bosses)`: `PhaseStart + (Attacks + 1) × interval`; `ok` false if every boss is defeated or the team is knocked out.
   - `deal(progress, damage, now, bosses)`: applies one cast: returns the new progress, the damage dealt (`math.Round(damage × Multiplier)`), the serial of the boss hit, and whether it was defeated. If every boss is already defeated it returns the progress unchanged, 0, 0, false. On a defeat it increments `Defeated`, resets `Damage` to 0 (the rest of the cast is lost), and **starts the next boss's phase**: `PhaseStart` = `now`, `PhaseHealth` = the current `Health`, `Attacks` = 0. The progress passed in must already be at `now` (`Scan` caught up first). Called by `Scan`.
-  - `View`, `SelectionView`, `CastView`, `BossView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast` and each entry of the cast log: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`, `damage`, `dealt`, `boss` (serial, or `null`), `defeated_boss`. `StackScanView` carries `wrong`; `View` carries `poisoned`, `bosses_defeated`, `boss` (`BossView{serial, damage, phase_started_at, attacks, next_attack_at}`, or `null`), `damage_multiplier`, `health`, `knocked_out`, `unlocked_points` and `locked_shapes`.
-  - `Game`, `GameShape`, `DamageRange`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`) and `patterns_by_points` (its patterns counted by size), and the game's `health` (`game.health`), `locked_pattern_points` and `unlock_after_bosses`.
+  - `View`, `SelectionView`, `CastView`, `BossView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast` and each entry of the cast log: `pattern` (sorted waypoint IDs), `shape`, `class` (the pattern's spell class ID, e.g. `class_4`), `cast_by`, `cast_at`, `already_completed`, `damage`, `dealt`, `boss` (serial, or `null`), `defeated_boss`. `StackScanView` carries `wrong`; `View` carries `poisoned`, `bosses_defeated`, `boss` (`BossView{serial, damage, phase_started_at, attacks, next_attack_at}`, or `null`), `damage_multiplier`, `health`, `knocked_out`, `unlocked_points` and `locked_shapes`.
+  - `Game`, `GameShape`, `DamageRange`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`), `patterns_by_points` (its patterns counted by size) and `classes` (the spell class of each size, in `points` order), the game's `spell_classes` (every class, ascending by points), and the game's `health` (`game.health`), `locked_pattern_points` and `unlock_after_bosses`.
   - `Store.unlockedPoints(State)`: `Rules.MaxPatternPoints` once `State.Boss.Defeated` ≥ `Rules.UnlockAfterBosses`, else `Rules.LockedPatternPoints` − 1. Used by `view`, `Select` and `Scan`.
   - `Store.shapeLocked(shape, unlocked)`: true if the shape's smallest pattern (`Game.Shapes[shape].Points[0]`, the sizes being ascending) is bigger than `unlocked`. A shape with no patterns isn't locked.
 - **`Stack` methods** (all on values; none modifies the receiver):
@@ -138,7 +138,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `CastsForUser(userID)` → `[]CastView`, newest first, or `ErrNotInTeam`; `[]` before the first cast
   - `Snapshot(userID)`: the live event for a new stream, of type `snapshot`
 - **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast()` (`null` when the log is empty), lists every stack scan with its `wrong` flag, sets `poisoned` from `State.Poisoned()`, and sets the boss fields: `bosses_defeated`, `damage_multiplier`, `health` and `knocked_out` from `State.Boss`, `unlocked_points` from `unlockedPoints` and `locked_shapes` (every shape `shapeLocked` at that size, in index order; `[]` when none), and `boss` from `Bosses.At(Defeated).Serial` with `Damage`, `PhaseStart`, `Attacks` and `next_attack_at` (`nextAttack`, `null` when knocked out), or `null` when `Defeated` ≥ `Bosses.Count()`.
-- **`castView`** turns one `Cast` into a `CastView`, the shape being the pattern's `Shape` `damage` the pattern's precomputed `Spell.Damage` (from `pattern.damage`, loaded by the atlas), and `dealt`, `boss` (`null` when the cast's `Boss` is 0) and `defeated_boss` from the `Cast`. Used by `view` and `CastsForUser`.
+- **`castView`** turns one `Cast` into a `CastView`, the shape being the pattern's `Shape`, `class` its `Spell.Class` and `damage` its precomputed `Spell.Damage` (both from `pattern`, loaded by the atlas), and `dealt`, `boss` (`null` when the cast's `Boss` is 0) and `defeated_boss` from the `Cast`. Used by `view` and `CastsForUser`.
 
 ### `write.go`: writes, each written through
 - **`Select`**, **`ClearSelection`**, **`Scan`** and **`Revive`** each follow the [write-through](#the-write-through) steps, numbered in the code.
@@ -441,7 +441,7 @@ F selects `square`. D scans `1001`, `1002`, `1007`, `1008` in turn: `scan_added`
 | Time | Request | `last_cast` after | `GET /api/teams/me/casts` | `patterns` | `team_cast` rows | `team_pattern` rows |
 |---|---|---|---|---|---|---|
 | (start) | | `null` | `[]` | `[]` | 0 | 0 |
-| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":205,"dealt":205,"boss":1,"defeated_boss":true}` (205 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
+| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","class":"class_4","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":205,"dealt":205,"boss":1,"defeated_boss":true}` (205 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
 | 01:00 | F selects `triangle` | **unchanged** (a selection doesn't clear it) | unchanged | unchanged | 1 | 1 |
 | 02:00 | F selects `square` again | unchanged | unchanged | unchanged | 1 | 1 |
 | 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true,"dealt":205,"boss":2,"defeated_boss":true}` (205 ≥ boss 2's 100 HP) | `[02:04 cast (already_completed: true), 00:12 cast]` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
@@ -526,7 +526,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "patterns": [["1003", "1004", "1005", "1006"]],
   "shapes": ["square"],
   "selection": {"shape": "square", "selected_by": "6f1c…", "selected_at": "2026-10-17T12:00:00Z"},
-  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 198, "dealt": 198, "boss": 3, "defeated_boss": false},
+  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "class": "class_4", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 198, "dealt": 198, "boss": 3, "defeated_boss": false},
   "stack": [
     {"waypoint_id": "1001", "user_id": "9a2b…", "scanned_at": "2026-10-17T12:00:01Z", "wrong": false},
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:02Z", "wrong": false},
@@ -545,7 +545,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 }
 ```
 - `selection` is `null` when nothing is selected.
-- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow), and `damage` is what the cast spell deals (`pattern.damage`). It stays until the next cast: selecting or clearing doesn't remove it.
+- `last_cast` is the team's newest cast, or `null` if it has none (or cast only before migration `0007`). `pattern` is its sorted waypoint IDs, `shape` its shape ID, `class` its spell class ID (`class_4` for a 4-point pattern: the class of its waypoint count), `cast_by` the member whose scan completed it, `cast_at` that scan's time, `already_completed` true if the team had cast this pattern before (progress didn't grow), and `damage` is what the cast spell deals (`pattern.damage`). It stays until the next cast: selecting or clearing doesn't remove it.
 - `stack` is the attempt's scans, bottom (oldest) first; `[]` when empty. `wrong` is true for the scan that didn't fit (at most one, always the top).
 - `poisoned` is true while the stack holds a wrong scan: scans are refused with `selection_poisoned` until a reselect.
 - `last_cast.dealt` is what the cast dealt to a boss (`damage` × the multiplier then, rounded; 0 if none), `boss` the serial it hit (`null` if none), `defeated_boss` whether it finished it.
@@ -557,8 +557,8 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 **Cast log** (`GET /api/teams/me/casts`), after walkthrough 6:
 ```json
 [
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 205, "dealt": 205, "boss": 2, "defeated_boss": true},
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 205, "dealt": 205, "boss": 1, "defeated_boss": true}
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "class": "class_4", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 205, "dealt": 205, "boss": 2, "defeated_boss": true},
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "class": "class_4", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 205, "dealt": 205, "boss": 1, "defeated_boss": true}
 ]
 ```
 - Newest first; `[]` before the first cast, or for a team in the lobby.
@@ -568,16 +568,17 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 ```json
 {
   "shapes": [
-    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 66, "max": 83}, "patterns_by_points": {"3": 9}},
-    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 196, "max": 282}, "patterns_by_points": {"4": 77}},
-    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 199, "max": 214}, "patterns_by_points": {"4": 18}},
-    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 196, "max": 288}, "patterns_by_points": {"4": 99}},
-    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 64, "max": 85}, "patterns_by_points": {"3": 156}}
+    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 66, "max": 83}, "patterns_by_points": {"3": 9}, "classes": ["class_3"]},
+    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 196, "max": 282}, "patterns_by_points": {"4": 77}, "classes": ["class_4"]},
+    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 199, "max": 214}, "patterns_by_points": {"4": 18}, "classes": ["class_4"]},
+    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 196, "max": 288}, "patterns_by_points": {"4": 99}, "classes": ["class_4"]},
+    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 64, "max": 85}, "patterns_by_points": {"3": 156}, "classes": ["class_3"]}
   ],
   "health": 10,
   "locked_pattern_points": 5,
   "unlock_after_bosses": 5,
-  "max_pattern_points": 6
+  "max_pattern_points": 6,
+  "spell_classes": [{"id": "class_1", "name": "Class 1", "points": 1}, {"id": "class_2", "name": "Class 2", "points": 2}, …, {"id": "class_15", "name": "Class 15", "points": 15}]
 }
 ```
 - `shapes`: every selectable shape (the client's "types"), in index order (by ID). `id` is what `PUT …/selection` takes; `name` is for display; `patterns` is how many valid patterns the shape has; `points` is the distinct sizes of those patterns, ascending (a shape mixing 3- and 4-point patterns shows `[3, 4]`); `damage` is the minimum and maximum damage across the shape's patterns; `patterns_by_points` counts its patterns by size (JSON keys are the sizes): a team can cast those of at most its `team_state.unlocked_points`.

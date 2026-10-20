@@ -786,7 +786,7 @@ components:
 
     Game:
       type: object
-      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points]
+      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points, spell_classes]
       properties:
         shapes:
           type: array
@@ -798,9 +798,23 @@ components:
           example: 5
         unlock_after_bosses: { type: integer, description: "game.unlock_after_bosses.", example: 5 }
         max_pattern_points: { type: integer, description: "game.max_pattern_points: the most waypoints in any pattern.", example: 6 }
+        spell_classes:
+          type: array
+          description: Every spell class, ascending by points. A pattern of n waypoints is in the class whose points is n.
+          items: { $ref: "#/components/schemas/SpellClass" }
+    SpellClass:
+      type: object
+      description: >-
+        A group of patterns by how many waypoints they have: every pattern of `points` waypoints, whatever its
+        shape, is in this class. Static content (table `spell_class`), loaded once at startup.
+      required: [id, name, points]
+      properties:
+        id: { type: string, description: The stable identifier, what casts carry as `class`., example: class_4 }
+        name: { type: string, description: For display., example: Class 4 }
+        points: { type: integer, minimum: 1, description: The waypoint count of its patterns., example: 4 }
     GameShape:
       type: object
-      required: [id, name, patterns, points, damage, patterns_by_points]
+      required: [id, name, patterns, points, damage, patterns_by_points, classes]
       properties:
         id: { type: string, description: What PUT …/selection takes., example: square }
         name: { type: string, example: Square }
@@ -820,6 +834,11 @@ components:
             Its patterns counted by size (JSON keys are the sizes). A team can cast those of at most its
             `team_state.unlocked_points`.
           example: { "3": 12, "4": 6 }
+        classes:
+          type: array
+          items: { type: string }
+          description: The spell class of each of its sizes, in the same order as `points`.
+          example: [class_3, class_4]
 
     TeamState:
       type: object
@@ -925,10 +944,11 @@ components:
         version: { $ref: "#/components/schemas/Version" }
     Cast:
       type: object
-      required: [pattern, shape, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss]
+      required: [pattern, shape, class, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss]
       properties:
         pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["1001", "1002", "1007", "1008"] }
         shape: { type: string, description: The pattern's type., example: square }
+        class: { type: string, description: "The pattern's spell class ID: the class of its waypoint count (`SpellClass`).", example: class_4 }
         cast_by: { type: string, format: uuid, description: The member whose scan completed the pattern. }
         cast_at: { type: string, format: date-time, description: When (the completing scan's time). }
         already_completed: { type: boolean, description: The team had cast this pattern before, so its progress didn't grow. }

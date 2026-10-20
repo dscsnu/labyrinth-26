@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -161,8 +162,9 @@ func TestCastLogRoute(t *testing.T) {
 }
 
 // TestGameShapes checks GET /api/game/shapes: it needs a token, lists the
-// seed's shapes with their pattern counts, sizes and damage ranges, and
-// carries max_pattern_points (and no timing rules: there's no time limit).
+// seed's shapes with their pattern counts, sizes, spell classes (class_n for
+// each size n) and damage ranges, carries max_pattern_points and every spell
+// class ascending by points (and no timing rules: there's no time limit).
 func TestGameShapes(t *testing.T) {
 	e := setup(t)
 	if err := e.db.SeedDev2025(context.Background()); err != nil {
@@ -192,6 +194,28 @@ func TestGameShapes(t *testing.T) {
 		if !ok || dmg["min"].(float64) <= 0 || dmg["max"].(float64) < dmg["min"].(float64) {
 			t.Fatalf("shape %s damage range invalid: %v", id, s["damage"])
 		}
+		// One class per size, in the same order: a pattern of n points is
+		// class_n.
+		points, classes := s["points"].([]any), s["classes"].([]any)
+		if len(classes) != len(points) {
+			t.Fatalf("shape %s: classes %v for points %v", id, classes, points)
+		}
+		for i, n := range points {
+			if want := fmt.Sprintf("class_%d", int(n.(float64))); classes[i] != want {
+				t.Fatalf("shape %s: classes %v for points %v, want %s at %d", id, classes, points, want, i)
+			}
+		}
+	}
+	// Every spell class, ascending by points.
+	sc := r.payload["spell_classes"].([]any)
+	for i, c := range sc {
+		m := c.(map[string]any)
+		if m["points"] != float64(i+1) || m["id"] != fmt.Sprintf("class_%d", i+1) || m["name"] != fmt.Sprintf("Class %d", i+1) {
+			t.Fatalf("spell_classes[%d] = %v", i, m)
+		}
+	}
+	if len(sc) == 0 {
+		t.Fatal("no spell_classes")
 	}
 }
 

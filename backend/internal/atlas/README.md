@@ -32,6 +32,7 @@ The client, the code and the spell PR use different words. The code's are used h
 | shape | | `Pattern` | one valid set of 4-digit waypoint IDs of a shape |
 | point | | `Waypoint` | a QR location, 4-digit ID |
 | | spell, powerup, damage | `Spell` | what completing a pattern casts: the team's reward |
+| class | | `SpellClass` | a group of patterns by waypoint count: every 4-point pattern is `class_4`, whatever its shape |
 
 | Term | Meaning |
 |---|---|
@@ -41,7 +42,8 @@ The client, the code and the spell PR use different words. The code's are used h
 | **Index** | A waypoint's, shape's or pattern's position in the atlas's slices. Exists only in memory and may differ between restarts. Postgres, the API and live events always use IDs. |
 | **Set** | A bitmask over indexes: `WaypointSet`, `ShapeSet`, `PatternSet`. Bit *i* means item *i*. |
 | **Nested pattern** | A pattern contained in a larger pattern of the same shape. Refused at startup: scanning the larger one would pass through the smaller one first and complete it early. |
-| **Spell** | What completing a pattern casts: `Spell{Damage, Geometry}`, one per pattern, computed once at startup. **Not computed yet**: zero on main (see [Spells](#spells)). |
+| **Spell** | What completing a pattern casts: `Spell{Damage, Class}`, one per pattern, read from Postgres once at startup (`pattern.damage`, `pattern.spell_class_id`; see [Spells](#spells)). |
+| **Spell class** | A group of patterns by **how many waypoints they have**: every pattern of *n* waypoints, whatever its shape, is in the class whose `points` is *n* (`class_4` for a 4-point square or a 4-point line). A row of `spell_class` (migration 0012): a string `id` (`"class_4"`), a display `name` (`"Class 4"`) and its `points`. Each pattern names its class (`pattern.spell_class_id`); `Load` refuses a pattern whose class doesn't match its waypoint count. Held on `Pattern.Spell.Class` (the ID). |
 | **Position** | A waypoint on a flat local plane, in metres east (X) and north (Y) of an origin. **Not computed yet**: zero on main. |
 | **Read-only use case** | Static content, no runtime writes, no routes. It has `doc.go`, `read.go`, `db.go`, `store.go` and this README, and no `api.go` or `write.go` (AGENTS.md §3). |
 
@@ -83,6 +85,7 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 - **`ShapePatterns(shape)`**: the shape's pattern indexes, in key order. The slice is shared: callers must not modify it. Used by `FitsShape`, `checkNesting` and teamstate's `newGame`.
 - **`FitsShape(shape, set)`**: whether some pattern of the shape contains every waypoint in `set` (see [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)). The empty set fits nothing.
 - **`FitsShapeWithin(shape, set, maxPoints)`**: `FitsShape` counting only the shape's patterns of at most `maxPoints` waypoints. Teamstate's wrong-scan check: it passes the team's unlocked size (`unlocked_points`: **4** until the team has defeated **5** bosses, `game.locked_pattern_points` − 1 and `game.unlock_after_bosses`, then **6**), so a set that only a locked pattern contains is wrong. The same scan as `FitsShape` plus a popcount (`Waypoints.Len()`) per pattern.
+- **`SpellClasses()`**: every spell class, ascending by points. The slice is shared: callers must not modify it. Used by teamstate's `newGame` for `GET /api/game/shapes`.
 - **`WaypointIDs(set)`**: a set back to IDs, sorted. Used for every view and `ScanResult.Pattern`, and the string key for a pattern ([Spells](#spells), identity).
 - No lookup locks or touches Postgres. Only `WaypointIDs` and the `Indexes` methods allocate (their result slices).
 
@@ -92,6 +95,7 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 - **`Rules`**: `MaxPatternPoints` (`game.max_pattern_points`). Damage isn't computed here: it's precomputed offline by `cmd/spells` and read from `pattern.damage` (see [Spells](#spells)).
 - **`Load(ctx, pg, log, rules)`**: `selectAtlas` (error → `load atlas: …`), then `New(src, rules)` (error → `invalid atlas: …`), then the `loaded atlas` log line. Called once, by `server.Build`, and by the tests.
 - **`New(src, rules)`**: builds an Atlas from a `Source`, validating in the order of [Loading at startup](#loading-at-startup) and builds every slice and map. Waypoints and shapes take their index from their row order (ID order, from the query); patterns from theirs (key order).
+- **`spellClasses(src)`**: validates the classes (points at least 1; each ID and each points value at most once) and returns them sorted by points, with an index by ID. Called first by `New`.
 - **`checkNesting(shape, patterns)`**: for every pair of the shape's patterns, refuses one that's smaller than and contained in another. O(n²) per shape: 156² ≈ 24,000 AND-compares for the seed's triangles, once at startup.
 
 ### `db.go`: SQL (reads only)
@@ -100,7 +104,8 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 - **`selectAtlas(ctx)`** runs three queries on the pool, not in a transaction (nothing writes content while the backend runs, and the instance lock keeps `seed` out):
   1. `SELECT id, name, latitude, longitude FROM waypoint ORDER BY id`
   2. `SELECT id, name FROM shape ORDER BY id`
-  3. `SELECT p.id, p.shape_id, COALESCE(array_agg(pw.waypoint_id ORDER BY pw.waypoint_id) FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}') FROM pattern p LEFT JOIN pattern_waypoint pw ON pw.pattern_id = p.id GROUP BY p.id ORDER BY p.id`. The `LEFT JOIN` and `COALESCE` return a pattern with no waypoints as `{}`, so `New` can refuse it instead of it vanishing.
+  3. `SELECT id, name, points FROM spell_class ORDER BY points`
+  4. `SELECT p.id, p.shape_id, COALESCE(array_agg(pw.waypoint_id ORDER BY pw.waypoint_id) FILTER (WHERE pw.waypoint_id IS NOT NULL), '{}'), COALESCE(p.damage, 0), COALESCE(p.spell_class_id, '') FROM pattern p LEFT JOIN pattern_waypoint pw ON pw.pattern_id = p.id GROUP BY p.id, p.damage, p.spell_class_id ORDER BY p.id`. The `LEFT JOIN` and `COALESCE` return a pattern with no waypoints as `{}`, so `New` can refuse it instead of it vanishing; a missing damage reads as 0 and a missing class as `""`, so `New` refuses them by name.
 
 ### `tests/store_test.go`
 See [Tests](#tests).
@@ -114,6 +119,7 @@ Atlas                                built once by Load; never modified after
   waypoints      []Waypoint          index → waypoint, ID order
   shapes         []Shape             index → shape, ID order
   patterns       []Pattern           index → pattern, Postgres key order
+  classes        []SpellClass        spell classes, ascending by points
   waypointIndex  map[string]int      "1007" → 6
   shapeIndex     map[string]int      "square" → 2
   patternByID    map[int]int         Postgres key → index (87 → 86)
@@ -136,6 +142,10 @@ Atlas                                built once by Load; never modified after
 | | `Waypoints` | `WaypointSet` | its waypoints |
 | | `Spell` | `Spell` | what completing it casts; **zero until computed** |
 | `Spell` | `Damage` | `int` | what the spell deals |
+| | `Class` | `string` | its spell class's ID, e.g. `"class_4"`: the class of patterns with its waypoint count (`pattern.spell_class_id`) |
+| `SpellClass` | `ID` | `string` | stable identifier clients see, e.g. `"class_4"` (JSON `id`) |
+| | `Name` | `string` | display, e.g. `"Class 4"` (JSON `name`) |
+| | `Points` | `int` | the waypoint count of its patterns (JSON `points`) |
 | | `Geometry` | `Geometry` | what `Damage` is computed from, kept for display and tests |
 | `Geometry` | `Hull` | `WaypointSet` | waypoints on the set's convex hull; interior points are `pattern.Waypoints &^ Hull` |
 | | `TourM` | `float64` | shortest closed loop through every waypoint, straight-line metres (out and back for 2, 0 for 1) |
@@ -158,11 +168,16 @@ Migration `0003_content_progress.sql`. The atlas reads these tables; nothing at 
 | | `name` | `TEXT` | NOT NULL | |
 | `pattern` | `id` | `INTEGER` | PRIMARY KEY | key `team_pattern` refers to |
 | | `shape_id` | `TEXT` | NOT NULL, REFERENCES `shape (id)` | a pattern's shape exists (`New` checks it too) |
+| | `damage` | `INTEGER` | `CHECK (damage > 0)`, nullable (migration 0008) | a spell deals positive damage; `New` refuses a missing one |
+| | `spell_class_id` | `TEXT` | REFERENCES `spell_class (id)`, nullable (migration 0012) | a pattern's class exists; `New` refuses a missing one, and one whose `points` isn't the pattern's waypoint count |
+| `spell_class` | `id` | `TEXT` | PRIMARY KEY, `CHECK (id ~ '^[a-z0-9_-]{1,32}$')` | a string slug, unique (`"class_4"`) |
+| | `name` | `TEXT` | NOT NULL | display |
+| | `points` | `SMALLINT` | NOT NULL, UNIQUE, `CHECK (points BETWEEN 1 AND 64)` | one class per waypoint count |
 | `pattern_waypoint` | `pattern_id` | `INTEGER` | NOT NULL, REFERENCES `pattern (id)` ON DELETE CASCADE | deleting a pattern removes its waypoint list |
 | | `waypoint_id` | `TEXT` | NOT NULL, REFERENCES `waypoint (id)` | a pattern's waypoints exist (`New` checks it too) |
 | | | | PRIMARY KEY `(pattern_id, waypoint_id)` | a waypoint is in a pattern at most once |
 
-**Not constraints, checked only by `New`:** a pattern has at least one waypoint, at most `game.max_pattern_points`; no two patterns share a set; no pattern is nested in a larger one of its shape; the counts fit the set types. They span rows or depend on config, which a constraint can't express.
+**Not constraints, checked only by `New`:** a pattern's class's `points` equals its waypoint count; a pattern has at least one waypoint, at most `game.max_pattern_points`; no two patterns share a set; no pattern is nested in a larger one of its shape; the counts fit the set types. They span rows or depend on config, which a constraint can't express.
 
 Teamstate's tables refer to these (`team_scan.waypoint_id`, `team_pattern.pattern_id`, `team_selection.shape_id`); see `internal/teamstate/README.md`.
 
@@ -171,7 +186,8 @@ Teamstate's tables refer to these (`team_scan.waypoint_id`, `team_pattern.patter
 |---|---|
 | `waypoint` (ID order) | `waypoints`, `waypointIndex` |
 | `shape` (ID order) | `shapes`, `shapeIndex` |
-| `pattern` + `pattern_waypoint` (key order) | `patterns` (`ID`, `Shape`, `Waypoints`), `patternByID`, `patternBySet`, `shapePatterns` |
+| `pattern` + `pattern_waypoint` (key order) | `patterns` (`ID`, `Shape`, `Waypoints`, `Spell.Damage`, `Spell.Class`), `patternByID`, `patternBySet`, `shapePatterns` |
+| `spell_class` (points order) | `classes` |
 | (none: computed from `latitude`/`longitude`) | `Waypoint.Position`, once spells are added |
 | (none: computed from positions and `Rules.Spell`) | `Pattern.Spell`, once spells are added |
 
@@ -253,7 +269,14 @@ What completing a pattern casts: the team's reward for it. **One per pattern**, 
 ### The in-memory struct
 | Where | What | Meaning |
 |---|---|---|
-| `Pattern.Spell` | `Spell{Damage int}` | The pattern's damage value, loaded from `pattern.damage`. |
+| `Pattern.Spell` | `Spell{Damage int, Class string}` | The pattern's damage, from `pattern.damage`, and its spell class ID, from `pattern.spell_class_id`. |
+
+### Spell classes
+- **A class is a waypoint count.** Every pattern of *n* waypoints is in the class whose `points` is *n*, whatever its shape: `class_4` holds every 4-point square, line or tree. It's stored, not computed, so the content loaded before the event says it explicitly and SQL can group by it; `New` refuses a pattern whose class's `points` isn't its waypoint count, so the stored copy can't drift.
+- **A string ID, in its own table** (`spell_class`, migration 0012), like `shape`: Postgres rejects an unknown class through the foreign key, and a class can gain fields (a display name today; a cooldown rule or an icon later) without touching the pattern rows.
+- **Seeded** by `seeds/dev_2025_spell_classes.sql`, which `SeedDev2025` runs after the patterns: `class_1` to `class_15` (one per size `game.max_pattern_points` allows), then each pattern's `spell_class_id` from its `pattern_waypoint` count.
+- **After migration 0012, reseed.** The column is added empty, so an existing database refuses to start (`pattern N has no spell class`) until `go run . seed` (backend stopped) fills it. Tested by `TestLoadRefusesMissingSpellClass`.
+- **Shown to clients** as `class` on every cast (`last_cast`, `GET /api/teams/me/casts`), and in `GET /api/game/shapes` as each shape's `classes` (one per size in `points`) and the full `spell_classes` list (teamstate's README, "API").
 
 ### Identity
 - Waypoints by **4-digit ID** (`1001`–`1011`); patterns by **`WaypointSet`** (in memory) or Postgres **`ID`**.
@@ -330,13 +353,18 @@ Not applicable: the atlas has no routes of its own. `GET /api/game/shapes` is se
 | 2 | More than 64 waypoints | `invalid atlas: 65 waypoints; at most 64 fit in a WaypointSet` |
 | 3 | More than 64 shapes | `invalid atlas: 65 shapes; at most 64 fit in a ShapeSet` |
 | 4 | More than 2048 patterns | `invalid atlas: 2049 patterns; at most 2048 fit in a PatternSet` |
+| 4a | A spell class with points below 1, an ID twice, or two classes for one waypoint count | `invalid atlas: spell class "none": points must be at least 1, got 0` / `spell class "class_3" appears twice` / `spell classes "class_3" and "trio" are both for 3 waypoints` |
 | 5 | A waypoint ID isn't exactly 4 digits (first in ID order) | `invalid atlas: waypoint id "A1" is not 4 digits` |
 | 6 | A pattern names an unknown shape (patterns in key order; 6–10 are per pattern) | `invalid atlas: pattern 10: unknown shape "hexagon"` |
 | 7 | A pattern names an unknown waypoint | `invalid atlas: pattern 10: unknown waypoint "9999"` |
 | 8 | A pattern has no waypoints | `invalid atlas: pattern 10 has no waypoints` |
 | 9 | A pattern has more than 6 (`game.max_pattern_points`) waypoints | `invalid atlas: pattern 98 has 7 waypoints; game.max_pattern_points is 6` |
-| 10 | Two patterns have the same set of waypoints (in any order, any shapes) | `invalid atlas: patterns 10 and 99 use the same waypoints` |
-| 11 | A pattern is inside a larger pattern of the same shape (shapes in index order) | `invalid atlas: shape "triangle": pattern 97 is inside pattern 10, so it would complete first` |
+| 10 | A pattern's damage is missing or not positive | `invalid atlas: pattern 7: damage must be positive, got 0 (run cmd/spells, then go run . seed, …)` |
+| 11 | A pattern has no spell class | `invalid atlas: pattern 7 has no spell class (run go run . seed, with the backend stopped)` |
+| 12 | A pattern names an unknown spell class | `invalid atlas: pattern 10: unknown spell class "class_99"` |
+| 13 | A pattern's class is for another waypoint count | `invalid atlas: pattern 10 has 3 waypoints but spell class "class_4" is for 4` |
+| 14 | Two patterns have the same set of waypoints (in any order, any shapes) | `invalid atlas: patterns 10 and 99 use the same waypoints` |
+| 15 | A pattern is inside a larger pattern of the same shape (shapes in index order) | `invalid atlas: shape "triangle": pattern 97 is inside pattern 10, so it would complete first` |
 
 **Allowed, at the boundaries:**
 
@@ -404,19 +432,21 @@ No races to resolve: the atlas is built once before `Load` returns and never mod
 - **`Waypoint(i)` and friends panic on a bad index** rather than returning `ok`. Fine while only atlas-issued indexes are passed.
 
 ## Tests
-`tests/store_test.go`. All but `TestDevSeedLoads` need no database: they call `atlas.New` on a fixture of four waypoints `1001`–`1004` (A–D): triangle `10` = ABC, line `11` = AD, triangle `12` = BCD. `game.max_pattern_points` comes from `config.toml`; below the fixture's 3 points (`fixtureMaxPoints`) these tests **skip**:
+`tests/store_test.go`. All but `TestDevSeedLoads` and the two `TestLoadRefuses…` tests need no database: they call `atlas.New` on a fixture of four waypoints `1001`–`1004` (A–D): triangle `10` = ABC, line `11` = AD, triangle `12` = BCD, each in the class of its size (`classOf`), with spell classes `class_1` to `class_15` (`fixtureClasses`, in reverse order). `game.max_pattern_points` comes from `config.toml`; below the fixture's 3 points (`fixtureMaxPoints`) these tests **skip**:
 
 | Test | Covers |
 |---|---|
 | `TestPatternLookupIgnoresScanOrder` | a pattern is found from its waypoints in any of three orders; `WaypointIDs` gives them sorted; a partial, an extra and the empty set match nothing; an unknown waypoint in `SetOf` is an error |
 | `TestPatternIndexes` | waypoint and shape indexes in ID order (`1004` → 3, `triangle` → 1); an unknown waypoint has none; `ShapePatterns(triangle)` = `10, 12`; `PatternByID(12)`; `WaypointIDs` sorts |
-| `TestAtlasValidation` | each startup refusal, by its error: ID not 4 digits (`A1`, `10001`), unknown waypoint, unknown shape, empty pattern, two patterns with the same waypoints (across shapes, in another order), a pattern over `game.max_pattern_points`, a pattern nested in a larger one of its shape, more than 64 waypoints, 64 shapes, 2048 patterns |
+| `TestAtlasValidation` | each startup refusal, by its error: ID not 4 digits (`A1`, `10001`), unknown waypoint, unknown shape, empty pattern, zero and negative damage, no spell class, an unknown class, a class for another size, a class ID twice, two classes for one size, a class of 0 points, two patterns with the same waypoints (across shapes, in another order), a pattern over `game.max_pattern_points`, a pattern nested in a larger one of its shape, more than 64 waypoints, 64 shapes, 2048 patterns |
+| `TestSpellClasses` | every fixture pattern carries `class_n` for its *n* waypoints; `SpellClasses` lists the 15 classes ascending by points though the fixture gives them in reverse |
 | `TestBitsets` | `PatternSet` across 64-bit words (bits 0, 63, 64, 70, 2047) with `Indexes` and `Has`; `WaypointSet` `With` (twice the same), `Has`, `Len`, `Contains` |
 | `TestMixedSizesAllowedWhenNotNested` | a shape may mix 2- and 3-point patterns when none is inside another |
 | `TestFitsShape` | one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
 | `TestFitsShapeWithin` | a line shape with a 2- and a 3-point pattern: a point only in the 3-point one fits within 3, not within 2; a limit below every pattern fits nothing; a pair spanning both lines doesn't fit; the empty set doesn't; and with nothing excluded it equals `FitsShape` |
-| `TestDevSeedLoads` | real Postgres (`TEST_DATABASE_URL`, schema `atlas_test`): the 2025 seed loads through `Load` with config.toml's rules: 11 waypoints, 5 shapes, 359 patterns; square `1001 1002 1007 1008` is found as a `square`; waypoint 0 is `1001` with coordinates; seeding again succeeds (idempotent) |
+| `TestDevSeedLoads` | real Postgres (`TEST_DATABASE_URL`, schema `atlas_test`): the 2025 seed loads through `Load` with config.toml's rules: 11 waypoints, 5 shapes, 359 patterns; square `1001 1002 1007 1008` is found as a `square`, with damage and class `class_4`; waypoint 0 is `1001` with coordinates; seeding again succeeds (idempotent) |
 | `TestLoadRefusesMissingDamage` | real Postgres: a seeded pattern's damage set to `NULL` (migration 0008 without the spells seed) makes `Load` fail with `pattern 7: damage must be positive`, not a scan error |
+| `TestLoadRefusesMissingSpellClass` | real Postgres: a seeded pattern's `spell_class_id` set to `NULL` (migration 0012 without the seed) makes `Load` fail with `pattern 7 has no spell class` |
 | `BenchmarkLookups` | `FitsShape`, `PatternFor` and `WaypointIndex`+`Has` on the fixture (not the seed), results kept in package-level sinks (`sinkBool`, `sinkInt`). On an i7-12650H: about 1 ns, 2 ns and 6 ns |
 
 Run `go test -bench . ./internal/atlas/` for the benchmark. Not tested here: `Load`'s `load atlas:` error path (no database fault injection). Teamstate's tests (`internal/teamstate/README.md`) exercise the atlas through `teamstate.Atlas` on the seed, including a 1-point and a 6-point pattern added by SQL.

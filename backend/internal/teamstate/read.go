@@ -313,6 +313,9 @@ type CastView struct {
 	Pattern []string `json:"pattern"`
 	// Shape is the pattern's shape ID.
 	Shape string `json:"shape"`
+	// Class is the pattern's spell class ID, e.g. "class_4": the class of
+	// patterns with its waypoint count.
+	Class string `json:"class"`
 	// CastBy is the member whose scan completed it.
 	CastBy uuid.UUID `json:"cast_by"`
 	// CastAt is when.
@@ -394,6 +397,9 @@ type Game struct {
 	UnlockAfterBosses int `json:"unlock_after_bosses"`
 	// MaxPatternPoints is game.max_pattern_points.
 	MaxPatternPoints int `json:"max_pattern_points"`
+	// SpellClasses are every spell class, ascending by points: a pattern of
+	// n waypoints is in the class whose points is n.
+	SpellClasses []atlas.SpellClass `json:"spell_classes"`
 }
 
 // GameShape is one selectable shape: what the client calls a pattern type.
@@ -411,6 +417,9 @@ type GameShape struct {
 	// PatternsByPoints counts its patterns by size: {"3": 12, "4": 6}. A
 	// team can cast those of at most its team_state.unlocked_points.
 	PatternsByPoints map[int]int `json:"patterns_by_points"`
+	// Classes are the spell classes of its patterns, ascending by points,
+	// one per entry of Points, e.g. ["class_3", "class_4"].
+	Classes []string `json:"classes"`
 }
 
 // unlockedPoints returns the most waypoints a pattern st's team can cast may
@@ -442,6 +451,7 @@ func newGame(a Atlas, r Rules) Game {
 		Health:              r.Health,
 		LockedPatternPoints: r.LockedPatternPoints,
 		UnlockAfterBosses:   r.UnlockAfterBosses,
+		SpellClasses:        a.SpellClasses(),
 	}
 	for i := range a.ShapeCount() {
 		sh := a.Shape(i)
@@ -462,15 +472,22 @@ func newGame(a Atlas, r Rules) Game {
 			}
 		}
 		byPoints := map[int]int{}
+		classBySize := map[int]string{}
 		for _, p := range pIndices {
-			sizes[a.Pattern(p).Waypoints.Len()] = true
-			byPoints[a.Pattern(p).Waypoints.Len()]++
+			pat := a.Pattern(p)
+			sizes[pat.Waypoints.Len()] = true
+			byPoints[pat.Waypoints.Len()]++
+			classBySize[pat.Waypoints.Len()] = pat.Spell.Class
 		}
 		points := make([]int, 0, len(sizes))
 		for n := range sizes {
 			points = append(points, n)
 		}
 		slices.Sort(points)
+		classes := make([]string, len(points))
+		for j, n := range points {
+			classes[j] = classBySize[n]
+		}
 		g.Shapes[i] = GameShape{
 			ID:               sh.ID,
 			Name:             sh.Name,
@@ -478,6 +495,7 @@ func newGame(a Atlas, r Rules) Game {
 			Points:           points,
 			Damage:           DamageRange{Min: minD, Max: maxD},
 			PatternsByPoints: byPoints,
+			Classes:          classes,
 		}
 	}
 	return g
@@ -571,7 +589,7 @@ func (s *Store) view(teamID string, st State) View {
 // castView turns a Cast into JSON, with its pattern's damage from the atlas.
 func (s *Store) castView(lc Cast) CastView {
 	p := s.atlas.Pattern(lc.Pattern)
-	cv := CastView{Pattern: s.atlas.WaypointIDs(p.Waypoints), Shape: s.atlas.Shape(p.Shape).ID,
+	cv := CastView{Pattern: s.atlas.WaypointIDs(p.Waypoints), Shape: s.atlas.Shape(p.Shape).ID, Class: p.Spell.Class,
 		CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage,
 		Dealt: lc.Dealt, DefeatedBoss: lc.DefeatedBoss}
 	if lc.Boss != 0 {

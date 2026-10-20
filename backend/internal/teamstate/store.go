@@ -117,6 +117,7 @@ type Atlas interface {
 	Waypoint(i int) atlas.Waypoint
 	Shape(i int) atlas.Shape
 	Pattern(i int) atlas.Pattern
+	SpellClasses() []atlas.SpellClass
 }
 
 // Bosses is what team state needs from the bosses use case: the static

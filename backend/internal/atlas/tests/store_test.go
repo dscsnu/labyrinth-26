@@ -32,16 +32,31 @@ func maxPoints(tb testing.TB) int {
 	return n
 }
 
+// fixtureClasses are spell classes class_1 to class_15, one per pattern size
+// the game allows, deliberately out of order (New sorts them by points).
+func fixtureClasses() []atlas.SpellClass {
+	var cs []atlas.SpellClass
+	for n := 15; n >= 1; n-- {
+		cs = append(cs, atlas.SpellClass{ID: fmt.Sprintf("class_%d", n), Name: fmt.Sprintf("Class %d", n), Points: n})
+	}
+	return cs
+}
+
+// classOf returns the spell class ID of a pattern of these waypoints: the
+// class of its waypoint count.
+func classOf(waypoints []string) string { return fmt.Sprintf("class_%d", len(waypoints)) }
+
 // fixture is four waypoints, 1001-1004 (A-D), forming triangle ABC, line AD
-// and triangle BCD.
+// and triangle BCD, with spell classes class_1 to class_15.
 func fixture() atlas.Source {
 	return atlas.Source{
-		Waypoints: []atlas.Waypoint{{ID: "1001"}, {ID: "1002"}, {ID: "1003"}, {ID: "1004"}},
-		Shapes:    []atlas.Shape{{ID: "line"}, {ID: "triangle"}},
+		SpellClasses: fixtureClasses(),
+		Waypoints:    []atlas.Waypoint{{ID: "1001"}, {ID: "1002"}, {ID: "1003"}, {ID: "1004"}},
+		Shapes:       []atlas.Shape{{ID: "line"}, {ID: "triangle"}},
 		Patterns: []atlas.PatternSource{
-			{ID: 10, Shape: "triangle", Waypoints: []string{"1001", "1002", "1003"}, Damage: 50},
-			{ID: 11, Shape: "line", Waypoints: []string{"1001", "1004"}, Damage: 30},
-			{ID: 12, Shape: "triangle", Waypoints: []string{"1002", "1003", "1004"}, Damage: 50},
+			{ID: 10, Shape: "triangle", Waypoints: []string{"1001", "1002", "1003"}, Damage: 50, Class: classOf([]string{"1001", "1002", "1003"})},
+			{ID: 11, Shape: "line", Waypoints: []string{"1001", "1004"}, Damage: 30, Class: classOf([]string{"1001", "1004"})},
+			{ID: 12, Shape: "triangle", Waypoints: []string{"1002", "1003", "1004"}, Damage: 50, Class: classOf([]string{"1002", "1003", "1004"})},
 		},
 	}
 }
@@ -128,9 +143,21 @@ func TestAtlasValidation(t *testing.T) {
 		"unknown shape":            {func(r *atlas.Source) { r.Patterns[0].Shape = "hexagon" }, "unknown shape"},
 		"empty pattern":            {func(r *atlas.Source) { r.Patterns[0].Waypoints = nil }, "has no waypoints"},
 		"zero damage":              {func(r *atlas.Source) { r.Patterns[0].Damage = 0 }, "damage must be positive"},
-		"negative damage":          {func(r *atlas.Source) { r.Patterns[0].Damage = -10 }, "damage must be positive"},
+		"no spell class":           {func(r *atlas.Source) { r.Patterns[0].Class = "" }, "pattern 10 has no spell class"},
+		"unknown spell class":      {func(r *atlas.Source) { r.Patterns[0].Class = "class_99" }, `unknown spell class "class_99"`},
+		"class for another size":   {func(r *atlas.Source) { r.Patterns[0].Class = "class_4" }, `pattern 10 has 3 waypoints but spell class "class_4" is for 4`},
+		"duplicate class id": {func(r *atlas.Source) {
+			r.SpellClasses = append(r.SpellClasses, atlas.SpellClass{ID: "class_3", Points: 99})
+		}, `spell class "class_3" appears twice`},
+		"two classes for one size": {func(r *atlas.Source) {
+			r.SpellClasses = append(r.SpellClasses, atlas.SpellClass{ID: "trio", Points: 3})
+		}, "are both for 3 waypoints"},
+		"class of zero points": {func(r *atlas.Source) {
+			r.SpellClasses = append(r.SpellClasses, atlas.SpellClass{ID: "none", Points: 0})
+		}, "points must be at least 1"},
+		"negative damage": {func(r *atlas.Source) { r.Patterns[0].Damage = -10 }, "damage must be positive"},
 		"same waypoints": {func(r *atlas.Source) {
-			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 99, Shape: "line", Waypoints: []string{"1003", "1002", "1001"}, Damage: 50})
+			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 99, Shape: "line", Waypoints: []string{"1003", "1002", "1001"}, Damage: 50, Class: classOf([]string{"1003", "1002", "1001"})})
 		}, "use the same waypoints"},
 		"pattern bigger than max_pattern_points": {func(r *atlas.Source) {
 			for i := range limit {
@@ -140,10 +167,10 @@ func TestAtlasValidation(t *testing.T) {
 			for i := range limit + 1 {
 				ids = append(ids, r.Waypoints[i].ID)
 			}
-			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 98, Shape: "line", Waypoints: ids, Damage: 50})
+			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 98, Shape: "line", Waypoints: ids, Damage: 50, Class: classOf(ids)})
 		}, "game.max_pattern_points is"},
 		"pattern inside a larger one of the same shape": {func(r *atlas.Source) {
-			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 97, Shape: "triangle", Waypoints: []string{"1001", "1002"}, Damage: 50})
+			r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 97, Shape: "triangle", Waypoints: []string{"1001", "1002"}, Damage: 50, Class: classOf([]string{"1001", "1002"})})
 		}, "would complete first"},
 		"too many waypoints": {func(r *atlas.Source) {
 			for i := range atlas.MaxWaypoints {
@@ -159,7 +186,7 @@ func TestAtlasValidation(t *testing.T) {
 			// The counts are checked before anything else, so the patterns'
 			// contents don't matter.
 			for i := range atlas.MaxPatterns {
-				r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 1000 + i, Shape: "line", Waypoints: []string{"1001"}, Damage: 50})
+				r.Patterns = append(r.Patterns, atlas.PatternSource{ID: 1000 + i, Shape: "line", Waypoints: []string{"1001"}, Damage: 50, Class: classOf([]string{"1001"})})
 			}
 		}, "fit in a PatternSet"},
 	}
@@ -169,6 +196,31 @@ func TestAtlasValidation(t *testing.T) {
 		_, err := atlas.New(rows, atlas.Rules{MaxPatternPoints: limit})
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: got %v, want an error containing %q", name, err, c.want)
+		}
+	}
+}
+
+// TestSpellClasses checks that every pattern carries the spell class of its
+// waypoint count, and that SpellClasses lists the classes ascending by points
+// however they were given.
+func TestSpellClasses(t *testing.T) {
+	a, err := atlas.New(fixture(), atlas.Rules{MaxPatternPoints: maxPoints(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range a.PatternCount() {
+		p := a.Pattern(i)
+		if want := fmt.Sprintf("class_%d", p.Waypoints.Len()); p.Spell.Class != want {
+			t.Fatalf("pattern %d (%d waypoints): class %q, want %q", p.ID, p.Waypoints.Len(), p.Spell.Class, want)
+		}
+	}
+	cs := a.SpellClasses()
+	if len(cs) != 15 {
+		t.Fatalf("%d classes, want 15", len(cs))
+	}
+	for i, c := range cs {
+		if c.Points != i+1 || c.ID != fmt.Sprintf("class_%d", i+1) || c.Name != fmt.Sprintf("Class %d", i+1) {
+			t.Fatalf("class %d: %+v, want class_%d ascending", i, c, i+1)
 		}
 	}
 }
@@ -197,7 +249,7 @@ func TestBitsets(t *testing.T) {
 func TestMixedSizesAllowedWhenNotNested(t *testing.T) {
 	rows := fixture()
 	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
-	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50})
+	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50, Class: classOf([]string{"1002", "1003", "1005"})})
 	if _, err := atlas.New(rows, atlas.Rules{MaxPatternPoints: maxPoints(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +294,7 @@ func TestFitsShape(t *testing.T) {
 func TestFitsShapeWithin(t *testing.T) {
 	rows := fixture()
 	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
-	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50})
+	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50, Class: classOf([]string{"1002", "1003", "1005"})})
 	c, err := atlas.New(rows, atlas.Rules{MaxPatternPoints: maxPoints(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -300,6 +352,11 @@ func TestDevSeedLoads(t *testing.T) {
 	}
 	if a.Pattern(p).Spell.Damage <= 0 {
 		t.Fatalf("pattern %d: damage = %d, want > 0", a.Pattern(p).ID, a.Pattern(p).Spell.Damage)
+	}
+	// The seed puts every pattern in the class of its waypoint count (Load
+	// would refuse otherwise); the square is class_4.
+	if c := a.Pattern(p).Spell.Class; c != "class_4" {
+		t.Fatalf("square's class %q, want class_4", c)
 	}
 	if w := a.Waypoint(0); w.ID != "1001" || w.Latitude == 0 || w.Longitude == 0 {
 		t.Fatalf("waypoint 0: %+v", w)
@@ -366,5 +423,27 @@ func TestLoadRefusesMissingDamage(t *testing.T) {
 	_, err := atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})
 	if err == nil || !strings.Contains(err.Error(), "pattern 7: damage must be positive") {
 		t.Fatalf("got %v, want an error naming pattern 7's missing damage", err)
+	}
+}
+
+// TestLoadRefusesMissingSpellClass checks, against a real Postgres, that a
+// pattern with no spell class (NULL, as after migration 0012 without the
+// seed) makes Load fail with a message naming the pattern.
+func TestLoadRefusesMissingSpellClass(t *testing.T) {
+	ctx := context.Background()
+	db := pgtest.Open(t, pgtest.URL(t, "atlas_test"))
+	if err := db.SeedDev2025(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool().Exec(ctx, "UPDATE pattern SET spell_class_id = NULL WHERE id = 7"); err != nil {
+		t.Fatal(err)
+	}
+	limit := configtest.Settings(t).Game.MaxPatternPoints
+	if limit < seedMaxPoints {
+		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
+	}
+	_, err := atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})
+	if err == nil || !strings.Contains(err.Error(), "pattern 7 has no spell class") {
+		t.Fatalf("got %v, want an error naming pattern 7's missing spell class", err)
 	}
 }
