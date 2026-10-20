@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/config/configtest"
@@ -13,20 +14,22 @@ import (
 // three returns a valid three-boss sequence.
 func three() []bosses.Boss {
 	return []bosses.Boss{
-		{Serial: 1, Name: "One", Asset: "bosses/1.png", Description: "first", HP: 100},
-		{Serial: 2, Name: "Two", Asset: "bosses/2.png", HP: 200},
-		{Serial: 3, Name: "Three", Asset: "bosses/3.png", HP: 300},
+		{Serial: 1, Name: "One", Asset: "bosses/1.png", Description: "first", HP: 100, AttackIntervalS: 300, AttackDamage: 1},
+		{Serial: 2, Name: "Two", Asset: "bosses/2.png", HP: 200, AttackIntervalS: 60, AttackDamage: 0},
+		{Serial: 3, Name: "Three", Asset: "bosses/3.png", HP: 300, AttackIntervalS: 1, AttackDamage: 5},
 	}
 }
 
 // TestNew checks New's validation: exactly serials 1…Count (or none at all),
-// each with a name, an asset and positive HP, and lookups by index.
+// each with a name, an asset, positive HP, a positive attack interval and a
+// non-negative attack damage; and lookups by index.
 func TestNew(t *testing.T) {
 	b, err := bosses.New(three(), bosses.Rules{Count: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Count() != 3 || b.At(0).Name != "One" || b.At(2).HP != 300 || len(b.All()) != 3 || b.All()[1].Serial != 2 {
+	if b.Count() != 3 || b.At(0).Name != "One" || b.At(2).HP != 300 || len(b.All()) != 3 || b.All()[1].Serial != 2 ||
+		b.At(0).AttackInterval() != 5*time.Minute || b.At(2).AttackDamage != 5 {
 		t.Fatalf("bosses: %+v", b.All())
 	}
 	if empty, err := bosses.New(nil, bosses.Rules{Count: 3}); err != nil || empty.Count() != 0 {
@@ -39,15 +42,17 @@ func TestNew(t *testing.T) {
 	}{
 		"too few": {func(l []bosses.Boss) []bosses.Boss { return l[:2] }, "2 bosses stored; game.bosses is 3"},
 		"too many": {func(l []bosses.Boss) []bosses.Boss {
-			return append(l, bosses.Boss{Serial: 4, Name: "x", Asset: "a", HP: 1})
+			return append(l, bosses.Boss{Serial: 4, Name: "x", Asset: "a", HP: 1, AttackIntervalS: 1})
 		}, "4 bosses stored"},
-		"gap":              {func(l []bosses.Boss) []bosses.Boss { l[2].Serial = 4; return l }, "boss serial 4 where 3 was expected"},
-		"starts at zero":   {func(l []bosses.Boss) []bosses.Boss { l[0].Serial = 0; return l }, "boss serial 0 where 1 was expected"},
-		"no name":          {func(l []bosses.Boss) []bosses.Boss { l[1].Name = ""; return l }, "boss 2 has no name"},
-		"no asset":         {func(l []bosses.Boss) []bosses.Boss { l[1].Asset = ""; return l }, "boss 2 has no asset"},
-		"zero hp":          {func(l []bosses.Boss) []bosses.Boss { l[0].HP = 0; return l }, "boss 1: hp must be positive"},
-		"negative hp":      {func(l []bosses.Boss) []bosses.Boss { l[2].HP = -5; return l }, "boss 3: hp must be positive"},
-		"duplicate serial": {func(l []bosses.Boss) []bosses.Boss { l[1].Serial = 1; return l }, "boss serial 1 where 2 was expected"},
+		"zero attack interval":   {func(l []bosses.Boss) []bosses.Boss { l[1].AttackIntervalS = 0; return l }, "boss 2: attack_interval_s must be positive"},
+		"negative attack damage": {func(l []bosses.Boss) []bosses.Boss { l[2].AttackDamage = -1; return l }, "boss 3: attack_damage must not be negative"},
+		"gap":                    {func(l []bosses.Boss) []bosses.Boss { l[2].Serial = 4; return l }, "boss serial 4 where 3 was expected"},
+		"starts at zero":         {func(l []bosses.Boss) []bosses.Boss { l[0].Serial = 0; return l }, "boss serial 0 where 1 was expected"},
+		"no name":                {func(l []bosses.Boss) []bosses.Boss { l[1].Name = ""; return l }, "boss 2 has no name"},
+		"no asset":               {func(l []bosses.Boss) []bosses.Boss { l[1].Asset = ""; return l }, "boss 2 has no asset"},
+		"zero hp":                {func(l []bosses.Boss) []bosses.Boss { l[0].HP = 0; return l }, "boss 1: hp must be positive"},
+		"negative hp":            {func(l []bosses.Boss) []bosses.Boss { l[2].HP = -5; return l }, "boss 3: hp must be positive"},
+		"duplicate serial":       {func(l []bosses.Boss) []bosses.Boss { l[1].Serial = 1; return l }, "boss serial 1 where 2 was expected"},
 	}
 	for name, c := range cases {
 		_, err := bosses.New(c.edit(three()), bosses.Rules{Count: 3})
@@ -81,7 +86,7 @@ func TestLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, boss := range b.All() {
-		if boss.Serial != i+1 || boss.Name == "" || boss.Asset == "" || boss.HP <= 0 {
+		if boss.Serial != i+1 || boss.Name == "" || boss.Asset == "" || boss.HP <= 0 || boss.AttackIntervalS <= 0 || boss.AttackDamage < 0 {
 			t.Fatalf("boss %d: %+v", i, boss)
 		}
 		if i > 0 && boss.HP <= b.At(i-1).HP {

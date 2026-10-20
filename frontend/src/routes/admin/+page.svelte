@@ -17,6 +17,11 @@
 
     const nameOf = (t: Team, id: string) => t.members.find((m) => m.id === id)?.name ?? id.slice(0, 8);
 
+    // Asks before reviving: it also restarts the current boss's attack clock.
+    const confirmRevive = (t: Team): SubmitFunction => ({ cancel }) => {
+        if (!confirm(`Revive ${t.name} (${t.id})? Full health, and its boss's attack clock restarts.`)) cancel();
+    };
+
     // Asks before removing (enhance's cancel stops the request); the backend
     // refuses anything invalid anyway. On success the page's data reloads.
     const confirmRemove = (t: Team, memberId: string): SubmitFunction => ({ cancel }) => {
@@ -33,6 +38,8 @@
     <p style="color: red">{form.code}: {form.message}</p>
 {:else if form?.removed}
     <p style="color: green">Removed. They're teamless and can create or join a team.</p>
+{:else if form?.revived}
+    <p style="color: green">Revived team {form.revived}: full health, and its boss's attack clock restarted.</p>
 {/if}
 
 <p>
@@ -43,6 +50,12 @@
 {#each shown as t (t.id)}
     <section>
         <h2>{t.name} <small>({t.id} · {t.status} · {t.members.length} members)</small></h2>
+        {#if t.status === "IN_GAME"}
+            <form method="POST" action="?/revive" use:enhance={confirmRevive(t)}>
+                <input type="hidden" name="team_id" value={t.id} />
+                <button>revive (full health)</button>
+            </form>
+        {/if}
         <ul>
             {#each t.members as m (m.id)}
                 <li>

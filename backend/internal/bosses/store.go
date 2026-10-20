@@ -46,7 +46,8 @@ func Load(ctx context.Context, pg *postgres.DB, log *slog.Logger, rules Rules) (
 }
 
 // New validates list (in serial order) against rules and builds the Bosses:
-// exactly serials 1…rules.Count, each with a name, an asset and positive HP.
+// exactly serials 1…rules.Count, each with a name, an asset, positive HP, a
+// positive attack interval and a non-negative attack damage.
 // An empty list is allowed too, like an empty atlas, so a fresh database
 // boots before content is loaded: then Count is 0 and no cast hits a boss.
 // Load calls it with what Postgres holds; tests call it with a fixture.
@@ -66,6 +67,10 @@ func New(list []Boss, rules Rules) (*Bosses, error) {
 			return nil, fmt.Errorf("boss %d has no asset", boss.Serial)
 		case boss.HP <= 0:
 			return nil, fmt.Errorf("boss %d: hp must be positive, got %d", boss.Serial, boss.HP)
+		case boss.AttackIntervalS <= 0:
+			return nil, fmt.Errorf("boss %d: attack_interval_s must be positive, got %d", boss.Serial, boss.AttackIntervalS)
+		case boss.AttackDamage < 0:
+			return nil, fmt.Errorf("boss %d: attack_damage must not be negative, got %d", boss.Serial, boss.AttackDamage)
 		}
 		b.list[i] = boss
 	}

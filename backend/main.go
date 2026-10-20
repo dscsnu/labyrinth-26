@@ -136,6 +136,8 @@ func run(log *slog.Logger, args []string) error {
 	}
 	// Event streams never end on their own; close them so Shutdown can finish.
 	srv.RegisterOnShutdown(app.Hub.Close)
+	// No boss attacks once shutting down: they'd publish to closed streams.
+	srv.RegisterOnShutdown(app.TeamState.Close)
 
 	errCh := make(chan error, 1)
 	go func() {

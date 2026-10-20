@@ -31,6 +31,28 @@ func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Hand
 	mux.Handle("GET /api/game/shapes", authed(a.shapes))
 }
 
+// AdminRoutes registers the admin team state routes; admin wraps a handler in
+// the auth middleware plus the admin-role check.
+func (a *API) AdminRoutes(mux *http.ServeMux, admin func(http.HandlerFunc) http.Handler) {
+	mux.Handle("POST /api/admin/teams/{team_id}/revive", admin(a.revive))
+}
+
+// revive handles POST /api/admin/teams/{team_id}/revive: an admin restores a
+// started team's health to game.health and restarts its current boss's
+// attack clock; the team's state after. 404 team_not_found for an unknown
+// ID (any malformed one included), 409 not_in_game unless it's IN_GAME.
+// Logged with the admin's ID.
+func (a *API) revive(w http.ResponseWriter, r *http.Request) {
+	teamID := r.PathValue("team_id")
+	v, err := a.store.Revive(r.Context(), teamID)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin revived team", "admin_id", identity.UserID(r), "team_id", teamID)
+	httpx.OK(w, v)
+}
+
 // errorCodes maps rule violations to an HTTP status and a stable code the
 // frontend can switch on.
 var errorCodes = []struct {
@@ -45,6 +67,8 @@ var errorCodes = []struct {
 	{ErrNoShapeSelected, http.StatusConflict, "no_shape_selected"},
 	{ErrWaypointAlreadyScanned, http.StatusConflict, "waypoint_already_scanned"},
 	{ErrSelectionPoisoned, http.StatusConflict, "selection_poisoned"},
+	{ErrKnockedOut, http.StatusConflict, "knocked_out"},
+	{ErrTeamNotFound, http.StatusNotFound, "team_not_found"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or

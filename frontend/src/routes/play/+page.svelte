@@ -47,6 +47,14 @@
     let boss = $derived(ts.boss ? bosses.find((b) => b.serial === ts.boss!.serial) ?? null : null);
     const bossName = (serial: number | null) => bosses.find((b) => b.serial === serial)?.name ?? `boss ${serial}`;
 
+    // The countdown to the boss's next attack, on the server's clock. The
+    // server applies the attack and publishes it; this only displays.
+    const countdown = (iso: string | null) => {
+        if (!iso) return null;
+        const s = Math.max(0, Math.ceil((Date.parse(iso) - now) / 1000));
+        return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    };
+
     // Time, measured the one canonical way: the server's clock as estimated
     // from the stream's hello event (ServerClock). There's no time limit; it
     // only labels scans "how long ago", the same on every phone.
@@ -83,9 +91,17 @@
             const { type, message: next } = envelope(TeamStateSchema).parse(JSON.parse(e.data));
             const fresh = isNewer(ts.version, next.version);
             observe(next);
-            // A teammate's cast that finished a boss: say so on every phone.
-            if (fresh && type === "boss_defeated" && next.last_cast) {
+            // Moments, on every phone: a teammate's cast that finished a boss,
+            // and the boss's attacks.
+            if (!fresh) return;
+            if (type === "boss_defeated" && next.last_cast) {
                 message = { ok: true, text: `${bossName(next.last_cast.boss)} defeated!` };
+            } else if (type === "boss_attacked" && next.boss) {
+                message = { ok: false, text: `${bossName(next.boss.serial)} attacked! Health ${next.health}/${game.health}` };
+            } else if (type === "knocked_out") {
+                message = { ok: false, text: "Knocked out! Ask an organiser to revive your team." };
+            } else if (type === "revived") {
+                message = { ok: true, text: "Revived: full health" };
             }
         });
         // /play needs a team: without one (never had one, or it's gone) the
@@ -170,6 +186,13 @@
 
 <h1>Play</h1>
 
+<p>
+    Health: <progress max={game.health} value={ts.health}></progress> {ts.health}/{game.health}
+</p>
+{#if ts.knocked_out}
+    <p style="color: red"><b>Knocked out.</b> Your team can't select or scan until an organiser revives it.</p>
+{/if}
+
 <h2>Boss {ts.bosses_defeated + (boss ? 1 : 0)}/{bosses.length}</h2>
 {#if boss && ts.boss}
     <p>
@@ -181,6 +204,9 @@
         {boss.hp - ts.boss.damage} / {boss.hp} HP
         {#if ts.damage_multiplier !== 1}· damage ×{ts.damage_multiplier}{/if}
     </p>
+    {#if ts.boss.next_attack_at}
+        <p>Attacks every {Math.round(boss.attack_interval_s / 60 * 10) / 10} min for {boss.attack_damage}: next in <b>{countdown(ts.boss.next_attack_at)}</b></p>
+    {/if}
 {:else if bosses.length > 0}
     <p><b>Every boss defeated!</b> Casts still count toward your patterns.</p>
 {:else}
@@ -191,7 +217,7 @@
 <h2>1. Pick a type</h2>
 <p>
     {#each game.shapes as s (s.id)}
-        <button disabled={busy} onclick={() => selectShape(s.id)} style:font-weight={s.id === selected ? "bold" : "normal"}>
+        <button disabled={busy || ts.knocked_out} onclick={() => selectShape(s.id)} style:font-weight={s.id === selected ? "bold" : "normal"}>
             {s.name} ({s.points.join("/")} pts · {s.damage.min}–{s.damage.max} dmg · {s.patterns} patterns){ts.shapes.includes(s.id) ? " ✓" : ""}
         </button>
     {/each}
@@ -219,8 +245,8 @@
 {/if}
 <form onsubmit={scan}>
     <input bind:value={waypoint} inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="1001" required
-        disabled={!selected || ts.poisoned || busy} />
-    <button disabled={!selected || ts.poisoned || busy}>Scan</button>
+        disabled={!selected || ts.poisoned || ts.knocked_out || busy} />
+    <button disabled={!selected || ts.poisoned || ts.knocked_out || busy}>Scan</button>
     <small>dev seed waypoints: 1001–1011</small>
 </form>
 

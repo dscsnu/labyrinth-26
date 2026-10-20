@@ -19,6 +19,7 @@ code_attempts = 10
 [game]
 max_pattern_points = 6
 bosses = 7
+health = 10
 [qr]
 rotate = "5s"
 tolerance = "5s"
@@ -73,7 +74,7 @@ func TestLoadSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 7 ||
+	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 7 || s.Game.Health != 10 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
@@ -97,6 +98,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"name longer than the database":     {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
 		"pattern bigger than the stack":     {"max_pattern_points = 6", "max_pattern_points = 16", "max_pattern_points"},
 		"no bosses":                         {"bosses = 7", "bosses = 0", "game.bosses must be at least 1"},
+		"no health":                         {"health = 10", "health = 0", "game.health must be at least 1"},
 		"zero qr rotate":                    {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
 		"zero qr tolerance":                 {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
 		"zero per_point":                    {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},

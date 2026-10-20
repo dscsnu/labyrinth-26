@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,11 +29,14 @@ type teamRows struct {
 	boss      *bossRow      // team_boss, if the team has a row
 }
 
-// bossRow is a team_boss row: the team's progress through the bosses.
+// bossRow is a team_boss row: the team's progress through the bosses and
+// where its current boss phase began (NULLs: see migration 0010).
 type bossRow struct {
-	defeated   int
-	damage     int
-	multiplier float64
+	defeated       int
+	damage         int
+	multiplier     float64
+	phaseHealth    *int       // NULL: full health (game.health)
+	phaseStartedAt *time.Time // NULL: the team's start
 }
 
 // castRow is a team_cast row.
@@ -119,12 +123,14 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 	}
 
 	// Each team's progress through the bosses, if it has a row.
-	rows, err = d.pool.Query(ctx, "SELECT team_id, defeated, damage, multiplier FROM team_boss"+filter, teamID)
+	rows, err = d.pool.Query(ctx,
+		"SELECT team_id, defeated, damage, multiplier, phase_health, phase_started_at FROM team_boss"+filter, teamID)
 	if err != nil {
 		return nil, err
 	}
 	var boss bossRow
-	if _, err := pgx.ForEachRow(rows, []any{&id, &boss.defeated, &boss.damage, &boss.multiplier}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&id, &boss.defeated, &boss.damage, &boss.multiplier,
+		&boss.phaseHealth, &boss.phaseStartedAt}, func() error {
 		row := boss
 		get(id).boss = &row
 		return nil
@@ -189,8 +195,9 @@ func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uu
 //  3. INSERT team_cast: every cast, repeats included, with what it did to the
 //     bosses (c.Dealt, c.Boss, NULL when 0, c.DefeatedBoss)
 //  4. UPSERT team_boss: the team's progress after the cast (p.Defeated,
-//     p.Damage). A new row takes the multiplier's default (1); an existing
-//     one keeps its multiplier, which casts never change.
+//     p.Damage, and the phase: p.PhaseHealth, p.PhaseStart, which a defeat
+//     moves to the next boss). A new row takes the multiplier's default
+//     (1); an existing one keeps its multiplier, which casts never change.
 //  5. DELETE team_selection: which also empties the stack
 //
 // wrong is always false here (a wrong scan can't complete), but it's passed
@@ -217,10 +224,7 @@ func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string,
 			teamID, patternID, userID, at, c.AlreadyCompleted, c.Dealt, bossSerial, c.DefeatedBoss); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO team_boss (team_id, defeated, damage) VALUES ($1, $2, $3)
-			ON CONFLICT (team_id) DO UPDATE SET defeated = EXCLUDED.defeated, damage = EXCLUDED.damage`,
-			teamID, p.Defeated, p.Damage); err != nil {
+		if err := upsertBoss(ctx, tx, teamID, p); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, "DELETE FROM team_selection WHERE team_id = $1", teamID)
@@ -255,4 +259,25 @@ func (d db) deleteSelection(ctx context.Context, teamID string) error {
 		return fmt.Errorf("delete selection of team %s: %d rows, expected 1", teamID, n)
 	}
 	return nil
+}
+
+// upsertBossPhase writes teamID's boss progress (a revive): one UPSERT of
+// team_boss (upsertBoss).
+func (d db) upsertBossPhase(ctx context.Context, teamID string, p BossProgress) error {
+	return upsertBoss(ctx, d.pool, teamID, p)
+}
+
+// upsertBoss is the one INSERT … ON CONFLICT DO UPDATE of team_boss that
+// every boss write uses, on the pool or inside a transaction: defeated,
+// damage, phase_health and phase_started_at from p. The multiplier is left
+// as stored (1 for a new row): nothing in a cast or revive changes it.
+func upsertBoss(ctx context.Context, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, teamID string, p BossProgress) error {
+	_, err := q.Exec(ctx, `
+		INSERT INTO team_boss (team_id, defeated, damage, phase_health, phase_started_at) VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (team_id) DO UPDATE SET defeated = EXCLUDED.defeated, damage = EXCLUDED.damage,
+			phase_health = EXCLUDED.phase_health, phase_started_at = EXCLUDED.phase_started_at`,
+		teamID, p.Defeated, p.Damage, p.PhaseHealth, p.PhaseStart)
+	return err
 }

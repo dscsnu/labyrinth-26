@@ -29,6 +29,10 @@ max_pattern_points = 6
 # before content is loaded: then casts hit no boss.) A team that defeats them
 # all keeps casting, but its casts deal no more damage. Allowed: at least 1.
 bosses = 7
+# Every team's starting health. Each boss attack takes its attack_damage off
+# it (boss table); at 0 the team is knocked out (no selecting or scanning)
+# until an admin revives it, back to this. Allowed: at least 1.
+health = 10
 
 [qr]
 # How often a waypoint's rotating QR changes, and thus how often the /qr

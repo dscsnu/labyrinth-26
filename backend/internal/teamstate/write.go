@@ -56,6 +56,11 @@ var (
 	ErrNoShapeSelected = errors.New("select a shape before scanning")
 	// ErrWaypointAlreadyScanned means this waypoint is already in the stack.
 	ErrWaypointAlreadyScanned = errors.New("this waypoint is already scanned")
+	// ErrKnockedOut means the team's health is 0 (boss attacks): it can't
+	// select or scan until an admin revives it.
+	ErrKnockedOut = errors.New("your team is knocked out; an admin must revive it")
+	// ErrTeamNotFound is the teams use case's: no team has that ID (Revive).
+	ErrTeamNotFound = teams.ErrTeamNotFound
 	// ErrSelectionPoisoned means a wrong scan is in the stack: the attempt
 	// can't cast, and the team must select the shape again to start over.
 	ErrSelectionPoisoned = errors.New("a scan didn't fit any pattern of this shape; select the shape again to start over")
@@ -125,7 +130,14 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	if !s.isMember(t.ID, userID) {
 		return View{}, ErrNotInTeam
 	}
-	cur := e.cur.Load()
+	// Any boss attack that fell due is applied first (its own change), so
+	// this write sees the team's real health.
+	cur := s.catchUp(e, t.ID)
+
+	// 2. validate (state)
+	if cur.Boss.KnockedOut() {
+		return View{}, ErrKnockedOut
+	}
 
 	// 3. build
 	now := s.now()
@@ -164,7 +176,9 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	if !s.isMember(t.ID, userID) {
 		return View{}, ErrNotInTeam
 	}
-	cur := e.cur.Load()
+	// Any boss attack that fell due is applied first (its own change).
+	// Clearing is allowed even when knocked out: it only gives up.
+	cur := s.catchUp(e, t.ID)
 
 	// 2. validate (state)
 	if !cur.Selection.Active {
@@ -213,10 +227,15 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	if !s.isMember(t.ID, userID) {
 		return ScanResult{}, ErrNotInTeam
 	}
-	cur := e.cur.Load()
+	// Any boss attack that fell due is applied first (its own change), so
+	// this scan sees the team's real health.
+	cur := s.catchUp(e, t.ID)
 	now := s.now()
 
 	// 2. validate (state)
+	if cur.Boss.KnockedOut() {
+		return ScanResult{}, ErrKnockedOut
+	}
 	if !cur.Selection.Active {
 		return ScanResult{}, ErrNoShapeSelected
 	}
@@ -260,7 +279,7 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 		next.Stack = NewStack(s.rules.MaxPatternPoints)
 		// The cast's damage (× the multiplier) goes to the current boss.
 		cast = Cast{Pattern: completed, By: userID, At: now, AlreadyCompleted: res.AlreadyCompleted}
-		next.Boss, cast.Dealt, cast.Boss, cast.DefeatedBoss = deal(cur.Boss, s.atlas.Pattern(completed).Spell.Damage, s.bosses)
+		next.Boss, cast.Dealt, cast.Boss, cast.DefeatedBoss = deal(cur.Boss, s.atlas.Pattern(completed).Spell.Damage, now, s.bosses)
 		if cast.DefeatedBoss {
 			typ = BossDefeated
 		}
@@ -280,8 +299,12 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 
 	// 5. apply
 	e.cur.Store(&next)
-	// 6. publish
+	// 6. publish, and re-arm the attack timer: a defeat starts the next
+	// boss's clock
 	s.publish(e, t.ID, &next, typ)
+	if isComplete {
+		s.schedule(e, t.ID, &next)
+	}
 	res.State = s.view(t.ID, next)
 	return res, nil
 }
@@ -327,6 +350,94 @@ func (s *Store) PublishTeam(teamID string) {
 	e := s.lockTeam(teamID)
 	defer e.mu.Unlock()
 
-	// 6. publish
+	// 6. publish, and start the first boss's attack clock
 	s.publish(e, teamID, e.cur.Load(), GameStarted)
+	s.schedule(e, teamID, e.cur.Load())
+}
+
+// catchUp applies any boss attack that has fallen due on teamID's state and
+// returns the current state. The caller holds e.mu. Every write calls it
+// before validating, and so does the attack timer, so an attack is never
+// lost to a late timer or a write that got the lock first.
+//
+// Applying attacks is a memory-only change (AGENTS.md §6): health is derived
+// from the stored phase (PhaseStart, PhaseHealth) and the clock, so there's
+// nothing to persist, and Load reproduces it exactly. It still bumps the
+// version and publishes boss_attacked, or knocked_out when health reaches 0.
+func (s *Store) catchUp(e *entry, teamID string) *State {
+	cur := e.cur.Load()
+	p := cur.Boss.at(s.now(), s.bosses)
+	if p.Attacks == cur.Boss.Attacks && p.Health == cur.Boss.Health {
+		return cur // nothing fell due
+	}
+
+	// 3. build
+	next := *cur
+	next.Boss = p
+	next.Version = cur.Version.Next(s.rules.Epoch)
+	// 4. persist: none, memory-only (see above)
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish
+	typ := BossAttacked
+	if p.KnockedOut() {
+		typ = KnockedOut
+	}
+	s.publish(e, teamID, &next, typ)
+	return &next
+}
+
+// attack is the attack timer's callback for teamID: it applies whatever
+// attacks have fallen due (catchUp) and arms the timer for the next. Run by
+// the Clock in its own goroutine; does nothing once the store is closed.
+func (s *Store) attack(teamID string) {
+	// 1. lock
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+	if e.closed {
+		return
+	}
+	s.schedule(e, teamID, s.catchUp(e, teamID))
+}
+
+// Revive is the admin's revive of teamID: health back to game.health and the
+// current boss's attack clock restarted from now (its attacks so far no
+// longer count). Allowed whether or not the team is knocked out, so it also
+// heals. ErrTeamNotFound if there's no such team, ErrNotInGame unless it's
+// IN_GAME.
+func (s *Store) Revive(ctx context.Context, teamID string) (View, error) {
+	// 2. validate, before 1. lock: an IN_GAME team's status never changes
+	t, ok := s.teams.ByID(teamID)
+	if !ok {
+		return View{}, ErrTeamNotFound
+	}
+	if t.Status != teams.InGame {
+		return View{}, ErrNotInGame
+	}
+
+	// 1. lock
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+	cur := s.catchUp(e, teamID)
+
+	// 3. build: a new phase of the same boss, at full health
+	now := s.now()
+	next := *cur
+	next.Boss.PhaseStart, next.Boss.PhaseHealth = now, s.rules.Health
+	next.Boss.Attacks, next.Boss.Health = 0, s.rules.Health
+	next.Version = cur.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.upsertBossPhase(ctx, teamID, next.Boss)
+	}); err != nil {
+		return View{}, s.reconcile(e, teamID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish, and restart the attack clock
+	s.publish(e, teamID, &next, Revived)
+	s.schedule(e, teamID, &next)
+	return s.view(teamID, next), nil
 }

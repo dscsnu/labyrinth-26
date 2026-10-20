@@ -19,6 +19,8 @@ export const GameShapeSchema = z.object({
 export const GameSchema = z.object({
     shapes: z.array(GameShapeSchema),
     max_pattern_points: z.number(),
+    // game.health: every team's starting health.
+    health: z.number(),
 });
 
 // The team_state event and GET /api/teams/me/state.
@@ -55,6 +57,10 @@ export const BossSchema = z.object({
     asset: z.string(),
     description: z.string(),
     hp: z.number(),
+    // Every attack_interval_s seconds of a team's phase against it, the boss
+    // takes attack_damage off the team's health.
+    attack_interval_s: z.number(),
+    attack_damage: z.number(),
 });
 export const BossListSchema = z.array(BossSchema);
 
@@ -72,8 +78,20 @@ export const TeamStateSchema = z.object({
     // Progress through the bosses: the current one (by serial, with the
     // damage dealt to it so far), or null once every boss is defeated.
     bosses_defeated: z.number(),
-    boss: z.object({ serial: z.number(), damage: z.number() }).nullable(),
+    boss: z.object({
+        serial: z.number(),
+        damage: z.number(),
+        // Its attack clock: when the phase began, attacks so far, and when it
+        // attacks next (null once the team is knocked out).
+        phase_started_at: z.string(),
+        attacks: z.number(),
+        next_attack_at: z.string().nullable(),
+    }).nullable(),
     damage_multiplier: z.number(),
+    // game.health less every boss attack; at 0 the team is knocked out
+    // (selecting and scanning refused) until an admin revives it.
+    health: z.number(),
+    knocked_out: z.boolean(),
     // How many casts the log holds; more than the client's copy means it
     // missed some and should re-fetch GET /api/teams/me/casts.
     cast_count: z.number(),

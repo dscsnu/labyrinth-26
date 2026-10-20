@@ -38,10 +38,21 @@ var square = []string{"1001", "1002", "1007", "1008"}
 // start is the fake clock's starting time.
 var start = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 
-// clock is a fake teamstate.Clock that tests set by hand.
+// clock is a fake teamstate.Clock that tests advance by hand. Timers (boss
+// attacks) fire only when at moves time past them, in order, never from
+// inside AfterFunc (the store calls AfterFunc holding a team's lock, and the
+// timer's callback takes that lock).
 type clock struct {
-	mu sync.Mutex
-	t  time.Time
+	mu     sync.Mutex
+	t      time.Time
+	timers []*fakeTimer
+}
+
+// fakeTimer is one pending AfterFunc call.
+type fakeTimer struct {
+	due     time.Time
+	f       func()
+	stopped bool
 }
 
 // Now returns the fake time.
@@ -51,11 +62,57 @@ func (c *clock) Now() time.Time {
 	return c.t
 }
 
-// at sets the fake time to d after start.
+// AfterFunc records f to run once the fake time reaches now + d.
+func (c *clock) AfterFunc(d time.Duration, f func()) func() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ft := &fakeTimer{due: c.t.Add(d), f: f}
+	c.timers = append(c.timers, ft)
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		was := !ft.stopped
+		ft.stopped = true
+		return was
+	}
+}
+
+// at sets the fake time to d after start, then runs every timer now due,
+// earliest first, including ones those runs schedule.
 func (c *clock) at(d time.Duration) {
 	c.mu.Lock()
 	c.t = start.Add(d)
 	c.mu.Unlock()
+	for {
+		c.mu.Lock()
+		var next *fakeTimer
+		for _, ft := range c.timers {
+			if !ft.stopped && !ft.due.After(c.t) && (next == nil || ft.due.Before(next.due)) {
+				next = ft
+			}
+		}
+		if next != nil {
+			next.stopped = true
+		}
+		c.mu.Unlock()
+		if next == nil {
+			return
+		}
+		next.f()
+	}
+}
+
+// pending counts timers not yet fired or stopped.
+func (c *clock) pending() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, ft := range c.timers {
+		if !ft.stopped {
+			n++
+		}
+	}
+	return n
 }
 
 // seedBosses is how many bosses the 2025 dev seed has; with another
@@ -95,7 +152,15 @@ type fixtureOptions struct {
 	sql string
 	// rules adjusts the rules from config.toml.
 	rules func(*teamstate.Rules)
+	// attacks keeps the seed's boss attack intervals. Without it every boss
+	// attacks only after neverAttack, so tests that move the clock by
+	// minutes see no attacks.
+	attacks bool
 }
+
+// neverAttack is the attack interval every seed boss gets unless a fixture
+// asks for attacks: far beyond any test's clock.
+const neverAttack = 10 * 365 * 24 * time.Hour // fits attack_interval_s (INTEGER)
 
 // started seeds the dev content and returns one IN_GAME team of teams.size
 // players, adjusted by opts.
@@ -120,6 +185,11 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	db := pgtest.Open(t, dbURL)
 	if err := db.SeedDev2025(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !o.attacks {
+		if _, err := db.Pool().Exec(ctx, "UPDATE boss SET attack_interval_s = $1", int(neverAttack/time.Second)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if o.sql != "" {
 		if _, err := db.Pool().Exec(ctx, o.sql); err != nil {
@@ -147,9 +217,20 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 			pgtest.Must(ts.SetReady(ctx, u, true))
 		}
 		pgtest.Must(ts.Start(ctx, ids[0]))
+		// Start the team at the fake clock's start, not Postgres's now(),
+		// so boss 1's attacks fall at start + k × its interval. teams reads
+		// started_at at load, so reload it.
+		if _, err := db.Pool().Exec(ctx, "UPDATE team SET started_at = $2 WHERE id = $1", team.ID, start); err != nil {
+			t.Fatal(err)
+		}
+		ts = pgtest.Must(teams.Load(ctx, db, hub, pgtest.Quiet, teams.Rules{
+			Size: set.Teams.Size, NameMaxLength: set.Teams.NameMaxLength,
+			WriteTimeout: set.Storage.WriteTimeout.Duration, CodeAttempts: set.Teams.CodeAttempts,
+		}))
 	}
 	rules := teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
+		Health:           set.Game.Health,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 		Epoch:            1, // a restart in a test passes another
 	}

@@ -82,7 +82,21 @@ type Cast struct {
 }
 
 // BossProgress is a team's progress through the bosses, which every team
-// fights in serial order. A value, so a State copy copies it.
+// fights in serial order, and the team's health, which they attack. A value,
+// so a State copy copies it.
+//
+// Health is derived, never stored as it changes. Each boss's phase begins at
+// PhaseStart with PhaseHealth (boss 1: the team's start with full health;
+// boss n+1: the cast that defeated boss n; or a revive), and the boss
+// attacks at PhaseStart + k × its interval, k = 1, 2, …. So at any time
+// (at):
+//
+//	Attacks = floor((at − PhaseStart) / interval)
+//	Health  = max(0, PhaseHealth − Attacks × attack damage)
+//
+// Only PhaseStart and PhaseHealth are persisted (team_boss); Attacks and
+// Health are recomputed by at, so a timer's attack is a memory-only change
+// that Load reproduces exactly.
 type BossProgress struct {
 	// Defeated is how many bosses the team has defeated; it's fighting the
 	// boss at index Defeated (serial Defeated+1), or none once Defeated is
@@ -96,13 +110,59 @@ type BossProgress struct {
 	// dealt (rounded to an integer). 1 unless something sets it; nothing
 	// does yet.
 	Multiplier float64
+	// PhaseStart is when the current boss's phase began.
+	PhaseStart time.Time
+	// PhaseHealth is the team's health when the phase began.
+	PhaseHealth int
+	// Attacks is how many times the current boss has attacked this phase,
+	// as of the last at; derived.
+	Attacks int
+	// Health is the team's health as of the last at; derived. At 0 the
+	// team is knocked out.
+	Health int
 }
 
-// deal applies a cast of the given damage to p, against bosses: the new
-// progress, the damage dealt (damage × multiplier, rounded), the serial of
-// the boss hit (0 if every boss is already defeated, in which case nothing
-// is dealt), and whether the cast defeated it.
-func deal(p BossProgress, damage int, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
+// KnockedOut reports whether the team's health is 0: it can't select or
+// scan, and nothing attacks it, until an admin revives it.
+func (p BossProgress) KnockedOut() bool { return p.Health <= 0 }
+
+// at returns p with Attacks and Health as of now, against bosses. Attacks
+// stop once the team is knocked out or has defeated every boss: then p is
+// returned as it is. A pure function of the stored phase and now, so
+// calling it again (a timer, a write, Load after a restart) gives the same
+// answer.
+func (p BossProgress) at(now time.Time, b Bosses) BossProgress {
+	if p.Defeated >= b.Count() || p.KnockedOut() {
+		return p
+	}
+	boss := b.At(p.Defeated)
+	interval := boss.AttackInterval()
+	attacks := 0
+	if elapsed := now.Sub(p.PhaseStart); elapsed > 0 {
+		attacks = int(elapsed / interval)
+	}
+	p.Attacks = attacks
+	p.Health = max(0, p.PhaseHealth-attacks*boss.AttackDamage)
+	return p
+}
+
+// nextAttack returns when the current boss attacks next: PhaseStart +
+// (Attacks+1) × its interval. ok is false if nothing will attack (every
+// boss defeated, or the team knocked out).
+func (p BossProgress) nextAttack(b Bosses) (at time.Time, ok bool) {
+	if p.Defeated >= b.Count() || p.KnockedOut() {
+		return time.Time{}, false
+	}
+	return p.PhaseStart.Add(time.Duration(p.Attacks+1) * b.At(p.Defeated).AttackInterval()), true
+}
+
+// deal applies a cast of the given damage at now to p, against bosses: the
+// new progress, the damage dealt (damage × multiplier, rounded), the serial
+// of the boss hit (0 if every boss is already defeated, in which case
+// nothing is dealt), and whether the cast defeated it. A defeat starts the
+// next boss's phase at now, with the team's current health. p must already
+// be at now.
+func deal(p BossProgress, damage int, now time.Time, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
 	if p.Defeated >= b.Count() {
 		return p, 0, 0, false
 	}
@@ -113,6 +173,7 @@ func deal(p BossProgress, damage int, b Bosses) (next BossProgress, dealt, seria
 	if next.Damage >= boss.HP {
 		next.Defeated++
 		next.Damage = 0 // the rest of this cast is lost
+		next.PhaseStart, next.PhaseHealth, next.Attacks = now, p.Health, 0
 		defeated = true
 	}
 	return next, dealt, boss.Serial, defeated
@@ -218,6 +279,12 @@ type View struct {
 	// DamageMultiplier is what each cast's damage is multiplied by before
 	// it's dealt to the boss (rounded): 1 unless something sets it.
 	DamageMultiplier float64 `json:"damage_multiplier"`
+	// Health is the team's health: game.health at the start, less every
+	// boss attack. At 0 the team is knocked out.
+	Health int `json:"health"`
+	// KnockedOut reports health 0: selecting and scanning are refused
+	// (knocked_out) and nothing attacks until an admin revives the team.
+	KnockedOut bool `json:"knocked_out"`
 	// CastCount is how many casts are in the team's cast log, repeats
 	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
 	// it when this is more than its length plus the cast it just saw.
@@ -256,6 +323,14 @@ type BossView struct {
 	Serial int `json:"serial"`
 	// Damage is what the team has dealt to it so far, below its HP.
 	Damage int `json:"damage"`
+	// PhaseStartedAt is when the team began fighting it (or was last
+	// revived): its attack clock counts from here.
+	PhaseStartedAt time.Time `json:"phase_started_at"`
+	// Attacks is how many times it has attacked this phase.
+	Attacks int `json:"attacks"`
+	// NextAttackAt is when it attacks next, or null if the team is knocked
+	// out. Clients count down to it on the server's clock (hello).
+	NextAttackAt *time.Time `json:"next_attack_at"`
 }
 
 // SelectionView is a Selection as JSON.
@@ -295,6 +370,9 @@ type DamageRange struct {
 type Game struct {
 	// Shapes are the selectable shapes, in index order.
 	Shapes []GameShape `json:"shapes"`
+	// Health is game.health: every team's starting health, and what a
+	// revive restores.
+	Health int `json:"health"`
 	// MaxPatternPoints is game.max_pattern_points.
 	MaxPatternPoints int `json:"max_pattern_points"`
 }
@@ -321,6 +399,7 @@ func newGame(a Atlas, r Rules) Game {
 	g := Game{
 		Shapes:           make([]GameShape, a.ShapeCount()),
 		MaxPatternPoints: r.MaxPatternPoints,
+		Health:           r.Health,
 	}
 	for i := range a.ShapeCount() {
 		sh := a.Shape(i)
@@ -372,7 +451,7 @@ func (s *Store) ForTeam(teamID string) State {
 	e := s.states[teamID]
 	s.mu.RUnlock()
 	if e == nil {
-		return s.emptyState()
+		return s.emptyState(teamID)
 	}
 	return *e.cur.Load()
 }
@@ -407,9 +486,15 @@ func (s *Store) view(teamID string, st State) View {
 	c := s.atlas
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{},
 		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version,
-		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier}
-	if st.Boss.Defeated < s.bosses.Count() {
-		v.Boss = &BossView{Serial: s.bosses.At(st.Boss.Defeated).Serial, Damage: st.Boss.Damage}
+		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier,
+		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut()}
+	if p := st.Boss; p.Defeated < s.bosses.Count() {
+		v.Boss = &BossView{Serial: s.bosses.At(p.Defeated).Serial, Damage: p.Damage,
+			PhaseStartedAt: p.PhaseStart.UTC(), Attacks: p.Attacks}
+		if next, ok := p.nextAttack(s.bosses); ok {
+			next = next.UTC()
+			v.Boss.NextAttackAt = &next
+		}
 	}
 	for _, p := range st.Patterns.Indexes() {
 		v.Patterns = append(v.Patterns, c.WaypointIDs(c.Pattern(p).Waypoints))

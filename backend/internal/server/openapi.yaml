@@ -317,6 +317,24 @@ paths:
           $ref: "#/components/responses/Error"
           description: "Codes: `last_member`, `new_leader_required`, `invalid_new_leader`"
 
+  /api/admin/teams/{team_id}/revive:
+    post:
+      tags: [admin]
+      summary: Revive a team
+      description: |
+        Restores a started team's health to `game.health` (10) and restarts its current boss's attack clock
+        from now: the boss's attacks so far no longer count, and the next comes one `attack_interval_s` later.
+        Works whether or not the team is knocked out (so it also heals). Members get `team_state` of type
+        `revived`. Returns the team's state. Logged with the admin's ID.
+      parameters:
+        - { name: team_id, in: path, required: true, schema: { type: string }, example: "482913" }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found` (any malformed ID too)" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+
   /api/game/shapes:
     get:
       tags: [game]
@@ -408,7 +426,7 @@ paths:
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_shape`, `not_in_team`" }
-        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`, `knocked_out`" }
     delete:
       tags: [game]
       summary: Give up the selection
@@ -458,7 +476,7 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
         "409":
           $ref: "#/components/responses/Error"
-          description: "Codes: `not_in_game`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`"
+          description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`"
 
   /api/qr/{waypoint_id}:
     get:
@@ -557,7 +575,7 @@ paths:
         | `hello` | stream | `HelloEvent` | `connected` |
         | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `revived`, `resync` |
 
         ```
         retry: 3412
@@ -669,11 +687,13 @@ components:
         `shape_selected` (a spell attempt starts; the stack was purged), `selection_cleared`, `scan_added`,
         `wrong_scan` (the attempt is now `poisoned`), `spell_cast` (`last_cast` is the new cast, `cast_count`
         went up, the selection and stack were purged, its damage went to the current boss), `boss_defeated` (a
-        `spell_cast` that defeated the boss: `bosses_defeated` went up and `boss` is the next one, or null),
+        `spell_cast` that defeated the boss: `bosses_defeated` went up and `boss` is the next one, or null, whose
+        attack clock starts now), `boss_attacked` (the boss's interval passed, with nobody acting: `health` down,
+        `boss.attacks` up), `knocked_out` (an attack brought `health` to 0), `revived` (an admin revived the team),
         `resync` (reloaded after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, revived, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
     Version:
       type: object
@@ -759,11 +779,12 @@ components:
 
     Game:
       type: object
-      required: [shapes, max_pattern_points]
+      required: [shapes, health, max_pattern_points]
       properties:
         shapes:
           type: array
           items: { $ref: "#/components/schemas/GameShape" }
+        health: { type: integer, description: "game.health: every team's starting health, and what a revive restores.", example: 10 }
         max_pattern_points: { type: integer, description: "game.max_pattern_points: the most waypoints in any pattern.", example: 6 }
     GameShape:
       type: object
@@ -783,7 +804,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, cast_count, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, cast_count, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
@@ -828,10 +849,33 @@ components:
           oneOf:
             - type: "null"
             - type: object
-              required: [serial, damage]
+              required: [serial, damage, phase_started_at, attacks, next_attack_at]
               properties:
                 serial: { type: integer, minimum: 1, example: 2 }
                 damage: { type: integer, minimum: 0, example: 107 }
+                phase_started_at:
+                  type: string
+                  format: date-time
+                  description: When the team began fighting it (or was last revived); its attack clock counts from here.
+                attacks: { type: integer, minimum: 0, description: How many times it has attacked this phase., example: 1 }
+                next_attack_at:
+                  type: ["string", "null"]
+                  format: date-time
+                  description: >-
+                    When it attacks next (phase_started_at + (attacks + 1) × its attack_interval_s), or null if the
+                    team is knocked out. Clients count down to it on the server's clock (`hello`).
+        health:
+          type: integer
+          minimum: 0
+          description: >-
+            The team's health: `game.health` (10) at the start, less every boss attack. Derived from the boss phase
+            and the clock, so it drops with nobody acting (`boss_attacked`).
+          example: 9
+        knocked_out:
+          type: boolean
+          description: >-
+            Health is 0: selecting and scanning are refused (`knocked_out`) and nothing attacks until an admin
+            revives the team (`POST /api/admin/teams/{team_id}/revive`).
         damage_multiplier:
           type: number
           exclusiveMinimum: 0
@@ -870,13 +914,19 @@ components:
         defeated_boss: { type: boolean, description: This cast defeated that boss. }
     Boss:
       type: object
-      required: [serial, name, asset, description, hp]
+      required: [serial, name, asset, description, hp, attack_interval_s, attack_damage]
       properties:
         serial: { type: integer, minimum: 1, description: "Its place in the sequence: 1 is fought first.", example: 1 }
         name: { type: string, example: Matthew Patel }
         asset: { type: string, description: "A key the frontend resolves to the boss's image; not a URL.", example: bosses/1.png }
         description: { type: string }
         hp: { type: integer, minimum: 1, description: The damage a team must deal to defeat it., example: 200 }
+        attack_interval_s:
+          type: integer
+          minimum: 1
+          description: How often it attacks, in seconds of a team's phase against it.
+          example: 300
+        attack_damage: { type: integer, minimum: 0, description: What each attack takes off the team's health., example: 1 }
     StackScan:
       type: object
       required: [waypoint_id, user_id, scanned_at, wrong]

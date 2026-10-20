@@ -22,13 +22,14 @@ import (
 //
 //	atlas     Atlas                    static waypoints/shapes/patterns (atlas use case), no lock
 //	bosses    Bosses                   the static boss sequence (bosses use case), no lock
-//	clock     Clock                    the time scans and casts are stamped with
+//	clock     Clock                    the time scans and casts are stamped with, and boss attack timers
 //	Store.mu (RWMutex) guards:
 //	  states  map[teamID]*entry        created on a team's first write
 //	entry
 //	  mu          Mutex                writers to this team's state queue here
 //	  cur         atomic.Pointer[State] the current snapshot; readers load it lock-free
 //	  members     []uuid.UUID          the roster events go to, cached on first publish, dropped by RosterChanged (under mu)
+//	  stopAttack  func() bool          cancels the pending boss attack timer, or nil (under mu)
 //
 // A State is fixed size (bitsets, a selection and a fixed-array stack), so a
 // new snapshot is a plain struct copy.
@@ -42,22 +43,37 @@ type entry struct {
 	// when an admin removes a member. Nil until the next publish refills it.
 	// Guarded by mu.
 	members []uuid.UUID
+	// stopAttack cancels the team's pending boss attack timer (schedule), or
+	// is nil if none is pending. Guarded by mu.
+	stopAttack func() bool
+	// closed is set by Close: no timer is armed again, and one already
+	// running does nothing. Guarded by mu.
+	closed bool
 }
 
-// Clock is where the store gets the time it stamps scans, selections and
-// casts with. systemClock is the real one; tests pass a fake they set by
-// hand. Nothing in the game depends on time passing: there's no time limit.
+// Clock is where the store gets time: what it stamps scans, selections and
+// casts with, and timers for boss attacks, the one change caused by time
+// passing rather than by someone acting. systemClock is the real one; tests
+// pass a fake they advance by hand.
 type Clock interface {
 	// Now returns the current time, in UTC truncated to microseconds
 	// (Postgres's precision), so a restart reproduces times exactly.
 	Now() time.Time
+	// AfterFunc calls f in its own goroutine after d (at once if d <= 0),
+	// and returns a function that cancels the call if it hasn't run yet.
+	AfterFunc(d time.Duration, f func()) (stop func() bool)
 }
 
-// systemClock is the real Clock.
+// systemClock is the real Clock: time.Now and time.AfterFunc.
 type systemClock struct{}
 
 // Now returns the current time in UTC, truncated to microseconds.
 func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+
+// AfterFunc schedules f with time.AfterFunc.
+func (systemClock) AfterFunc(d time.Duration, f func()) func() bool {
+	return time.AfterFunc(d, f).Stop
+}
 
 // Teams is what team state needs from the teams use case. A team only gets
 // state once it's IN_GAME, and an IN_GAME team's status never goes back, so
@@ -67,6 +83,9 @@ func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Micro
 type Teams interface {
 	ForUser(userID uuid.UUID) (teams.Team, error)
 	ByID(teamID string) (teams.Team, bool)
+	// All is every team; Load uses it to arm every started team's attack
+	// timer, including teams that haven't written anything yet.
+	All() []teams.Team
 }
 
 // Atlas is what team state needs from the atlas use case: the static
@@ -101,6 +120,9 @@ type Rules struct {
 	// (game.max_pattern_points); the stack holds that many plus one wrong
 	// scan.
 	MaxPatternPoints int
+	// Health is every team's starting health, and what a revive restores
+	// (game.health).
+	Health int
 	// WriteTimeout bounds each write-through (storage.write_timeout).
 	WriteTimeout time.Duration
 	// Clock is the store's time source; nil means the real one
@@ -134,8 +156,10 @@ type Store struct {
 // now returns the store's current time.
 func (s *Store) now() time.Time { return s.clock.Now() }
 
-// Load reads every team's stored state, checking it against a. Call once at
-// startup, after atlas.Load and teams.Load.
+// Load reads every team's stored state, checking it against a and b, brings
+// each started team's boss attacks up to now (any that fell due while the
+// backend was down), and arms each one's attack timer. Call once at startup,
+// after atlas.Load, bosses.Load and teams.Load; Close stops the timers.
 func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
 	d := db{pool: pg.Pool()}
 	stored, err := d.selectTeams(ctx, "", rules.MaxPatternPoints+1)
@@ -148,7 +172,7 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, hub 
 		s.clock = systemClock{}
 	}
 	for teamID, rows := range stored {
-		st, err := s.stateOf(rows)
+		st, err := s.stateOf(teamID, rows)
 		if err != nil {
 			return nil, fmt.Errorf("team %s state: %w", teamID, err)
 		}
@@ -156,21 +180,61 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, hub 
 		e.cur.Store(&st)
 		s.states[teamID] = e
 	}
+	// Every started team is attacked, including ones with nothing stored
+	// yet. The map is complete before any timer is armed, so no timer runs
+	// against a half-built store.
+	for _, team := range t.All() {
+		if team.Status == teams.InGame {
+			e := s.lockTeam(team.ID)
+			e.mu.Unlock()
+		}
+	}
+	for teamID, e := range s.states {
+		e.mu.Lock()
+		s.schedule(e, teamID, e.cur.Load())
+		e.mu.Unlock()
+	}
 	log.Info("loaded team state", "teams", len(s.states))
 	return s, nil
 }
 
-// emptyState is the state of a team that hasn't done anything: no progress,
-// no selection, an empty stack of the configured capacity, and the first
-// version of this process's epoch (seq 0).
-func (s *Store) emptyState() State {
-	return State{Stack: NewStack(s.rules.MaxPatternPoints), Boss: BossProgress{Multiplier: 1}, Version: live.Version{Epoch: s.rules.Epoch}}
+// Close stops every pending attack timer. Call on shutdown, and before a
+// test loads another store on the same database, so a stopped store never
+// attacks.
+func (s *Store) Close() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.states {
+		e.mu.Lock()
+		if e.stopAttack != nil {
+			e.stopAttack()
+			e.stopAttack = nil
+		}
+		e.closed = true
+		e.mu.Unlock()
+	}
 }
 
-// stateOf rebuilds a State from stored IDs, failing on any ID the atlas
-// doesn't have.
-func (s *Store) stateOf(rows *teamRows) (State, error) {
-	st := s.emptyState()
+// emptyState is the state of a team that hasn't done anything: no progress,
+// no selection, an empty stack of the configured capacity, full health and
+// the first version of this process's epoch (seq 0). Its boss phase starts
+// at the team's start (or now, for a team that hasn't started), and is then
+// brought up to now.
+func (s *Store) emptyState(teamID string) State {
+	start := s.now()
+	if t, ok := s.teams.ByID(teamID); ok && t.StartedAt != nil {
+		start = t.StartedAt.UTC()
+	}
+	st := State{Stack: NewStack(s.rules.MaxPatternPoints), Version: live.Version{Epoch: s.rules.Epoch},
+		Boss: BossProgress{Multiplier: 1, PhaseStart: start, PhaseHealth: s.rules.Health, Health: s.rules.Health}}
+	st.Boss = st.Boss.at(s.now(), s.bosses)
+	return st
+}
+
+// stateOf rebuilds teamID's State from stored IDs, failing on any ID the
+// atlas doesn't have, and brings its boss attacks up to now.
+func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
+	st := s.emptyState(teamID)
 	var err error
 	if st.Waypoints, err = s.atlas.SetOf(rows.waypoints); err != nil {
 		return st, err
@@ -204,7 +268,15 @@ func (s *Store) stateOf(rows *teamRows) (State, error) {
 		if bp.defeated > s.bosses.Count() {
 			return st, fmt.Errorf("team_boss: %d bosses defeated, but game.bosses is %d", bp.defeated, s.bosses.Count())
 		}
-		st.Boss = BossProgress{Defeated: bp.defeated, Damage: bp.damage, Multiplier: bp.multiplier}
+		st.Boss.Defeated, st.Boss.Damage, st.Boss.Multiplier = bp.defeated, bp.damage, bp.multiplier
+		if bp.phaseHealth != nil {
+			st.Boss.PhaseHealth = *bp.phaseHealth
+		}
+		if bp.phaseStartedAt != nil {
+			st.Boss.PhaseStart = bp.phaseStartedAt.UTC()
+		}
+		st.Boss.Health = st.Boss.PhaseHealth
+		st.Boss = st.Boss.at(s.now(), s.bosses)
 	}
 	for _, sc := range rows.stack {
 		w, ok := s.atlas.WaypointIndex(sc.waypointID)
@@ -226,7 +298,7 @@ func (s *Store) lockTeam(teamID string) *entry {
 		s.mu.Lock()
 		if e = s.states[teamID]; e == nil {
 			e = &entry{}
-			st := s.emptyState()
+			st := s.emptyState(teamID)
 			e.cur.Store(&st)
 			s.states[teamID] = e
 		}
@@ -234,6 +306,27 @@ func (s *Store) lockTeam(teamID string) *entry {
 	}
 	e.mu.Lock()
 	return e
+}
+
+// schedule arms teamID's attack timer for st's next boss attack, replacing
+// any pending one, or just cancels it if nothing will attack (every boss
+// defeated, the team knocked out) or the store is closed. The caller holds
+// e.mu, and calls it after every apply that can move the next attack: a
+// cast, an attack, a revive, a reconcile, and at load and start. A timer
+// that fires early or late is harmless: attack recomputes from the clock.
+func (s *Store) schedule(e *entry, teamID string, st *State) {
+	if e.stopAttack != nil {
+		e.stopAttack()
+		e.stopAttack = nil
+	}
+	if e.closed {
+		return
+	}
+	next, ok := st.Boss.nextAttack(s.bosses)
+	if !ok {
+		return
+	}
+	e.stopAttack = s.clock.AfterFunc(next.Sub(s.now()), func() { s.attack(teamID) })
 }
 
 // persist is the write-through step: it runs a db.go write detached from the
@@ -259,10 +352,11 @@ func (s *Store) reconcile(e *entry, teamID string, writeErr error) error {
 			rows = &teamRows{} // nothing stored: the empty State
 		}
 		var st State
-		if st, err = s.stateOf(rows); err == nil {
+		if st, err = s.stateOf(teamID, rows); err == nil {
 			st.Version = e.cur.Load().Version.Next(s.rules.Epoch) // never back, even on a reload
 			e.cur.Store(&st)
 			s.publish(e, teamID, &st, live.Resync)
+			s.schedule(e, teamID, &st)
 			return writeErr
 		}
 	}
@@ -328,6 +422,15 @@ const (
 	SpellCast live.EventType = "spell_cast"
 	// BossDefeated: a SpellCast whose damage defeated the current boss:
 	// bosses_defeated went up and boss is the next one (or null after the
-	// last).
+	// last), whose attack clock starts now.
 	BossDefeated live.EventType = "boss_defeated"
+	// BossAttacked: the current boss attacked (its interval passed), with
+	// nobody acting: health went down and boss.attacks up.
+	BossAttacked live.EventType = "boss_attacked"
+	// KnockedOut: a BossAttacked that brought health to 0: knocked_out is
+	// true, and selecting and scanning are refused until a revive.
+	KnockedOut live.EventType = "knocked_out"
+	// Revived: an admin revived the team: health is back to game.health and
+	// the current boss's attack clock starts again.
+	Revived live.EventType = "revived"
 )

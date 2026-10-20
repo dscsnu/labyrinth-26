@@ -1,5 +1,7 @@
 package bosses
 
+import "time"
+
 // Boss is one boss, as GET /api/game/bosses shows it.
 type Boss struct {
 	// Serial is its place in the sequence: 1 is fought first.
@@ -13,7 +15,15 @@ type Boss struct {
 	Description string `json:"description"`
 	// HP is the damage a team must deal to defeat it.
 	HP int `json:"hp"`
+	// AttackIntervalS is how often it attacks, in seconds: every
+	// AttackIntervalS of a team's phase against it.
+	AttackIntervalS int `json:"attack_interval_s"`
+	// AttackDamage is what each attack takes off the team's health.
+	AttackDamage int `json:"attack_damage"`
 }
+
+// AttackInterval is AttackIntervalS as a Duration.
+func (b Boss) AttackInterval() time.Duration { return time.Duration(b.AttackIntervalS) * time.Second }
 
 // Bosses is the sequence every team fights, in memory. Read-only after New,
 // so safe for concurrent use without locks.

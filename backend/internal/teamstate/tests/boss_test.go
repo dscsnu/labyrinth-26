@@ -42,6 +42,7 @@ func (f *fixtureEnv) castSquare(t *testing.T, round int) teamstate.ScanResult {
 // would, and makes it the fixture's store.
 func (f *fixtureEnv) restart(t *testing.T) {
 	t.Helper()
+	f.state.Close() // the old store must not attack once replaced
 	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, f.rules))
 }
 

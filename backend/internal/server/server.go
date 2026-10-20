@@ -92,6 +92,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	}, log)
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
+		Health:           set.Game.Health,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 		Epoch:            epoch,
 	})
@@ -122,7 +123,9 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	teamsAPI := teams.NewAPI(teamStore, log)
 	teamsAPI.Routes(mux, authAPI.Authed)
 	teamsAPI.AdminRoutes(mux, admin)
-	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
+	stateAPI := teamstate.NewAPI(stateStore, log)
+	stateAPI.Routes(mux, authAPI.Authed)
+	stateAPI.AdminRoutes(mux, admin)
 	bosses.NewAPI(theBosses).Routes(mux, authAPI.Authed)
 	qrAPI := qr.NewAPI(qr.New(cfg.QRSecret, qr.Rules{
 		Rotate:    set.QR.Rotate.Duration,

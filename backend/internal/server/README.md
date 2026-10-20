@@ -56,13 +56,13 @@ Every number below that comes from `config.toml` is shown with its current value
 | 12 | `server.Build` | Loads memory from Postgres and builds the routes (see [`server.go`](#servergo)). |
 | 13 | Login code sweep | `go cleanupLoginCodes(...)`: every **10 m** (`auth.login_code_sweep`) deletes expired, unredeemed login codes. The first sweep is one interval after startup, not at startup. |
 | 14 | `http.Server` | `Addr ":" + PORT` (default `3000`), `ReadHeaderTimeout` **10 s** (`server.read_header_timeout`), `ReadTimeout` **30 s** (`server.read_timeout`), `IdleTimeout` **2 m** (`server.idle_timeout`). No `WriteTimeout`: event streams are long-lived. `live.Serve` clears the read deadline once a stream starts. |
-| 15 | Shutdown hook | `srv.RegisterOnShutdown(app.Hub.Close)`. |
+| 15 | Shutdown hooks | `srv.RegisterOnShutdown(app.Hub.Close)`, then `srv.RegisterOnShutdown(app.TeamState.Close)`: no boss attack timer fires once shutting down (it would publish to closed streams). |
 | 16 | Serve | `ListenAndServe` in a goroutine, logging `listening addr=:3000`. |
 | 17 | Wait | For a signal, for `lock.Lost()` to close, or for `ListenAndServe` to fail (e.g. port in use), whose error is returned at once. |
 
 **Shutdown**, on `SIGINT`, `SIGTERM` or a lost instance lock:
 1. On a lost lock, logs `instance lock lost; shutting down` (error). Then logs `shutting down`. In both cases `ctx` is cancelled (a lost lock calls `stop()`), so the sweep goroutine returns.
-2. `srv.Shutdown` with a **10 s** (`server.shutdown_timeout`) deadline. It closes the listener, runs `Hub.Close` (which closes every subscription channel, so every `live.Serve` returns), then waits for in-flight requests.
+2. `srv.Shutdown` with a **10 s** (`server.shutdown_timeout`) deadline. It closes the listener, runs the hooks (`Hub.Close`, which closes every subscription channel, so every `live.Serve` returns; `TeamState.Close`, which stops every boss attack timer), then waits for in-flight requests. Attacks need no flush: they're derived, and the next start recomputes them.
 3. Deferred, in this order: cancel the shutdown context, release the instance lock (`pg_advisory_unlock` on its own connection), close the pool, stop signal capture.
 4. `run` returns `errors.Join(lockErr, Shutdown's error)`. Exit `0` after a signal if `Shutdown` returned `nil`. After a lost lock, always exit `1` with `lost the instance lock` (`postgres.ErrInstanceLockLost`). If in-flight requests outlast **10 s**, `Shutdown` returns `context deadline exceeded` and the process exits `1`.
 
@@ -95,13 +95,13 @@ Every number below that comes from `config.toml` is shown with its current value
   6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`. Then `bosses.Load(ctx, db, log, bosses.Rules{Count: game.bosses})`: reads and validates the boss sequence once (exactly serials 1…`game.bosses`, or an empty table). An error (`load bosses: …`, `invalid bosses: …`) is returned as is. See `internal/bosses/README.md`.
   7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart, OnRosterChange})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `OnRosterChange` is `func(t) { stateStore.RosterChanged(t.ID) }`, the roster hook. `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start, and no admin can remove anyone, before `Build` returns and routes are served.
   8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
-  9. `teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas and the bosses. It needs the atlas (`Atlas` interface), the bosses (`Bosses` interface) and `teamStore` (`Teams` interface), so it runs after steps 6 and 7.
+  9. `teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas and the bosses, applies any boss attacks that fell due while the backend was down, and arms every started team's attack timer. `Rules` gets `MaxPatternPoints`, `Health` (`game.health`), `WriteTimeout` and `Epoch`. It needs the atlas (`Atlas` interface), the bosses (`Bosses` interface) and `teamStore` (`Teams` interface, including `All`), so it runs after steps 6 and 7.
   10. The `App` (with `Atlas: theAtlas`, and a `live.Streamer` from `live.heartbeat`, `live.write_timeout`, `live.retry_min` and `live.retry_max`), then a `http.ServeMux` with, in this order:
      - `GET /healthz` (no auth)
      - `GET /openapi.yaml` and `GET /docs` (no auth; see [API docs](#api-docs-openapi))
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
      - `user`, `teams`, `teamstate`, `bosses`: each `NewAPI(…).Routes(mux, authAPI.Authed)` (`atlas` has no routes)
-     - the admin routes: `admin := func(h) { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }`, then `teamsAPI.AdminRoutes(mux, admin)` (`GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}`)
+     - the admin routes: `admin := func(h) { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }`, then `teamsAPI.AdminRoutes(mux, admin)` (`GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}`) and `stateAPI.AdminRoutes(mux, admin)` (`POST /api/admin/teams/{team_id}/revive`)
      - `GET /api/events`, wrapped in `authAPI.RequireStreamAuth` (Bearer or the `labyrinth_token` cookie)
   11. `App.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), server.max_body_bytes)`.
 - **`envelopeUnrouted(mux)`** wraps the mux. For each request it asks `mux.Handler(r)` for the matching pattern:
@@ -127,6 +127,7 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `teams.code_attempts` | 10 | `teams.Rules.CodeAttempts` |
 | `game.max_pattern_points` | 6 | `atlas.Rules.MaxPatternPoints` and `teamstate.Rules.MaxPatternPoints` |
 | `game.bosses` | 7 | `bosses.Rules.Count` |
+| `game.health` | 10 | `teamstate.Rules.Health` |
 | `auth.token_ttl` | 12 h | `auth.NewTokens` |
 | `auth.login_code_ttl` | 2 m | `auth.NewLoginCodes` |
 | `auth.oauth_state_ttl` | 10 m | read by `auth.API` from `cfg.Settings` (state token TTL and cookie `MaxAge`) |
@@ -270,7 +271,10 @@ data: {"type":"snapshot","message":{"team_id":"482913","waypoints":[],"patterns"
 | | `scan_added` | a scan joined the stack | members | show who scanned (`stack[].user_id`) |
 | | `wrong_scan` | a scan joined the stack marked `wrong`; `poisoned` is `true` | members | tell the team, offer a reselect |
 | | `spell_cast` | a scan completed a pattern: `last_cast` is the new cast, `cast_count` went up, selection and stack purged, its `dealt` damage went to the current `boss` | members | play the cast, prepend `last_cast` to the log |
-| | `boss_defeated` | a `spell_cast` whose damage defeated the boss: `bosses_defeated` went up, `boss` is the next one at 0 damage (or `null` after the last) | members | celebrate the defeat, as well as everything `spell_cast` does |
+| | `boss_defeated` | a `spell_cast` whose damage defeated the boss: `bosses_defeated` went up, `boss` is the next one at 0 damage (or `null` after the last), whose attack clock starts now | members | celebrate the defeat, as well as everything `spell_cast` does |
+| | `boss_attacked` | **with nobody acting**: the current boss's attack interval passed (one or more attacks): `health` went down, `boss.attacks` up, `boss.next_attack_at` moved on | members | show the hit, restart the countdown |
+| | `knocked_out` | a `boss_attacked` that brought `health` to 0: `knocked_out` is `true`, `next_attack_at` `null`; selecting and scanning are refused | members | show the knocked-out banner, disable play |
+| | `revived` | an admin revived the team: `health` is `game.health` again and the boss's attack clock restarted | members | clear the banner, enable play |
 | | `resync` | reloaded after a failed write | members | render |
 
 `no_team` of any type means: clear both the team and its team state.
@@ -323,7 +327,10 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     "cast_by": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b04",
     "cast_at": "2026-10-17T12:00:12Z",
     "already_completed": false,
-    "damage": 107
+    "damage": 107,
+    "dealt": 107,
+    "boss": 1,
+    "defeated_boss": false
   },
   "stack": [
     {"waypoint_id": "1001", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b01", "scanned_at": "2026-10-17T12:05:10Z", "wrong": false},
@@ -331,6 +338,11 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     {"waypoint_id": "1004", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "scanned_at": "2026-10-17T12:09:40Z", "wrong": true}
   ],
   "poisoned": true,
+  "bosses_defeated": 0,
+  "boss": {"serial": 1, "damage": 107, "phase_started_at": "2026-10-17T12:00:00Z", "attacks": 2, "next_attack_at": "2026-10-17T12:15:00Z"},
+  "damage_multiplier": 1,
+  "health": 8,
+  "knocked_out": false,
   "cast_count": 1,
   "version": {"epoch": 1760687400000, "seq": 9}
 }
@@ -346,6 +358,11 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
 | `stack` | the attempt's scans, bottom (oldest) first, until it casts or the team selects again. No time limit: nothing leaves it with time |
 | `stack[].wrong` | the scan's waypoint, with the scans below it, can't be part of any pattern of the selected shape. At most one, always the top |
 | `poisoned` | a scan in `stack` is `wrong`: further scans are refused with `409 selection_poisoned` until someone selects again, which purges the stack |
+| `bosses_defeated` | how many bosses the team has defeated |
+| `boss` | the boss being fought: `serial` (its name, HP, attacks in `GET /api/game/bosses`), `damage` dealt to it so far, `phase_started_at` (when the team began fighting it, or was last revived), `attacks` (how many times it has attacked since), `next_attack_at` (when it attacks next; `null` when knocked out). `null` once every boss is defeated |
+| `damage_multiplier` | what each cast's damage is multiplied by (rounded) before it's dealt; 1 unless something sets it |
+| `health` | the team's health: **10** (`game.health`) at the start, less every boss attack. Derived from the phase and the clock, so it drops with nobody acting |
+| `knocked_out` | `health` is 0: selecting and scanning are refused (`409 knocked_out`) and nothing attacks until an admin revives the team |
 | `cast_count` | how many casts the team's log holds, repeats included (see [Versioning](#versioning-and-the-cast-log)) |
 | `version` | orders this team's `team_state` snapshots (see [Versioning](#versioning-and-the-cast-log)) |
 
@@ -400,10 +417,13 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 | teamstate `POST …/scans`, outcome `wrong_scan` | `team_state: wrong_scan` (the scan marked `wrong`, `poisoned` `true`) | members |
 | teamstate `POST …/scans`, outcome `pattern_completed` (a cast) | `team_state: spell_cast` (selection `null`, stack `[]`, new `last_cast`, `cast_count` + 1, `boss.damage` up by `last_cast.dealt`) | members |
 | teamstate `POST …/scans`, a cast that brings the boss to its HP | `team_state: boss_defeated` (as `spell_cast`, plus `bosses_defeated` + 1 and `boss` the next one, or `null`) | members |
+| teamstate's attack timer, **nobody acting**: a boss attack fell due | `team_state: boss_attacked` (`health` down, `boss.attacks` up), or `knocked_out` when `health` reached 0 | members |
+| any teamstate write (select, clear, scan, revive) when an attack fell due that the timer hasn't applied yet | first `team_state: boss_attacked` / `knocked_out` (catch-up), then the write's own event | members |
+| admin `POST /api/admin/teams/{team_id}/revive` | `team_state: revived` (`health` back to `game.health`, a fresh attack clock) | members |
 | teamstate write fails to persist (`reconcile`) | `team_state: resync`, reloaded from Postgres (nothing if the reload fails too) | members |
-| Any rejection (`4xx`) or `500` before persisting | nothing | |
+| Any rejection (`4xx`) or `500` before persisting | nothing (except a catch-up attack applied before the rejection, which is its own change) | |
 
-Nothing is published because time passed: there's no time limit, so every `team_state` follows a request (or a start, or a reconcile).
+**The one thing published because time passed is a boss attack.** Every boss attacks every `attack_interval_s` of a team's phase; teamstate arms a timer per started team and publishes `boss_attacked` (or `knocked_out`) itself, with nobody acting (AGENTS.md §9: the server owns time). Health is derived from the phase and the clock, so the attack writes nothing to Postgres. Several attacks applied at once (a late timer, or attacks that fell due while the backend was down, applied at `Load` and seen in the `snapshot`) are one event. Everything else follows a request (or a start, or a reconcile).
 
 The HTTP response to a write carries the same JSON as its event's `message` (`ScanResult.state` for a scan), with the same `version`, but on a different connection: a client may see either first, and keeps the one with the higher version (equal: the same state).
 
@@ -444,13 +464,13 @@ A client that stops reading (a phone that lost signal without closing the connec
 ### Client integration
 What a client must do to use the stream as designed.
 
-**Where the frontend is.** `/team` and `/play` read the envelope (`envelope(schema)` in `frontend/src/lib/types/Live.type.ts`) and keep a copy only if it's newer (`isNewer`, step 3): `team` by `version` (or always when it's another team), `team_state` by `version` for stream events and write responses alike. `/play` prepends each new `last_cast`, re-fetches the log through `/play/casts` when `cast_count` is more than it holds (step 4), and says "<boss> defeated!" on a `boss_defeated` event. Step 1 isn't done yet: each page opens its own `EventSource`.
+**Where the frontend is.** `/team` and `/play` read the envelope (`envelope(schema)` in `frontend/src/lib/types/Live.type.ts`) and keep a copy only if it's newer (`isNewer`, step 3): `team` by `version` (or always when it's another team), `team_state` by `version` for stream events and write responses alike. `/play` prepends each new `last_cast`, re-fetches the log through `/play/casts` when `cast_count` is more than it holds (step 4), says "<boss> defeated!" on a `boss_defeated` event, "<boss> attacked! Health n/10" on `boss_attacked`, a knocked-out message on `knocked_out` and "Revived" on `revived`, and counts down to `boss.next_attack_at` on the `hello` clock. Step 1 isn't done yet: each page opens its own `EventSource`.
 
 1. **One connection for the app.** Open a single `EventSource` when the user is signed in, in the root layout (`frontend/src/routes/+layout.svelte`), held in a shared module (for example `frontend/src/lib/live.svelte.ts`), instead of one per page. Pages read from that module; navigating between pages doesn't reconnect. (Not done yet: `/team` and `/play` each open their own.)
 2. **Register events by name, unwrap the envelope.** One zod schema per event: `type` as an enum, `message` as the payload's schema. Keep the newest `message` of each. `no_team` clears both `team` and `team_state`. Game-wide events (later) carry `message: null` when nothing is active.
 3. **Keep the newest copy by `version`**, for `team` and for `team_state` separately, whether it came from the stream or a write response ([the rule](#versioning-and-the-cast-log)).
-4. **Use `type` for moments, `message` for state.** Play the cast on `spell_cast` (and `boss_defeated`, which is a cast too), celebrate on `boss_defeated`, toast on `member_joined`, offer a reselect on `wrong_scan`; render everything from `message`. On `spell_cast`, prepend `last_cast` to the cast log; when `cast_count` exceeds the log's length, re-fetch `GET /api/teams/me/casts`.
-5. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`). On every `hello`: offset = `Date.parse(message.server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead. The game has no time limit; `/play` uses the clock for "scanned 2 min ago" labels.
+4. **Use `type` for moments, `message` for state.** Play the cast on `spell_cast` (and `boss_defeated`, which is a cast too), celebrate on `boss_defeated`, flash a hit on `boss_attacked`, show a banner on `knocked_out` and clear it on `revived`, toast on `member_joined`, offer a reselect on `wrong_scan`; render everything from `message`. On `spell_cast`, prepend `last_cast` to the cast log; when `cast_count` exceeds the log's length, re-fetch `GET /api/teams/me/casts`.
+5. **Measure time with `hello` only** (`frontend/src/lib/game/serverClock.ts`, `ServerClock`). On every `hello`: offset = `Date.parse(message.server_time)` − localNow, where localNow = `performance.timeOrigin + performance.now()` (monotonic, never jumps with the wall clock). Server now = localNow + offset. Every reconnect re-measures it; before the first `hello` the offset is 0. The estimate runs behind the server by the delay `hello` took, never ahead. The game has no time limit on an attempt; `/play` uses the clock for "scanned 2 min ago" labels and for the countdown to `boss.next_attack_at`. The countdown only displays: the attack arrives as `boss_attacked` when the server applies it.
 6. **Open `/api/events` on the frontend's origin.** In production the shared domain's reverse proxy routes it to the backend, which reads the `labyrinth_token` cookie; in dev, Vite's proxy does (`frontend/vite.config.ts`).
 7. **Keep reconnection as is.** No catch-up logic: every connect starts with complete snapshots (type `snapshot`), and step 3 sorts out anything that arrives out of order.
 
@@ -468,7 +488,8 @@ const envelope = <T extends z.ZodTypeAny, K extends [string, ...string[]]>(types
 const TeamEvent = envelope(["snapshot", "created", "member_joined", "member_left", "leader_changed",
     "member_removed", "ready_changed", "started", "profile_updated", "resync"], TeamSchema);
 const TeamStateEvent = envelope(["snapshot", "game_started", "shape_selected", "selection_cleared",
-    "scan_added", "wrong_scan", "spell_cast", "boss_defeated", "resync"], TeamStateSchema);
+    "scan_added", "wrong_scan", "spell_cast", "boss_defeated", "boss_attacked", "knocked_out", "revived",
+    "resync"], TeamStateSchema);
 
 // Keep an incoming copy if the backend restarted (new epoch) or it's newer.
 const newer = (incoming: Version, held?: Version) =>
@@ -481,6 +502,7 @@ events.addEventListener("team_state", (e) => {
     state = message;                                     // render from message
     if (type === "spell_cast" || type === "boss_defeated") playCast(message.last_cast!);
     if (type === "boss_defeated") celebrate(message.last_cast!.boss!);
+    if (type === "boss_attacked" || type === "knocked_out") flashHit(message.health);
     if (message.cast_count > casts.length) refetchCasts();
 });
 events.addEventListener("no_team", () => { team = null; state = null; });
@@ -504,6 +526,7 @@ Routes registered here but owned by use cases (see their READMEs):
 | `teams` (admin) | `GET /api/admin/teams`, `DELETE /api/admin/teams/{team_id}/members/{user_id}[?new_leader=<uuid>]` | Bearer + `ADMIN` in Postgres (`403 not_admin`) |
 | `bosses` | `GET /api/game/bosses` (every boss, serial 1 first; static) | Bearer |
 | `teamstate` | `GET /api/game/shapes`, `GET /api/teams/me/state`, `GET /api/teams/me/casts` (the cast log, newest first), `PUT` and `DELETE /api/teams/me/state/selection`, `POST /api/teams/me/state/scans` | Bearer |
+| `teamstate` (admin) | `POST /api/admin/teams/{team_id}/revive` (health back to `game.health`, a fresh attack clock) | Bearer + `ADMIN` in Postgres (`403 not_admin`) |
 | `qr` | `POST /api/qr/verify` | Bearer |
 | `qr` (staff) | `GET /api/qr/{waypoint_id}` | Bearer + `HELPER`/`ADMIN` in Postgres (`403 not_staff`) |
 
@@ -547,13 +570,13 @@ Any other path or method:
 | User in no team | `hello`, then `no_team` |
 | User in a team | `hello`, then `team`, then `team_state` |
 | A change to the user's team or state | One event per change, on every one of the user's streams (see [What publishes what](#what-publishes-what)) |
-| Time passes with nobody acting | Nothing but `: ping`: there's no time limit |
+| Time passes with nobody acting | `: ping` after each idle `live.heartbeat`, and `team_state: boss_attacked` / `knocked_out` each time the team's boss attacks |
 | A rejected or no-op request | Nothing |
 | Several tabs | Each tab is its own subscription; each gets every event |
 | Client disconnects | `Serve` returns on the request context; subscription removed; `/healthz` count drops |
 | A queued event arrives while **16** (`live.subscriber_buffer`) are already unread | That stream is dropped: the buffered events are written, then the response ends. The browser's `EventSource` reconnects and gets fresh snapshots |
 | A write to the client fails, or takes over **10 s** (`live.write_timeout`) | `Serve` returns; subscription removed |
-| Server shuts down | `Hub.Close` closes every subscription; each `Serve` returns |
+| Server shuts down | `Hub.Close` closes every subscription; each `Serve` returns. `TeamState.Close` stops the attack timers |
 
 ### Body limit
 | Case | Result |
@@ -573,6 +596,7 @@ Any other path or method:
 - **The start hook** runs inside `teams.Start`, holding the team's teams entry lock, and takes the team's teamstate entry lock (`PublishTeam`). So the lock order across the two use cases is teams entry → teamstate entry. teamstate never takes a teams entry lock (it reads teams through `ByID`/`ForUser`, which take only teams' index lock, briefly), so this can't deadlock.
 - **The roster hook** runs inside `teams.RemoveMember`, holding the team's teams entry lock, and takes the team's teamstate entry lock (`RosterChanged`): the same order as the start hook. A game write by the removed player either finishes under the teamstate lock before the hook gets it, or re-checks membership under that lock after the removal and gets `404 not_in_team` (`TestAdminRemoveRacesScan`).
 - **The admin guard** reads `userprofile` on every admin request (`users.Get`): no memory, so nothing to race.
+- **Attack timers** run in their own goroutines (`time.AfterFunc`) and take the team's teamstate entry lock like any write, so an attack never interleaves with a request's write; every write catches up on due attacks first (teamstate README, "Boss attacks and health").
 
 ## Failure and recovery
 | Case | Result |
@@ -629,7 +653,7 @@ The `*_test.go` files are package `server_test`. They run the real `server.Build
 10. `restart()`.
 
 ### `restart()`
-Calls `server.Build` again on the same database and config, and swaps the handler. This is what a backend restart does: memory is rebuilt from Postgres, and tokens stay valid (same key). Used after seeding, because content is read at startup. It then closes the previous app's hub, as a real restart would, so streams opened before it end.
+Calls `server.Build` again on the same database and config, and swaps the handler. This is what a backend restart does: memory is rebuilt from Postgres, and tokens stay valid (same key). Used after seeding, because content is read at startup. It then closes the previous app's hub and its team state's attack timers (`TeamState.Close`), as a real restart would, so streams opened before it end and no old timer runs.
 
 ### Request helpers
 | Helper | File | What it does |
@@ -698,6 +722,7 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSelectAndScanRoutes` | `tests/teamstate_test.go` | seed + `restart`; `not_in_game`, `not_in_team`, `invalid_body` (wrong type, empty, over `server.max_body_bytes`), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`; a square with a rejected retry and rescan (`waypoint_already_scanned`), one member scanning a second waypoint (`200`), `pattern_completed`; state after; reselect; clear; a wrong scan (waypoint `1012`, inserted in no pattern) accepted as `wrong_scan` with `stack[0].wrong` and `poisoned` `true`, a teammate's next scan `409 selection_poisoned`, and a reselect making scans work again |
 | `TestCastLogRoute` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/teams/me/casts` is `404 not_in_team` without a team, `[]` before any cast; after the same square twice, two casts newest first, the newer `already_completed`, shape `square`, `damage` > 0 |
 | `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `square` with 18 patterns and `points` `[4]`, every shape's damage range valid, `max_pattern_points` equal to `config.toml`'s, and no `scan_window_ms` |
+| `TestAdminRevive` | `tests/admin_test.go` | seed + `restart`; a started team has `health` = `game.health`, `knocked_out` false and a `next_attack_at`; a `team_boss` phase with 0 health, applied by a `restart`, knocks it out (`health` 0, `next_attack_at` null); select and scan `409 knocked_out`; the revive route: a player `403 not_admin`, `000000` `404 team_not_found`, a lobby team `409 not_in_game`; an admin's revive `200` with full health and `attacks` 0, a member's stream gets `team_state:revived`, and selecting works again |
 | `TestGameBosses` | `tests/teamstate_test.go` | `GET /api/game/bosses` without a token is `401 missing_token`; `[]` before content; after seed + `restart`, `game.bosses` bosses with serials 1… in order, each with name, asset and HP > 0; a started team's state shows `boss` serial 1 at 0, `bosses_defeated` 0, `damage_multiplier` 1; after a square over HTTP, `last_cast` hit boss 1 with `dealt` = `damage`, not defeated, and `boss.damage` = `dealt` |
 | `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack and the square completed |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
@@ -712,6 +737,8 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 
 Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, never repeated as numbers.
 
-**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, and its own event stream (each event delivered after the response delay, in order). There's no time limit, so they test concurrency and convergence only: scans racing over uneven networks, and every phone ending on the same `team_state`. They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
+**The simulation tests** (`tests/simulation_test.go`) model each player as a phone: its own request and response delays, and its own event stream (each event delivered after the response delay, in order). There's no time limit on an attempt, and they finish long before the seed's first boss attack (300 s), so they test concurrency and convergence only: scans racing over uneven networks, and every phone ending on the same `team_state`. They use real time (`time.Sleep`), not a fake clock, because the delays are network delays over real HTTP.
+
+**Boss attacks over real time** aren't tested here (they'd need minutes of real time; `TestAdminRevive` knocks a team out through a stored phase instead): the timer and catch-up are tested with a fake clock in `internal/teamstate/tests/attack_test.go`. `env.restart` closes the old app's `TeamState` (and its `Hub`), so a replaced app's timers never run.
 
 **Not covered here:** `/healthz` returning `503`, the heartbeat (tests wait at most 3 s; covered in `platform/live`), a slow stream being dropped over HTTP (covered in `platform/live`), `Hub.Close` on shutdown, the `Allow` header's value, and `main.go` itself (subcommands, lock ordering, lost-lock shutdown, sweep loop, timeouts).

@@ -28,6 +28,15 @@ type memTeams map[string]teams.Team
 // ForUser is unused by publishing.
 func (m memTeams) ForUser(uuid.UUID) (teams.Team, error) { return teams.Team{}, teams.ErrNotInTeam }
 
+// All returns every team, in no particular order.
+func (m memTeams) All() []teams.Team {
+	out := make([]teams.Team, 0, len(m))
+	for _, t := range m {
+		out = append(out, t)
+	}
+	return out
+}
+
 // ByID returns the team with that ID.
 func (m memTeams) ByID(id string) (teams.Team, bool) {
 	t, ok := m[id]
@@ -69,6 +78,7 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: set.Game.Bosses}))
 	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints,
+		Health:           set.Game.Health,
 		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 	}))
 	for _, id := range ids { // warm: create each entry and cache its roster

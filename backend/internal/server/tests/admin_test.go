@@ -214,3 +214,62 @@ func TestAdminRemoveRacesScan(t *testing.T) {
 	}
 	t.Logf("%d of %d scans ran before their removal", accepted, len(ps)-1)
 }
+
+// TestAdminRevive knocks a started team out (a stored phase with 0 health,
+// applied at restart) and checks the HTTP side: health and knocked_out in
+// team_state, selecting and scanning refused with knocked_out, the revive
+// route's guard and errors, and a revive restoring game.health, a fresh
+// attack clock, and play.
+func TestAdminRevive(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	admin := e.newAdmin("admin")
+	ps := e.startedTeam("k")
+	teamID := e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)
+	revive := func(p player, id string) apiResult {
+		return e.call("POST", "/api/admin/teams/"+id+"/revive", p, nil)
+	}
+
+	r := e.call("GET", "/api/teams/me/state", ps[0], nil)
+	if r.payload["health"] != float64(e.cfg.Settings.Game.Health) || r.payload["knocked_out"] != false ||
+		r.payload["boss"].(map[string]any)["next_attack_at"] == nil {
+		t.Fatalf("a started team: %v", r.payload)
+	}
+
+	if _, err := e.db.Pool().Exec(context.Background(),
+		"INSERT INTO team_boss (team_id, phase_health, phase_started_at) VALUES ($1, 0, now())", teamID); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart() // team state is read at startup
+	r = e.call("GET", "/api/teams/me/state", ps[1], nil)
+	if r.payload["health"] != float64(0) || r.payload["knocked_out"] != true || r.payload["boss"].(map[string]any)["next_attack_at"] != nil {
+		t.Fatalf("knocked out: %v", r.payload)
+	}
+	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}),
+		http.StatusConflict, "knocked_out")
+	expect(t, "scan", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"waypoint_id": "1001"}),
+		http.StatusConflict, "knocked_out")
+
+	expect(t, "player revives", revive(ps[0], teamID), http.StatusForbidden, "not_admin")
+	expect(t, "unknown team", revive(admin, "000000"), http.StatusNotFound, "team_not_found")
+	lobby := e.call("POST", "/api/teams", e.newPlayer("lobby"), map[string]string{"name": "Lobby"}).payload["id"].(string)
+	expect(t, "lobby team", revive(admin, lobby), http.StatusConflict, "not_in_game")
+
+	s := e.openStream(ps[2])
+	s.next(t, "connect")
+	s.nextState(t, "connect")
+	r = revive(admin, teamID)
+	expect(t, "revive", r, http.StatusOK, "")
+	if r.payload["health"] != float64(e.cfg.Settings.Game.Health) || r.payload["knocked_out"] != false ||
+		r.payload["boss"].(map[string]any)["attacks"] != float64(0) {
+		t.Fatalf("revived: %v", r.payload)
+	}
+	if ev := s.nextState(t, "revive"); ev.typ != "revived" || ev.data["health"] != float64(e.cfg.Settings.Game.Health) {
+		t.Fatalf("revive event: %s %v", ev.typ, ev.data)
+	}
+	expect(t, "select after revive", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}),
+		http.StatusOK, "")
+}
