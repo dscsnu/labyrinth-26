@@ -22,6 +22,7 @@ bosses = 6
 health = 10
 locked_pattern_points = 5
 unlock_after_bosses = 5
+qr_cooldown = "5m"
 [game.boss_attack]
 interval = "10m"
 [game.boss_attack.damage]
@@ -93,7 +94,7 @@ func TestLoadSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 ||
+	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 || s.Game.QRCooldown.Duration != 5*time.Minute ||
 		s.Game.BossAttack.Interval.Duration != 10*time.Minute || s.Game.BossAttack.BossDamage()[6] != 6 || len(s.Game.BossAttack.Damage) != 6 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.Walkability != 1.5 || s.Spell.Per100m != 0.8 || s.Spell.Bonus.ConcaveQuad != 75 || s.Spell.BaseDamage()[4] != 186 || len(s.Spell.Base) != 6 ||
@@ -129,6 +130,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"unlock after more bosses than exist": {"unlock_after_bosses = 5", "unlock_after_bosses = 7", "game.unlock_after_bosses must be 0-6"},
 		"negative unlock":                     {"unlock_after_bosses = 5", "unlock_after_bosses = -1", "game.unlock_after_bosses must be 0-6"},
 		"no health":                           {"health = 10", "health = 0", "game.health must be at least 1"},
+		"negative qr cooldown":                {`qr_cooldown = "5m"`, `qr_cooldown = "-1m"`, "game.qr_cooldown must not be negative"},
 		"zero qr rotate":                      {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
 		"zero qr tolerance":                   {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
 		"negative per_100m":                   {"per_100m = 0.8", "per_100m = -1", "spell.per_100m must not be negative"},

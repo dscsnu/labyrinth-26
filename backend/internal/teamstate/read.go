@@ -34,6 +34,12 @@ type State struct {
 	Casts []Cast
 	// Boss is the team's progress through the bosses (bosses use case).
 	Boss BossProgress
+	// QRCooldowns are the waypoints the team can't scan yet, soonest to open
+	// first: those of its casts less than game.qr_cooldown ago. Derived from
+	// Casts (qrCooldowns), so nothing more is stored; expired entries are
+	// dropped by catchUp, which publishes qr_cooldown_ended. A write builds
+	// a new slice (copy-on-write).
+	QRCooldowns []QRCooldown
 	// Version orders this team's snapshots (see live.Version): every apply
 	// sets the next one. Memory-only; it starts again, in a new Epoch, after a
 	// restart.
@@ -57,6 +63,27 @@ func (st State) LastCast() (c Cast, ok bool) {
 		return Cast{}, false
 	}
 	return st.Casts[len(st.Casts)-1], true
+}
+
+// QRCooldown is a waypoint a team can't scan until Until: it was in one of
+// the team's casts less than game.qr_cooldown ago.
+type QRCooldown struct {
+	// Waypoint is the waypoint's index in the atlas.
+	Waypoint int
+	// Until is when it opens again: the latest such cast's time plus
+	// game.qr_cooldown. It's on cooldown while now is before Until.
+	Until time.Time
+}
+
+// qrCooldownUntil returns when waypoint w opens again for st's team, and
+// whether it's on cooldown at now.
+func (st State) qrCooldownUntil(w int, now time.Time) (time.Time, bool) {
+	for _, c := range st.QRCooldowns {
+		if c.Waypoint == w && now.Before(c.Until) {
+			return c.Until, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // Cast is one completed pattern: the moment a team's stack became exactly a
@@ -306,6 +333,10 @@ type View struct {
 	// cooldown: every one of their patterns it has unlocked is of
 	// CooldownClass. Not in LockedShapes. In index order.
 	CooldownShapes []string `json:"cooldown_shapes"`
+	// QRCooldowns are the waypoints the team can't scan yet (409
+	// waypoint_on_cooldown), each with when it opens again: those of its
+	// casts less than game.qr_cooldown ago. Soonest first, then by ID.
+	QRCooldowns []QRCooldownView `json:"qr_cooldowns"`
 	// CastCount is how many casts are in the team's cast log, repeats
 	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
 	// it when this is more than its length plus the cast it just saw.
@@ -365,6 +396,14 @@ type SelectionView struct {
 	SelectedBy uuid.UUID `json:"selected_by"`
 	// SelectedAt is when it was selected.
 	SelectedAt time.Time `json:"selected_at"`
+}
+
+// QRCooldownView is a QRCooldown as JSON.
+type QRCooldownView struct {
+	// WaypointID is the waypoint that can't be scanned yet.
+	WaypointID string `json:"waypoint_id"`
+	// Until is when the team can scan it again.
+	Until time.Time `json:"until"`
 }
 
 // StackScanView is a StackScan as JSON.
@@ -446,6 +485,39 @@ func (s *Store) unlockedPoints(st State) int {
 func (s *Store) shapeLocked(shape, unlocked int) bool {
 	points := s.game.Shapes[shape].Points // ascending
 	return len(points) > 0 && points[0] > unlocked
+}
+
+// qrCooldowns derives the QR cooldowns at now from a team's cast log: every
+// waypoint of a cast less than game.qr_cooldown before now, until that cast's
+// time plus game.qr_cooldown (the latest cast decides), soonest first, ties
+// by waypoint index. Nil when game.qr_cooldown is 0. The log is oldest first,
+// so it walks back from the newest cast and stops at the first one too old.
+func (s *Store) qrCooldowns(casts []Cast, now time.Time) []QRCooldown {
+	cd := s.rules.QRCooldown
+	if cd <= 0 {
+		return nil
+	}
+	seen := atlas.WaypointSet(0)
+	var out []QRCooldown
+	for i := len(casts) - 1; i >= 0; i-- {
+		until := casts[i].At.Add(cd)
+		if !now.Before(until) {
+			break // this cast and every older one are past their cooldown
+		}
+		for _, w := range s.atlas.Pattern(casts[i].Pattern).Waypoints.Indexes() {
+			if !seen.Has(w) {
+				seen = seen.With(w)
+				out = append(out, QRCooldown{Waypoint: w, Until: until})
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b QRCooldown) int {
+		if c := a.Until.Compare(b.Until); c != 0 {
+			return c
+		}
+		return a.Waypoint - b.Waypoint
+	})
+	return out
 }
 
 // cooldown returns the spell class st's team can't cast now: its last
@@ -592,7 +664,10 @@ func (s *Store) view(teamID string, st State) View {
 		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version,
 		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier,
 		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut(), UnlockedPoints: s.unlockedPoints(st), LockedShapes: []string{},
-		CooldownShapes: []string{}}
+		CooldownShapes: []string{}, QRCooldowns: []QRCooldownView{}}
+	for _, qc := range st.QRCooldowns { // already soonest first, ties by waypoint index (ID order)
+		v.QRCooldowns = append(v.QRCooldowns, QRCooldownView{WaypointID: c.Waypoint(qc.Waypoint).ID, Until: qc.Until.UTC()})
+	}
 	cooldown := s.cooldown(st)
 	if cooldown != "" {
 		v.CooldownClass = &cooldown

@@ -47,6 +47,13 @@ const (
 	// 50 min) and the restart test's downtimes span several attacks, yet
 	// long enough that the fastest teams get through every boss.
 	simAttackInterval = 5 * time.Minute
+	// simQRCooldown is the league's game.qr_cooldown: shorter than
+	// config.toml's, because the seed has only 11 waypoints, so its 5 minutes
+	// at 3–4 waypoints a cast would leave a rushing team about one cast in
+	// three steps, and nobody would reach every boss or free the 5 waypoints
+	// a big pattern needs. Several steps long, so cooling QR codes still
+	// refuse scans and block whole steps.
+	simQRCooldown = 2 * time.Minute
 	// simSteps is how long the game runs: 180 × 30 s = 90 min, long enough
 	// for an idle team to be knocked out by boss 1 (10 attacks × 5 min).
 	simSteps = 180
@@ -73,7 +80,7 @@ var simStrategies = []string{
 	"sloppy",     // a wrong scan poisons the attempt; a rescan is refused; reselects and casts
 	"retrier",    // sends every scan twice: the resend is refused, changing nothing
 	"quitter",    // half its attempts are given up (cleared) after one scan
-	"repeater",   // alternates two patterns of different classes (the cooldown forbids one twice in a row): already_completed after the first two
+	"repeater",   // casts the first castable pattern in atlas order (the spell and QR cooldowns move it on): already_completed once it cycles back
 	"slowpoke",   // casts every 8 steps: attacked mid-fight, knocked out, revived
 	"racer",      // two members scan the same point at once: exactly one is accepted
 	"shrinking",  // an admin removes a member (the leader for even teams), or is refused the last one
@@ -137,7 +144,7 @@ type simTeam struct {
 type simCounts struct {
 	casts, defeats, allDefeated, knockouts, revives, wrongScans, poisoned, retries,
 	cleared, already, races, removals, lastMember, refusedRemoved, knockedRefused,
-	lockedRefused, bigCasts, cooldownRefused atomic.Int64
+	lockedRefused, bigCasts, cooldownRefused, qrRefused, qrBlocked atomic.Int64
 }
 
 // newLeague seeds the dev content and starts simTeams teams of every size,
@@ -184,7 +191,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 		}
 		pgtest.Must(ts.Start(ctx, st.members[0]))
 		st.id = team.ID
-		st.model = model{phaseStart: start, phaseHealth: set.Game.Health, mult: 1, patterns: map[int]bool{}}
+		st.model = model{phaseStart: start, phaseHealth: set.Game.Health, mult: 1, patterns: map[int]bool{}, qr: map[int]time.Time{}}
 		if st.strategy == "multiplier" {
 			st.model.mult = simMultipliers[(i/len(simStrategies))%len(simMultipliers)]
 			if _, err := db.Pool().Exec(ctx, "INSERT INTO team_boss (team_id, multiplier) VALUES ($1, $2)", team.ID, st.model.mult); err != nil {
@@ -202,6 +209,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 	l.rules = teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints, Health: set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints, UnlockAfterBosses: set.Game.UnlockAfterBosses,
+		QRCooldown:   simQRCooldown,
 		WriteTimeout: set.Storage.WriteTimeout.Duration, Epoch: 1, Clock: l.clock,
 	}
 	l.atlas = pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: l.rules.MaxPatternPoints}))
@@ -233,6 +241,34 @@ type model struct {
 	// cooldown is the spell class the team can't cast: its last cast's, ""
 	// before its first.
 	cooldown string
+	// qr is when each waypoint (by index) the team has cast opens again: its
+	// latest cast's time + game.qr_cooldown. A waypoint is cooling while now
+	// is before it.
+	qr map[int]time.Time
+}
+
+// cooling reports whether waypoint w is on the team's QR cooldown at now.
+func (m *model) cooling(w int, now time.Time) bool {
+	until, ok := m.qr[w]
+	return ok && now.Before(until)
+}
+
+// qrCooldowns returns the waypoints cooling at now with their until, sorted
+// by until then waypoint index: what team_state.qr_cooldowns must hold.
+func (m *model) qrCooldowns(now time.Time) []teamstate.QRCooldown {
+	var out []teamstate.QRCooldown
+	for w, until := range m.qr {
+		if now.Before(until) {
+			out = append(out, teamstate.QRCooldown{Waypoint: w, Until: until})
+		}
+	}
+	slices.SortFunc(out, func(a, b teamstate.QRCooldown) int {
+		if c := a.Until.Compare(b.Until); c != 0 {
+			return c
+		}
+		return a.Waypoint - b.Waypoint
+	})
+	return out
 }
 
 // health returns the team's health and the current boss's attacks this
@@ -305,7 +341,8 @@ func TestGameLoopSimulation(t *testing.T) {
 		"last-member refusals": &counts.lastMember, "removed members refused": &counts.refusedRemoved,
 		"knocked-out refusals":  &counts.knockedRefused,
 		"locked shapes refused": &counts.lockedRefused, "big patterns cast after the unlock": &counts.bigCasts,
-		"cooldown refusals": &counts.cooldownRefused,
+		"cooldown refusals": &counts.cooldownRefused, "QR cooldown refusals": &counts.qrRefused,
+		"steps with every pattern's QR codes cooling": &counts.qrBlocked,
 	} {
 		if c.Load() == 0 {
 			t.Errorf("the simulation never exercised %s", name)
@@ -489,8 +526,8 @@ func withoutVersionJSON(t *testing.T, v teamstate.View) string {
 }
 
 // check compares st's state with its model after a step: bosses, damage,
-// health, knockout, attacks, the next attack and the cast count. It also
-// notes a new knockout.
+// health, knockout, attacks, the next attack, the cast count and the QR
+// cooldowns. It also notes a new knockout.
 func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	t.Helper()
 	now := l.clock.Now()
@@ -517,6 +554,16 @@ func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	}
 	if got := v.CooldownClass; (got == nil) != (m.cooldown == "") || (got != nil && *got != m.cooldown) {
 		fail("cooldown_class", got, m.cooldown)
+	}
+	var qr []teamstate.QRCooldown
+	for _, c := range v.QRCooldowns {
+		w, _ := l.atlas.WaypointIndex(c.WaypointID)
+		qr = append(qr, teamstate.QRCooldown{Waypoint: w, Until: c.Until})
+	}
+	if want := m.qrCooldowns(now); !slices.EqualFunc(qr, want, func(a, b teamstate.QRCooldown) bool {
+		return a.Waypoint == b.Waypoint && a.Until.Equal(b.Until)
+	}) {
+		fail("qr_cooldowns", qr, want)
 	}
 	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
 	if v.UnlockedPoints != unlocked || slices.Contains(v.LockedShapes, "pentagon") != (unlocked < 5) ||
@@ -581,7 +628,9 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 		}
 	case "retrier":
 		if every(2) {
-			l.castPattern(t, st, l.randomPattern(st, 1), knocked, counts, rotate(st), true)
+			if p, ok := l.randomPattern(st, 1, counts); ok {
+				l.castPattern(t, st, p, knocked, counts, rotate(st), true)
+			}
 		}
 	case "quitter":
 		if every(2) {
@@ -593,7 +642,9 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 		}
 	case "repeater":
 		if every(2) {
-			l.castPattern(t, st, l.repeated(st), knocked, counts, rotate(st), false)
+			if p, ok := l.repeated(st); ok {
+				l.castPattern(t, st, p, knocked, counts, rotate(st), false)
+			}
 		}
 	case "slowpoke":
 		if knocked && st.koStep >= 0 && step >= st.koStep+simReviveDelay {
@@ -635,38 +686,67 @@ func rotate(st *simTeam) func(k int) int {
 	}
 }
 
-// randomPattern picks a random pattern of at least minPoints waypoints and
-// not of the team's cooldown class (tryCooldown tries those): one time in
-// five a big (locked until the unlock) one, so every team tries them before
-// and after.
-func (l *league) randomPattern(st *simTeam, minPoints int) int {
-	if len(l.big) > 0 && st.rng.IntN(5) == 0 {
-		if p := l.big[st.rng.IntN(len(l.big))]; l.atlas.Pattern(p).Spell.Class != st.model.cooldown {
-			return p
+// castable reports whether the model lets st cast pattern p now, the unlock
+// aside (lockedFor checks that): not of its cooldown class (tryCooldown
+// tries those), and none of its waypoints on the QR cooldown.
+func (l *league) castable(st *simTeam, p int) bool {
+	pat := l.atlas.Pattern(p)
+	if pat.Spell.Class == st.model.cooldown {
+		return false
+	}
+	now := l.clock.Now()
+	for _, w := range pat.Waypoints.Indexes() {
+		if st.model.cooling(w, now) {
+			return false
 		}
 	}
-	for {
-		p := st.rng.IntN(l.atlas.PatternCount())
-		if pat := l.atlas.Pattern(p); pat.Waypoints.Len() >= minPoints && pat.Spell.Class != st.model.cooldown {
-			return p
-		}
-	}
+	return true
 }
 
-// repeated returns the repeater's next pattern: shape 0's first pattern, or,
-// when its class is on cooldown, the first pattern of another class, so the
-// team alternates between the two.
-func (l *league) repeated(st *simTeam) int {
-	first := l.atlas.ShapePatterns(0)[0]
-	if l.atlas.Pattern(first).Spell.Class != st.model.cooldown {
-		return first
-	}
-	for p := range l.atlas.PatternCount() {
-		if c := l.atlas.Pattern(p).Spell.Class; c != st.model.cooldown && l.atlas.Pattern(p).Waypoints.Len() < l.rules.LockedPatternPoints {
-			return p
+// randomPattern picks a random castable pattern of at least minPoints
+// waypoints: one time in five a big (locked until the unlock) one, so every
+// team tries them before and after. False, counted in qrBlocked, when the QR
+// cooldown leaves none, or holds the waypoints of the big pattern an
+// unlocked team picked: the team waits for a later step (casting something
+// small instead would keep the big pattern's waypoints cooling for ever).
+func (l *league) randomPattern(st *simTeam, minPoints int, counts *simCounts) (int, bool) {
+	if len(l.big) > 0 && st.rng.IntN(5) == 0 {
+		p := l.big[st.rng.IntN(len(l.big))]
+		pat := l.atlas.Pattern(p)
+		if l.castable(st, p) {
+			return p, true
+		}
+		unlocked := st.model.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
+		if pat.Spell.Class != st.model.cooldown && pat.Waypoints.Len() <= unlocked {
+			counts.qrBlocked.Add(1)
+			return 0, false
 		}
 	}
-	panic("no pattern of another class")
+	var candidates []int
+	for p := range l.atlas.PatternCount() {
+		if l.atlas.Pattern(p).Waypoints.Len() >= minPoints && l.castable(st, p) {
+			candidates = append(candidates, p)
+		}
+	}
+	if len(candidates) == 0 {
+		counts.qrBlocked.Add(1)
+		return 0, false
+	}
+	return candidates[st.rng.IntN(len(candidates))], true
+}
+
+// repeated returns the repeater's next pattern: the first castable pattern
+// smaller than the locked size, in atlas order. The spell and QR cooldowns
+// move it along the first few patterns, and back to the first once its
+// waypoints open again, so it casts the same patterns over and over. False
+// when none is castable.
+func (l *league) repeated(st *simTeam) (int, bool) {
+	for p := range l.atlas.PatternCount() {
+		if l.atlas.Pattern(p).Waypoints.Len() < l.rules.LockedPatternPoints && l.castable(st, p) {
+			return p, true
+		}
+	}
+	return 0, false
 }
 
 // tryCooldown tries a pattern of the team's cooldown class (one it has
@@ -716,6 +796,13 @@ func (l *league) tryCooldown(t *testing.T, st *simTeam, knocked bool, counts *si
 	}
 	for k, w := range l.atlas.WaypointIDs(pat.Waypoints) {
 		res, err := l.state.Scan(ctx, st.members[rotate(st)(k)], w)
+		if l.coolingID(st, w) { // the QR cooldown refuses it before the wrong-scan check
+			if !errors.Is(err, teamstate.ErrWaypointOnCooldown) {
+				t.Errorf("team %d: scanning cooling %s: %v, want waypoint_on_cooldown", st.i, w, err)
+			}
+			counts.qrRefused.Add(1)
+			break
+		}
 		if err != nil || res.Outcome == teamstate.OutcomePatternCompleted {
 			t.Errorf("team %d: scanning a %s pattern on cooldown: %v %s", st.i, st.model.cooldown, err, res.Outcome)
 			return
@@ -730,14 +817,41 @@ func (l *league) tryCooldown(t *testing.T, st *simTeam, knocked bool, counts *si
 	}
 }
 
-// castRandom casts a random pattern, scanned by who(k) for its k-th point.
-func (l *league) castRandom(t *testing.T, st *simTeam, knocked bool, counts *simCounts, who func(int) int) {
-	l.castPattern(t, st, l.randomPattern(st, 1), knocked, counts, who, false)
+// coolingID reports whether the waypoint with ID id is on st's QR cooldown
+// now, by the model.
+func (l *league) coolingID(st *simTeam, id string) bool {
+	w, _ := l.atlas.WaypointIndex(id)
+	return st.model.cooling(w, l.clock.Now())
 }
 
-// castPattern selects pattern p's shape and scans its points (each twice if
-// resend: the resend must be refused), then checks the cast against the
-// model. A knocked-out team's select must be refused instead.
+// castRandom casts a random pattern, scanned by who(k) for its k-th point,
+// or does nothing if the QR cooldown leaves none.
+func (l *league) castRandom(t *testing.T, st *simTeam, knocked bool, counts *simCounts, who func(int) int) {
+	if p, ok := l.randomPattern(st, 1, counts); ok {
+		l.castPattern(t, st, p, knocked, counts, who, false)
+	}
+}
+
+// probeQR has the leader scan a waypoint on the team's QR cooldown, if any,
+// one time in three, right after selecting (nothing scanned yet, so it can't
+// be already_scanned): it must be refused with waypoint_on_cooldown,
+// recording nothing.
+func (l *league) probeQR(t *testing.T, st *simTeam, counts *simCounts) {
+	cooling := st.model.qrCooldowns(l.clock.Now())
+	if len(cooling) == 0 || st.rng.IntN(3) != 0 {
+		return
+	}
+	w := l.atlas.Waypoint(cooling[st.rng.IntN(len(cooling))].Waypoint).ID
+	if _, err := l.state.Scan(context.Background(), st.members[rotate(st)(0)], w); !errors.Is(err, teamstate.ErrWaypointOnCooldown) {
+		t.Errorf("team %d (%s): scanning cooling %s: %v, want waypoint_on_cooldown", st.i, st.strategy, w, err)
+	}
+	counts.qrRefused.Add(1)
+}
+
+// castPattern selects pattern p's shape, sometimes probes a cooling QR code
+// (probeQR), and scans its points (each twice if resend: the resend must be
+// refused), then checks the cast against the model. A knocked-out team's
+// select must be refused instead.
 func (l *league) castPattern(t *testing.T, st *simTeam, p int, knocked bool, counts *simCounts, who func(int) int, resend bool) {
 	ctx := context.Background()
 	pat := l.atlas.Pattern(p)
@@ -748,6 +862,7 @@ func (l *league) castPattern(t *testing.T, st *simTeam, p int, knocked bool, cou
 	if !l.selectOK(t, st, shape, knocked, counts) {
 		return
 	}
+	l.probeQR(t, st, counts)
 	var res teamstate.ScanResult
 	ids := l.atlas.WaypointIDs(pat.Waypoints)
 	for k, w := range ids {
@@ -818,6 +933,9 @@ func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.Scan
 	already := m.patterns[p]
 	m.patterns[p] = true
 	m.cooldown = l.atlas.Pattern(p).Spell.Class
+	for _, w := range l.atlas.Pattern(p).Waypoints.Indexes() {
+		m.qr[w] = l.clock.Now().Add(l.rules.QRCooldown)
+	}
 	dealt, boss, defeated := m.cast(l.clock.Now(), l.atlas.Pattern(p).Spell.Damage, l.bosses)
 	lc := res.State.LastCast
 	if res.Outcome != teamstate.OutcomePatternCompleted || lc == nil || lc.Dealt != dealt || lc.DefeatedBoss != defeated ||
@@ -846,13 +964,16 @@ func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.Scan
 // casts the pattern.
 func (l *league) sloppy(t *testing.T, st *simTeam, knocked bool, counts *simCounts) {
 	ctx := context.Background()
-	p := l.randomPattern(st, 2)
+	p, ok := l.randomPattern(st, 2, counts)
+	if !ok {
+		return
+	}
 	pat := l.atlas.Pattern(p)
 	ids := l.atlas.WaypointIDs(pat.Waypoints)
 	first := pgtest.Must(l.atlas.SetOf(ids[:1]))
 	wrong := ""
 	for w := range l.atlas.WaypointCount() {
-		if !first.Has(w) && !l.atlas.FitsShape(pat.Shape, first.With(w)) {
+		if !first.Has(w) && !l.atlas.FitsShape(pat.Shape, first.With(w)) && !st.model.cooling(w, l.clock.Now()) {
 			wrong = l.atlas.Waypoint(w).ID
 			break
 		}
@@ -889,7 +1010,10 @@ func (l *league) sloppy(t *testing.T, st *simTeam, knocked bool, counts *simCoun
 // be empty after.
 func (l *league) quit(t *testing.T, st *simTeam, knocked bool, counts *simCounts) {
 	ctx := context.Background()
-	p := l.randomPattern(st, 2)
+	p, ok := l.randomPattern(st, 2, counts)
+	if !ok {
+		return
+	}
 	pat := l.atlas.Pattern(p)
 	if l.lockedFor(t, st, pat, l.atlas.Shape(pat.Shape).ID, knocked, counts) {
 		return
@@ -914,7 +1038,10 @@ func (l *league) quit(t *testing.T, st *simTeam, knocked bool, counts *simCounts
 // other refused as already scanned; then the rest is scanned and cast.
 func (l *league) race(t *testing.T, st *simTeam, knocked bool, counts *simCounts) {
 	ctx := context.Background()
-	p := l.randomPattern(st, 2)
+	p, ok := l.randomPattern(st, 2, counts)
+	if !ok {
+		return
+	}
 	pat := l.atlas.Pattern(p)
 	if l.lockedFor(t, st, pat, l.atlas.Shape(pat.Shape).ID, knocked, counts) {
 		return

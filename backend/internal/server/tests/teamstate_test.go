@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,8 @@ func TestSelectAndScanRoutes(t *testing.T) {
 		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
 	}
+	// Casts here reuse waypoints: TestQRCooldownOverHTTP covers the QR cooldown.
+	e.cfg.Settings.Game.QRCooldown.Duration = 0
 	e = e.restart() // content is read at startup
 	lobby := e.newPlayer("lobby")
 	e.call("POST", "/api/teams", lobby, map[string]string{"name": "Lobby"})
@@ -135,6 +138,7 @@ func TestCastLogRoute(t *testing.T) {
 	if err := e.db.SeedDev2025(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	e.cfg.Settings.Game.QRCooldown.Duration = 0 // casts reuse waypoints: TestQRCooldownOverHTTP covers it
 	e = e.restart()
 	expect(t, "no team", e.call("GET", "/api/teams/me/casts", e.newPlayer("x"), nil), http.StatusNotFound, "not_in_team")
 
@@ -302,6 +306,7 @@ func TestSpellCooldownOverHTTP(t *testing.T) {
 	if err := e.db.SeedDev2025(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	e.cfg.Settings.Game.QRCooldown.Duration = 0 // casts reuse waypoints: TestQRCooldownOverHTTP covers it
 	e = e.restart()
 	a, b := e.startedTeam("cda"), e.startedTeam("cdb")
 	sel := func(p player, shape string) apiResult {
@@ -371,4 +376,88 @@ func TestSpellCooldownOverHTTP(t *testing.T) {
 		t.Fatalf("A after a triangle: cooldown %v, shapes %v", c, shapes)
 	}
 	castAs(a[0], "square", []string{"1001", "1002", "1007", "1008"})
+}
+
+// TestQRCooldownOverHTTP checks the QR cooldown end to end, with two started
+// teams and config.toml's game.qr_cooldown: team A casts the square over
+// HTTP; the cast's response and stream event carry its 4 waypoints in
+// qr_cooldowns, until cast_at + qr_cooldown; with the triangle selected, A
+// scanning 1001 (in both) is 409 waypoint_on_cooldown, with no event, while
+// 1003 scans; team B scans 1001 freely (the cooldown is per team); a restart
+// keeps A's qr_cooldowns, rebuilt from the cast log.
+func TestQRCooldownOverHTTP(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	cd := e.cfg.Settings.Game.QRCooldown.Duration
+	if cd < time.Minute {
+		t.Skipf("test assumes game.qr_cooldown >= 1m, longer than it runs (got %v)", cd)
+	}
+	square := []string{"1001", "1002", "1007", "1008"}
+	a, b := e.startedTeam("qra"), e.startedTeam("qrb")
+	sel := func(p player, shape string) {
+		expect(t, "select "+shape, e.call("PUT", "/api/teams/me/state/selection", p, map[string]string{"shape": shape}), http.StatusOK, "")
+	}
+	scan := func(p player, w string) apiResult {
+		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())})
+	}
+	// cooling returns st's qr_cooldowns waypoint IDs, failing unless every
+	// until is cast_at + qr_cooldown.
+	cooling := func(what string, st map[string]any) []string {
+		castAt, err := time.Parse(time.RFC3339Nano, st["last_cast"].(map[string]any)["cast_at"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, c := range st["qr_cooldowns"].([]any) {
+			c := c.(map[string]any)
+			until, err := time.Parse(time.RFC3339Nano, c["until"].(string))
+			if err != nil || !until.Equal(castAt.Add(cd)) {
+				t.Fatalf("%s: %v until %v, want cast_at %v + %v", what, c["waypoint_id"], c["until"], castAt, cd)
+			}
+			ids = append(ids, c["waypoint_id"].(string))
+		}
+		return ids
+	}
+
+	s := e.openStream(a[1])
+	if ev := s.nextState(t, "snapshot"); len(ev.data["qr_cooldowns"].([]any)) != 0 {
+		t.Fatalf("before any cast: qr_cooldowns %v", ev.data["qr_cooldowns"])
+	}
+	sel(a[0], "square")
+	var r apiResult
+	for _, w := range square {
+		r = scan(a[0], w)
+		expect(t, "A scans "+w, r, http.StatusOK, "")
+	}
+	if got := cooling("A's cast response", r.payload["state"].(map[string]any)); !slices.Equal(got, square) {
+		t.Fatalf("A's cast response: qr_cooldowns %v, want %v", got, square)
+	}
+	var ev sseEvent
+	for ev.typ != "spell_cast" && ev.typ != "boss_defeated" {
+		ev = s.nextState(t, "the cast's event")
+	}
+	if got := cooling("A's cast event", ev.data); !slices.Equal(got, square) {
+		t.Fatalf("A's cast event (%s): qr_cooldowns %v, want %v", ev.typ, got, square)
+	}
+
+	sel(a[0], "triangle")
+	s.nextState(t, "select")
+	expect(t, "A scans 1001 on cooldown", scan(a[1], "1001"), http.StatusConflict, "waypoint_on_cooldown")
+	select {
+	case ev := <-s.states:
+		t.Fatalf("a refused scan published %s", ev.typ)
+	case <-time.After(100 * time.Millisecond):
+	}
+	expect(t, "A scans 1003, not in the square", scan(a[1], "1003"), http.StatusOK, "")
+	sel(b[0], "square")
+	expect(t, "B scans 1001 (its own cooldowns are empty)", scan(b[0], "1001"), http.StatusOK, "")
+
+	e = e.restart()
+	if got := cooling("A after a restart", e.call("GET", "/api/teams/me/state", a[0], nil).payload); !slices.Equal(got, square) {
+		t.Fatalf("A after a restart: qr_cooldowns %v, want %v", got, square)
+	}
+	expect(t, "A scans 1002 after a restart", scan(a[0], "1002"), http.StatusConflict, "waypoint_on_cooldown")
 }

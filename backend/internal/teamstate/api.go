@@ -71,6 +71,7 @@ var errorCodes = []struct {
 	{ErrNotLeader, http.StatusForbidden, "not_leader"},
 	{ErrShapeLocked, http.StatusConflict, "shape_locked"},
 	{ErrShapeOnCooldown, http.StatusConflict, "shape_on_cooldown"},
+	{ErrWaypointOnCooldown, http.StatusConflict, "waypoint_on_cooldown"},
 	{ErrTeamNotFound, http.StatusNotFound, "team_not_found"},
 	{ErrInvalidQR, http.StatusBadRequest, "invalid_qr"},
 	{ErrExpiredQR, http.StatusConflict, "qr_expired"},

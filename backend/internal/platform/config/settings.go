@@ -93,6 +93,9 @@ type GameSettings struct {
 	// UnlockAfterBosses is how many bosses a team must defeat to unlock
 	// patterns of LockedPatternPoints or more waypoints.
 	UnlockAfterBosses int `toml:"unlock_after_bosses"`
+	// QRCooldown is how long a cast's waypoints stay disabled for the team
+	// that cast it; 0 turns it off.
+	QRCooldown Duration `toml:"qr_cooldown"`
 	// BossAttack is how bosses attack ([game.boss_attack]).
 	BossAttack BossAttackSettings `toml:"boss_attack"`
 }
@@ -276,6 +279,7 @@ func (s Settings) validate() []error {
 		"game.locked_pattern_points must be 1-%d (game.max_pattern_points + 1 locks nothing)", s.Game.MaxPatternPoints+1)
 	check(s.Game.UnlockAfterBosses >= 0 && s.Game.UnlockAfterBosses <= s.Game.Bosses,
 		"game.unlock_after_bosses must be 0-%d (game.bosses)", s.Game.Bosses)
+	check(s.Game.QRCooldown.Duration >= 0, "game.qr_cooldown must not be negative")
 	check(s.Game.BossAttack.Interval.Duration > 0, "game.boss_attack.interval must be positive")
 	for serial := 1; serial <= s.Game.Bosses; serial++ {
 		check(hasKey(s.Game.BossAttack.Damage, fmt.Sprint(serial)), "game.boss_attack.damage has no entry for boss %d", serial)

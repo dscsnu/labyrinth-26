@@ -456,7 +456,9 @@ paths:
         waypoint's signed, fresh QR token (see `internal/qr/README.md`); an invalid token is refused with
         `invalid_qr` and a stale one with `qr_expired`. Rejected **without being pushed** if no type is
         selected (`no_shape_selected`), the attempt is poisoned (`selection_poisoned`: reselect to restart),
-        or the waypoint is already in the stack (`waypoint_already_scanned`, a retry included). A scan whose
+        the waypoint is already in the stack (`waypoint_already_scanned`, a retry included), or the team cast a
+        spell with it less than `game.qr_cooldown` (5 min) ago (`waypoint_on_cooldown`: it's in
+        `team_state.qr_cooldowns`, and opens again at its `until`). A scan whose
         waypoint, with the stack, can't be part of any pattern of the selected type is pushed **marked
         `wrong`**, with outcome `wrong_scan`: the attempt is poisoned (`poisoned: true`) until someone
         reselects. Once the stack is exactly a pattern of the selected type, it completes (a cast, logged in
@@ -486,7 +488,7 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
         "409":
           $ref: "#/components/responses/Error"
-          description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`, `qr_expired`"
+          description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`, `waypoint_on_cooldown`, `qr_expired`"
 
   /api/qr/{waypoint_id}:
     get:
@@ -585,7 +587,7 @@ paths:
         | `hello` | stream | `HelloEvent` | `connected` |
         | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `revived`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `revived`, `resync` |
 
         ```
         retry: 3412
@@ -699,12 +701,27 @@ components:
         went up, the selection and stack were purged, its damage went to the current boss), `boss_defeated` (a
         `spell_cast` that defeated the boss: `bosses_defeated` went up and `boss` is the next one, or null, whose
         attack clock starts now), `boss_attacked` (the boss's interval passed, with nobody acting: `health` down,
-        `boss.attacks` up), `knocked_out` (an attack brought `health` to 0), `revived` (an admin revived the team),
-        `resync` (reloaded after a failed write).
+        `boss.attacks` up), `knocked_out` (an attack brought `health` to 0), `qr_cooldown_ended` (with nobody
+        acting, waypoints left `qr_cooldowns` and can be scanned again; an attack due at the same moment sends
+        `boss_attacked` or `knocked_out` instead), `revived` (an admin revived the team), `resync` (reloaded
+        after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, revived, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, revived, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
+    QRCooldown:
+      type: object
+      description: A waypoint on the team's QR cooldown.
+      required: [waypoint_id, until]
+      properties:
+        waypoint_id: { type: string, description: The waypoint's 4-digit ID., example: "1001" }
+        until:
+          type: string
+          format: date-time
+          description: >-
+            When it opens again: its latest cast's `cast_at` + `game.qr_cooldown`. A scan at exactly this
+            moment is accepted.
+          example: "2026-10-17T12:05:04Z"
     Version:
       type: object
       description: |
@@ -845,7 +862,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, cast_count, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
@@ -937,6 +954,15 @@ components:
           items: { type: string }
           description: "Types the team can't select because of the cooldown (`shape_on_cooldown`): every one of their unlocked patterns is of `cooldown_class`. Never also in `locked_shapes`."
           example: [lightning, square, tree]
+        qr_cooldowns:
+          type: array
+          items: { $ref: "#/components/schemas/QRCooldown" }
+          description: >-
+            The waypoints the team can't scan now (`waypoint_on_cooldown`): every waypoint of a spell it cast
+            less than `game.qr_cooldown` (5 min) ago, sorted by `until`, then waypoint ID. Other waypoints
+            stay open, and selecting isn't affected. An entry leaves at its `until`, with nobody acting
+            (`qr_cooldown_ended`). Empty when none, or with `game.qr_cooldown` 0; rebuilt from the cast log on
+            a restart.
         knocked_out:
           type: boolean
           description: >-

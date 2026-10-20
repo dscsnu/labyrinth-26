@@ -170,6 +170,10 @@ type fixtureOptions struct {
 	// boss attacks only after neverAttack, so tests that move the clock by
 	// minutes see no attacks.
 	attacks bool
+	// qrCooldown keeps config.toml's game.qr_cooldown. Without it the QR
+	// cooldown is off, so tests that cast the same waypoints minutes apart
+	// aren't refused.
+	qrCooldown bool
 	// bossRules adjusts the boss rules (attack interval and damage).
 	bossRules func(*bosses.Rules)
 }
@@ -254,8 +258,12 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		Health:              set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints,
 		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
+		QRCooldown:          set.Game.QRCooldown.Duration,
 		WriteTimeout:        set.Storage.WriteTimeout.Duration,
 		Epoch:               1, // a restart in a test passes another
+	}
+	if !o.qrCooldown {
+		rules.QRCooldown = 0
 	}
 	if o.rules != nil {
 		o.rules(&rules)
