@@ -63,7 +63,7 @@ func TestNew(t *testing.T) {
 }
 
 // seedBosses is how many bosses the 2025 dev seed has.
-const seedBosses = 7
+const seedBosses = 6
 
 // TestLoad loads an empty table (Count 0), then the 2025 dev seed's bosses
 // with config.toml's game.bosses: all of them, in serial order, HP rising.

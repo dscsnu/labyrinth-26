@@ -73,6 +73,12 @@ type GameSettings struct {
 	Bosses int `toml:"bosses"`
 	// Health is every team's starting health, and what a revive restores.
 	Health int `toml:"health"`
+	// LockedPatternPoints is the size from which patterns are locked until
+	// the team has defeated UnlockAfterBosses bosses.
+	LockedPatternPoints int `toml:"locked_pattern_points"`
+	// UnlockAfterBosses is how many bosses a team must defeat to unlock
+	// patterns of LockedPatternPoints or more waypoints.
+	UnlockAfterBosses int `toml:"unlock_after_bosses"`
 }
 
 // QRSettings is config.toml's [qr] table.
@@ -202,6 +208,10 @@ func (s Settings) validate() []error {
 		"game.max_pattern_points must be 1-%d", MaxPatternPoints)
 	check(s.Game.Bosses >= 1, "game.bosses must be at least 1")
 	check(s.Game.Health >= 1, "game.health must be at least 1")
+	check(s.Game.LockedPatternPoints >= 1 && s.Game.LockedPatternPoints <= s.Game.MaxPatternPoints+1,
+		"game.locked_pattern_points must be 1-%d (game.max_pattern_points + 1 locks nothing)", s.Game.MaxPatternPoints+1)
+	check(s.Game.UnlockAfterBosses >= 0 && s.Game.UnlockAfterBosses <= s.Game.Bosses,
+		"game.unlock_after_bosses must be 0-%d (game.bosses)", s.Game.Bosses)
 	check(s.QR.Rotate.Duration > 0, "qr.rotate must be positive")
 	check(s.QR.Tolerance.Duration > 0, "qr.tolerance must be positive")
 	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")

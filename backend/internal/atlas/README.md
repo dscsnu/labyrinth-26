@@ -81,7 +81,8 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 - **`SetOf(ids)`**: IDs to a `WaypointSet`; `unknown waypoint "9999"` on the first unknown ID. Duplicates collapse (it's a set). Used by `New` and teamstate's `stateOf`.
 - **`PatternFor(set)`**: the pattern made of **exactly** these waypoints, one map lookup. Teamstate's completion check.
 - **`ShapePatterns(shape)`**: the shape's pattern indexes, in key order. The slice is shared: callers must not modify it. Used by `FitsShape`, `checkNesting` and teamstate's `newGame`.
-- **`FitsShape(shape, set)`**: whether some pattern of the shape contains every waypoint in `set` (see [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)). The empty set fits nothing. Teamstate's wrong-scan check.
+- **`FitsShape(shape, set)`**: whether some pattern of the shape contains every waypoint in `set` (see [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)). The empty set fits nothing.
+- **`FitsShapeWithin(shape, set, maxPoints)`**: `FitsShape` counting only the shape's patterns of at most `maxPoints` waypoints. Teamstate's wrong-scan check: it passes the team's unlocked size (`unlocked_points`: **4** until the team has defeated **5** bosses, `game.locked_pattern_points` − 1 and `game.unlock_after_bosses`, then **6**), so a set that only a locked pattern contains is wrong. The same scan as `FitsShape` plus a popcount (`Waypoints.Len()`) per pattern.
 - **`WaypointIDs(set)`**: a set back to IDs, sorted. Used for every view and `ScanResult.Pattern`, and the string key for a pattern ([Spells](#spells), identity).
 - No lookup locks or touches Postgres. Only `WaypointIDs` and the `Indexes` methods allocate (their result slices).
 
@@ -219,7 +220,7 @@ Example: the square `1001, 1002, 1007, 1008` (pattern `87`) is indexes 0, 1, 6, 
 | Interior points of a pattern | `p.Waypoints &^ p.Spell.Geometry.Hull` |
 
 ### Does a set still fit the shape?
-`FitsShape(shape, set)`: is there a pattern of the shape containing every waypoint in `set`? Teamstate calls it with the stack plus the new scan; `false` marks the scan **wrong**, it doesn't reject it.
+`FitsShape(shape, set)`: is there a pattern of the shape containing every waypoint in `set`? Teamstate calls its bounded form, `FitsShapeWithin(shape, set, maxPoints)`, with the stack plus the new scan and the team's unlocked size; `false` marks the scan **wrong**, it doesn't reject it. `FitsShapeWithin` is the same steps with one more condition in step 2: the pattern has at most `maxPoints` waypoints.
 
 1. The empty set fits nothing (`false` at once).
 2. For each index `p` in `shapePatterns[shape]`: if `patterns[p].Waypoints & set == set`, return `true`.
@@ -367,6 +368,9 @@ Stored team progress that refers to content that no longer exists is refused lat
 | `FitsShape(shape, set)` | Empty set | `false` |
 | | Inside at least one of the shape's patterns | `true` |
 | | Spans two patterns, or touches none | `false` |
+| `FitsShapeWithin(shape, set, max)` | Inside a pattern of at most `max` waypoints | `true` |
+| | Only inside bigger patterns | `false` |
+| | `max` at least the shape's biggest pattern | the same as `FitsShape` |
 | `Waypoint(i)`, `Shape(i)`, `Pattern(i)`, `ShapePatterns(i)` | `i` out of range | panics (callers only pass indexes from the atlas) |
 
 ## Concurrency and locking
@@ -410,6 +414,7 @@ No races to resolve: the atlas is built once before `Load` returns and never mod
 | `TestBitsets` | `PatternSet` across 64-bit words (bits 0, 63, 64, 70, 2047) with `Indexes` and `Has`; `WaypointSet` `With` (twice the same), `Has`, `Len`, `Contains` |
 | `TestMixedSizesAllowedWhenNotNested` | a shape may mix 2- and 3-point patterns when none is inside another |
 | `TestFitsShape` | one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
+| `TestFitsShapeWithin` | a line shape with a 2- and a 3-point pattern: a point only in the 3-point one fits within 3, not within 2; a limit below every pattern fits nothing; a pair spanning both lines doesn't fit; the empty set doesn't; and with nothing excluded it equals `FitsShape` |
 | `TestDevSeedLoads` | real Postgres (`TEST_DATABASE_URL`, schema `atlas_test`): the 2025 seed loads through `Load` with config.toml's rules: 11 waypoints, 5 shapes, 359 patterns; square `1001 1002 1007 1008` is found as a `square`; waypoint 0 is `1001` with coordinates; seeding again succeeds (idempotent) |
 | `TestLoadRefusesMissingDamage` | real Postgres: a seeded pattern's damage set to `NULL` (migration 0008 without the spells seed) makes `Load` fail with `pattern 7: damage must be positive`, not a scan error |
 | `BenchmarkLookups` | `FitsShape`, `PatternFor` and `WaypointIndex`+`Has` on the fixture (not the seed), results kept in package-level sinks (`sinkBool`, `sinkInt`). On an i7-12650H: about 1 ns, 2 ns and 6 ns |

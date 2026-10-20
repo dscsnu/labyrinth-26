@@ -56,6 +56,13 @@ var (
 	ErrNoShapeSelected = errors.New("select a shape before scanning")
 	// ErrWaypointAlreadyScanned means this waypoint is already in the stack.
 	ErrWaypointAlreadyScanned = errors.New("this waypoint is already scanned")
+	// ErrNotLeader is the teams use case's: only the leader selects a shape
+	// or clears the selection.
+	ErrNotLeader = teams.ErrNotLeader
+	// ErrShapeLocked means every pattern of the shape is bigger than the
+	// team has unlocked (game.locked_pattern_points, until it has defeated
+	// game.unlock_after_bosses bosses).
+	ErrShapeLocked = errors.New("this shape's patterns are locked until your team defeats more bosses")
 	// ErrKnockedOut means the team's health is 0 (boss attacks): it can't
 	// select or scan until an admin revives it.
 	ErrKnockedOut = errors.New("your team is knocked out; an admin must revive it")
@@ -135,8 +142,14 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	cur := s.catchUp(e, t.ID)
 
 	// 2. validate (state)
+	if !s.isLeader(t.ID, userID) {
+		return View{}, ErrNotLeader
+	}
 	if cur.Boss.KnockedOut() {
 		return View{}, ErrKnockedOut
+	}
+	if s.shapeLocked(shape, s.unlockedPoints(*cur)) {
+		return View{}, ErrShapeLocked
 	}
 
 	// 3. build
@@ -179,6 +192,11 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	// Any boss attack that fell due is applied first (its own change).
 	// Clearing is allowed even when knocked out: it only gives up.
 	cur := s.catchUp(e, t.ID)
+
+	// 2. validate (state)
+	if !s.isLeader(t.ID, userID) {
+		return View{}, ErrNotLeader
+	}
 
 	// 2. validate (state)
 	if !cur.Selection.Active {
@@ -253,7 +271,9 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 	set = set.With(w)
 	// A scan that doesn't fit isn't rejected: it's pushed, marked wrong, the
 	// player is told, and the attempt is poisoned until the team reselects.
-	wrong := !s.atlas.FitsShape(cur.Selection.Shape, set)
+	// Patterns the team hasn't unlocked don't count: a scan that could only
+	// grow into one is wrong too.
+	wrong := !s.atlas.FitsShapeWithin(cur.Selection.Shape, set, s.unlockedPoints(*cur))
 
 	// 3. build
 	next := *cur
@@ -314,6 +334,14 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (
 func (s *Store) isMember(teamID string, userID uuid.UUID) bool {
 	t, ok := s.teams.ByID(teamID)
 	return ok && slices.ContainsFunc(t.Members, func(m teams.Member) bool { return m.ID == userID })
+}
+
+// isLeader reports whether userID leads teamID now, read from teams
+// (lock-free). Called with the team's entry locked: an admin removing the
+// leader names a new one.
+func (s *Store) isLeader(teamID string, userID uuid.UUID) bool {
+	t, ok := s.teams.ByID(teamID)
+	return ok && t.LeaderID == userID
 }
 
 // RosterChanged is teams.Rules.OnRosterChange: an admin removed a member from

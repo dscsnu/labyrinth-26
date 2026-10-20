@@ -98,6 +98,7 @@ type Atlas interface {
 	SetOf(ids []string) (atlas.WaypointSet, error)
 	PatternFor(set atlas.WaypointSet) (int, bool)
 	FitsShape(shape int, set atlas.WaypointSet) bool
+	FitsShapeWithin(shape int, set atlas.WaypointSet, maxPoints int) bool
 	WaypointIDs(set atlas.WaypointSet) []string
 	ShapePatterns(shape int) []int
 	ShapeCount() int
@@ -123,6 +124,12 @@ type Rules struct {
 	// Health is every team's starting health, and what a revive restores
 	// (game.health).
 	Health int
+	// LockedPatternPoints is the size from which patterns are locked
+	// (game.locked_pattern_points) until a team has defeated
+	// UnlockAfterBosses bosses (game.unlock_after_bosses).
+	LockedPatternPoints int
+	// UnlockAfterBosses is how many bosses unlock the big patterns.
+	UnlockAfterBosses int
 	// WriteTimeout bounds each write-through (storage.write_timeout).
 	WriteTimeout time.Duration
 	// Clock is the store's time source; nil means the real one

@@ -91,10 +91,12 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL)
 	}, log)
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{
-		MaxPatternPoints: set.Game.MaxPatternPoints,
-		Health:           set.Game.Health,
-		WriteTimeout:     set.Storage.WriteTimeout.Duration,
-		Epoch:            epoch,
+		MaxPatternPoints:    set.Game.MaxPatternPoints,
+		Health:              set.Game.Health,
+		LockedPatternPoints: set.Game.LockedPatternPoints,
+		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
+		WriteTimeout:        set.Storage.WriteTimeout.Duration,
+		Epoch:               epoch,
 	})
 	if err != nil {
 		return nil, err

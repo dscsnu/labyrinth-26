@@ -91,8 +91,11 @@ type Cast struct {
 // attacks at PhaseStart + k × its interval, k = 1, 2, …. So at any time
 // (at):
 //
-//	Attacks = floor((at − PhaseStart) / interval)
+//	Attacks = min(floor((at − PhaseStart) / interval), the knockout attack)
 //	Health  = max(0, PhaseHealth − Attacks × attack damage)
+//
+// where the knockout attack is ceil(PhaseHealth / attack damage): the
+// attack that brings health to 0, after which the boss stops.
 //
 // Only PhaseStart and PhaseHealth are persisted (team_boss); Attacks and
 // Health are recomputed by at, so a timer's attack is a memory-only change
@@ -126,20 +129,23 @@ type BossProgress struct {
 // scan, and nothing attacks it, until an admin revives it.
 func (p BossProgress) KnockedOut() bool { return p.Health <= 0 }
 
-// at returns p with Attacks and Health as of now, against bosses. Attacks
-// stop once the team is knocked out or has defeated every boss: then p is
-// returned as it is. A pure function of the stored phase and now, so
-// calling it again (a timer, a write, Load after a restart) gives the same
-// answer.
+// at returns p with Attacks and Health as of now, against bosses. The boss
+// stops attacking at the knockout (the attack that brings health to 0), so
+// Attacks is capped there, and once every boss is defeated nothing changes.
+// A pure function of the stored phase and now, so calling it again (a
+// timer, a write, Load after a restart) gives the same answer however it's
+// reached.
 func (p BossProgress) at(now time.Time, b Bosses) BossProgress {
-	if p.Defeated >= b.Count() || p.KnockedOut() {
+	if p.Defeated >= b.Count() {
 		return p
 	}
 	boss := b.At(p.Defeated)
-	interval := boss.AttackInterval()
 	attacks := 0
 	if elapsed := now.Sub(p.PhaseStart); elapsed > 0 {
-		attacks = int(elapsed / interval)
+		attacks = int(elapsed / boss.AttackInterval())
+	}
+	if boss.AttackDamage > 0 {
+		attacks = min(attacks, (p.PhaseHealth+boss.AttackDamage-1)/boss.AttackDamage)
 	}
 	p.Attacks = attacks
 	p.Health = max(0, p.PhaseHealth-attacks*boss.AttackDamage)
@@ -285,6 +291,13 @@ type View struct {
 	// KnockedOut reports health 0: selecting and scanning are refused
 	// (knocked_out) and nothing attacks until an admin revives the team.
 	KnockedOut bool `json:"knocked_out"`
+	// UnlockedPoints is the most waypoints a pattern the team can cast may
+	// have: game.locked_pattern_points − 1 until it has defeated
+	// game.unlock_after_bosses bosses, then game.max_pattern_points.
+	UnlockedPoints int `json:"unlocked_points"`
+	// LockedShapes are the shapes the team can't select yet: every one of
+	// their patterns is bigger than UnlockedPoints. In index order.
+	LockedShapes []string `json:"locked_shapes"`
 	// CastCount is how many casts are in the team's cast log, repeats
 	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
 	// it when this is more than its length plus the cast it just saw.
@@ -373,6 +386,12 @@ type Game struct {
 	// Health is game.health: every team's starting health, and what a
 	// revive restores.
 	Health int `json:"health"`
+	// LockedPatternPoints is game.locked_pattern_points: patterns of at
+	// least this many waypoints are locked until the team has defeated
+	// UnlockAfterBosses bosses.
+	LockedPatternPoints int `json:"locked_pattern_points"`
+	// UnlockAfterBosses is game.unlock_after_bosses.
+	UnlockAfterBosses int `json:"unlock_after_bosses"`
 	// MaxPatternPoints is game.max_pattern_points.
 	MaxPatternPoints int `json:"max_pattern_points"`
 }
@@ -389,6 +408,27 @@ type GameShape struct {
 	Points []int `json:"points"`
 	// Damage is the min and max damage over the shape's patterns.
 	Damage DamageRange `json:"damage"`
+	// PatternsByPoints counts its patterns by size: {"3": 12, "4": 6}. A
+	// team can cast those of at most its team_state.unlocked_points.
+	PatternsByPoints map[int]int `json:"patterns_by_points"`
+}
+
+// unlockedPoints returns the most waypoints a pattern st's team can cast may
+// have: everything (game.max_pattern_points) once it has defeated
+// game.unlock_after_bosses bosses, game.locked_pattern_points − 1 before.
+func (s *Store) unlockedPoints(st State) int {
+	if st.Boss.Defeated >= s.rules.UnlockAfterBosses {
+		return s.rules.MaxPatternPoints
+	}
+	return s.rules.LockedPatternPoints - 1
+}
+
+// shapeLocked reports whether every pattern of shape is bigger than
+// unlocked, so a team with that limit can't select it. A shape with no
+// patterns isn't locked (there's nothing to unlock).
+func (s *Store) shapeLocked(shape, unlocked int) bool {
+	points := s.game.Shapes[shape].Points // ascending
+	return len(points) > 0 && points[0] > unlocked
 }
 
 // Game returns the shapes for GET /api/game/shapes.
@@ -397,9 +437,11 @@ func (s *Store) Game() Game { return s.game }
 // newGame builds the Game from the atlas and rules.
 func newGame(a Atlas, r Rules) Game {
 	g := Game{
-		Shapes:           make([]GameShape, a.ShapeCount()),
-		MaxPatternPoints: r.MaxPatternPoints,
-		Health:           r.Health,
+		Shapes:              make([]GameShape, a.ShapeCount()),
+		MaxPatternPoints:    r.MaxPatternPoints,
+		Health:              r.Health,
+		LockedPatternPoints: r.LockedPatternPoints,
+		UnlockAfterBosses:   r.UnlockAfterBosses,
 	}
 	for i := range a.ShapeCount() {
 		sh := a.Shape(i)
@@ -419,8 +461,10 @@ func newGame(a Atlas, r Rules) Game {
 				}
 			}
 		}
+		byPoints := map[int]int{}
 		for _, p := range pIndices {
 			sizes[a.Pattern(p).Waypoints.Len()] = true
+			byPoints[a.Pattern(p).Waypoints.Len()]++
 		}
 		points := make([]int, 0, len(sizes))
 		for n := range sizes {
@@ -428,11 +472,12 @@ func newGame(a Atlas, r Rules) Game {
 		}
 		slices.Sort(points)
 		g.Shapes[i] = GameShape{
-			ID:       sh.ID,
-			Name:     sh.Name,
-			Patterns: len(pIndices),
-			Points:   points,
-			Damage:   DamageRange{Min: minD, Max: maxD},
+			ID:               sh.ID,
+			Name:             sh.Name,
+			Patterns:         len(pIndices),
+			Points:           points,
+			Damage:           DamageRange{Min: minD, Max: maxD},
+			PatternsByPoints: byPoints,
 		}
 	}
 	return g
@@ -487,7 +532,12 @@ func (s *Store) view(teamID string, st State) View {
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{},
 		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version,
 		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier,
-		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut()}
+		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut(), UnlockedPoints: s.unlockedPoints(st), LockedShapes: []string{}}
+	for i := range c.ShapeCount() {
+		if s.shapeLocked(i, v.UnlockedPoints) {
+			v.LockedShapes = append(v.LockedShapes, c.Shape(i).ID)
+		}
+	}
 	if p := st.Boss; p.Defeated < s.bosses.Count() {
 		v.Boss = &BossView{Serial: s.bosses.At(p.Defeated).Serial, Damage: p.Damage,
 			PhaseStartedAt: p.PhaseStart.UTC(), Attacks: p.Attacks}

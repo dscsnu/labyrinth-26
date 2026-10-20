@@ -235,6 +235,43 @@ func TestFitsShape(t *testing.T) {
 	}
 }
 
+// TestFitsShapeWithin checks FitsShape limited to patterns of at most
+// maxPoints waypoints: with the line shape holding a 2-point and a 3-point
+// pattern, a point only in the 3-point one fits within 3 but not within 2,
+// and a limit below every pattern fits nothing.
+func TestFitsShapeWithin(t *testing.T) {
+	rows := fixture()
+	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
+	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50})
+	c, err := atlas.New(rows, atlas.Rules{MaxPatternPoints: maxPoints(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _ := c.ShapeIndex("line")
+	cases := []struct {
+		ids  []string
+		max  int
+		want bool
+	}{
+		{[]string{"1001"}, 2, true},          // in the 2-point line
+		{[]string{"1001"}, 1, false},         // no line has 1 point
+		{[]string{"1002"}, 3, true},          // in the 3-point line
+		{[]string{"1002"}, 2, false},         // only in the 3-point line
+		{[]string{"1002", "1005"}, 3, true},  // the 3-point line grows
+		{[]string{"1001", "1002"}, 3, false}, // spans both lines
+		{nil, 3, false},                      // the empty set fits nothing
+	}
+	for _, c2 := range cases {
+		set, _ := c.SetOf(c2.ids)
+		if got := c.FitsShapeWithin(line, set, c2.max); got != c2.want {
+			t.Errorf("FitsShapeWithin(line, %v, %d) = %v, want %v", c2.ids, c2.max, got, c2.want)
+		}
+		if c2.max >= 3 && c.FitsShapeWithin(line, set, c2.max) != c.FitsShape(line, set) {
+			t.Errorf("FitsShapeWithin(line, %v, %d) should equal FitsShape when nothing is excluded", c2.ids, c2.max)
+		}
+	}
+}
+
 // TestDevSeedLoads checks, against a real Postgres (TEST_DATABASE_URL, schema
 // atlas_test), that the 2025 seed loads and validates under config.toml's
 // rules, that a known square is found, and that the seed can be applied twice.

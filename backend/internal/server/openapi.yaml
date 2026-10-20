@@ -410,7 +410,12 @@ paths:
     put:
       tags: [game]
       summary: Select a pattern type
-      description: Any member may select. **Always purges the team's scan stack**, reselecting the same type included, so reselecting is how a team restarts a poisoned attempt.
+      description: >-
+        **Only the leader** selects (`403 not_leader`). **Always purges the team's scan stack**, reselecting the
+        same type included, so reselecting is how a team restarts a poisoned attempt. A type whose patterns are all
+        bigger than the team's `unlocked_points` is refused (`409 shape_locked`): patterns of
+        `game.locked_pattern_points` (5) or more waypoints unlock once the team has defeated
+        `game.unlock_after_bosses` (5) bosses.
       requestBody:
         required: true
         content:
@@ -425,15 +430,19 @@ paths:
         "200": { $ref: "#/components/responses/TeamState" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_shape`, `not_in_team`" }
-        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`, `knocked_out`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`, `knocked_out`, `shape_locked`" }
     delete:
       tags: [game]
       summary: Give up the selection
-      description: Clears the selection and purges the stack. A no-op 200 if nothing is selected.
+      description: >-
+        **Only the leader** gives up (`403 not_leader`). Clears the selection and purges the stack. A no-op 200 if
+        nothing is selected. Allowed when knocked out.
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
 
@@ -779,16 +788,21 @@ components:
 
     Game:
       type: object
-      required: [shapes, health, max_pattern_points]
+      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points]
       properties:
         shapes:
           type: array
           items: { $ref: "#/components/schemas/GameShape" }
         health: { type: integer, description: "game.health: every team's starting health, and what a revive restores.", example: 10 }
+        locked_pattern_points:
+          type: integer
+          description: "game.locked_pattern_points: patterns of at least this many waypoints are locked until a team has defeated unlock_after_bosses bosses."
+          example: 5
+        unlock_after_bosses: { type: integer, description: "game.unlock_after_bosses.", example: 5 }
         max_pattern_points: { type: integer, description: "game.max_pattern_points: the most waypoints in any pattern.", example: 6 }
     GameShape:
       type: object
-      required: [id, name, patterns, points, damage]
+      required: [id, name, patterns, points, damage, patterns_by_points]
       properties:
         id: { type: string, description: What PUT …/selection takes., example: square }
         name: { type: string, example: Square }
@@ -801,10 +815,17 @@ components:
           properties:
             min: { type: integer, example: 87 }
             max: { type: integer, example: 125 }
+        patterns_by_points:
+          type: object
+          additionalProperties: { type: integer }
+          description: >-
+            Its patterns counted by size (JSON keys are the sizes). A team can cast those of at most its
+            `team_state.unlocked_points`.
+          example: { "3": 12, "4": 6 }
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, cast_count, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cast_count, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
@@ -871,6 +892,18 @@ components:
             The team's health: `game.health` (10) at the start, less every boss attack. Derived from the boss phase
             and the clock, so it drops with nobody acting (`boss_attacked`).
           example: 9
+        unlocked_points:
+          type: integer
+          description: >-
+            The most waypoints a pattern the team can cast may have: `game.locked_pattern_points` − 1 (4) until it
+            has defeated `game.unlock_after_bosses` (5) bosses, then `game.max_pattern_points` (6). A scan that could
+            only grow into a bigger pattern is a wrong scan.
+          example: 4
+        locked_shapes:
+          type: array
+          items: { type: string }
+          description: "Types the team can't select yet (`shape_locked`): every one of their patterns is bigger than `unlocked_points`."
+          example: [hexagon]
         knocked_out:
           type: boolean
           description: >-

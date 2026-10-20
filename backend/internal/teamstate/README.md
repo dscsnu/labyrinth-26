@@ -36,7 +36,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Selection** | The shape a team is currently attempting. At most one per team. |
 | **Attempt** | Everything between a selection and the next selection, clear or cast. Its scans are the stack. |
 | **Stack** | The attempt's accepted scans, oldest at the **bottom**, newest on **top**. It holds **one scan per waypoint**; any member may scan any number of them. Its correct scans always fit inside one pattern of the selected shape, so there are at most **6** (`game.max_pattern_points`) of them, plus at most **one wrong scan**, always on top. Capacity: **7** (`game.max_pattern_points` + 1). Scans never leave on their own: only a selection, clear or cast empties it. |
-| **Wrong scan** | A scan whose waypoint, together with the scans already in the stack, isn't part of any pattern of the selected shape (`!FitsShape`). It's **pushed** (not rejected), marked `wrong`, and the player is **told**: outcome `wrong_scan`, and `stack[].wrong: true` on every phone. |
+| **Wrong scan** | A scan whose waypoint, together with the scans already in the stack, isn't part of any pattern of the selected shape that the team has unlocked (`!FitsShapeWithin(shape, set, unlocked points)`). It's **pushed** (not rejected), marked `wrong`, and the player is **told**: outcome `wrong_scan`, and `stack[].wrong: true` on every phone. |
 | **Poisoned** | The stack holds a wrong scan (`State.Poisoned()`, `poisoned: true` in JSON). The attempt can't cast, and every further scan is refused with `409 selection_poisoned` until someone selects again (which purges the stack). See [Wrong scans and poisoned attempts](#wrong-scans-and-poisoned-attempts). |
 | **Cast** | A completion: the moment the stack becomes exactly a pattern of the selected shape. The client calls it casting a spell. Every cast is logged, repeats included: in memory (`State.Casts`) and in `team_cast`. `team_pattern` keeps only the first completion of each pattern. |
 | **Cast log** | `State.Casts`: every cast the team has made, oldest first, loaded from `team_cast` at startup. `GET /api/teams/me/casts` returns it newest first. |
@@ -44,33 +44,36 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Cast count** | `cast_count` in JSON: `len(State.Casts)`. A client holding the log re-fetches it when this is more than it has. |
 | **Last cast** | `State.LastCast()`, `last_cast` in JSON: the cast log's newest entry (pattern, shape, who, when, whether the pattern was already completed, damage, and what it did to a boss: `dealt`, `boss`, `defeated_boss`). Kept until the next cast; a new selection or a clear doesn't remove it. |
 | **Spell lifecycle** | What the client shows as a spell, read from `team_state` alone, with no event of its own: it **starts** when `selection` is set, members **add their points** as `stack` grows (`stack[].user_id` says who scanned each), it **fails** when `poisoned` turns true, and it **finishes** when `last_cast` changes (a new `cast_at`). |
-| **Bosses** | The static sequence every team fights, in serial order: **7** (`game.bosses`), read through the [`Bosses` interface](#storego-the-in-memory-layout). See [`internal/bosses/README.md`](../bosses/README.md). |
+| **Bosses** | The static sequence every team fights, in serial order: **6** (`game.bosses`), read through the [`Bosses` interface](#storego-the-in-memory-layout). See [`internal/bosses/README.md`](../bosses/README.md). |
 | **Boss progress** | `State.Boss` (`BossProgress`): `Defeated` (bosses defeated, so the current boss is at index `Defeated`), `Damage` (dealt to the current boss so far), `Multiplier`, and the phase (`PhaseStart`, `PhaseHealth`) with its derived `Attacks` and `Health`. In JSON: `bosses_defeated`, `boss: {serial, damage, phase_started_at, attacks, next_attack_at}` (`null` once every boss is defeated), `damage_multiplier`, `health`, `knocked_out`. Stored in `team_boss` (all but `Attacks` and `Health`). |
 | **Dealt** | What a cast does to the current boss: `round(pattern damage × Multiplier)`. Reaching the boss's HP defeats it; the excess is lost. 0 once every boss is defeated. See [Bosses](#bosses). |
 | **Multiplier** | Per team, default **1** (`team_boss.multiplier`). Nothing changes it yet. |
 | **Phase** | The span a team spends on its current boss. It starts at `PhaseStart` with `PhaseHealth`: boss 1 at the team's start (`team.started_at`) with full health, boss n+1 at the cast that defeated boss n with the health then, or an admin's revive with full health. Stored in `team_boss.phase_started_at`, `phase_health` (`NULL`: the team's start, full health). |
 | **Attack** | Every `attack_interval_s` of the phase, the current boss takes its `attack_damage` off the team's health. The k-th is at exactly `PhaseStart + k × interval`. See [Boss attacks and health](#boss-attacks-and-health). |
-| **Health** | Per team, **10** (`game.health`) at the start. **Derived, never stored per attack:** `Attacks = floor((now − PhaseStart) / interval)`, `Health = max(0, PhaseHealth − Attacks × attack_damage)`. `health` in JSON. |
+| **Health** | Per team, **10** (`game.health`) at the start. **Derived, never stored per attack:** `Attacks = min(floor((now − PhaseStart) / interval), ceil(PhaseHealth / attack_damage))`, `Health = max(0, PhaseHealth − Attacks × attack_damage)`. `health` in JSON. |
 | **Knocked out** | Health 0 (`BossProgress.KnockedOut()`, `knocked_out` in JSON): selecting and scanning are refused (`409 knocked_out`), clearing still works, and attacks stop, until an admin revives the team (`POST /api/admin/teams/{team_id}/revive`). |
 | **Catch-up** | `catchUp`: applies any attack that has fallen due, as its own change. The attack timer calls it, and so does every write before validating, so an attack is never lost to a late timer. |
 | **Visited waypoints** | Every waypoint the team has ever had a scan accepted at, under any selection, wrong scans included. |
 | **Clock** | Where the store gets time: `Now()` (the time selections, scans and casts are stamped with, and what health is derived against) and `AfterFunc(d, f)` (the boss attack timers). `systemClock` is the real one (`time.Now`, `time.AfterFunc`); tests pass a fake through `Rules.Clock`, whose timers fire only when the test moves its time. |
-| **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts, sizes and damage ranges, plus `health` (starting health) and `max_pattern_points`. Static while the backend runs. |
+| **Game rules** | What `GET /api/game/shapes` returns: the selectable shapes (the client's "types") with their pattern counts, counts by size (`patterns_by_points`), sizes and damage ranges, plus `health` (starting health), `locked_pattern_points`, `unlock_after_bosses` and `max_pattern_points`. Static while the backend runs. |
+| **Leader** | The team's leader (teams' `Team.LeaderID`). **Only the leader selects a shape and clears the selection** (`403 not_leader` for anyone else), so only the leader restarts a poisoned attempt; every member scans. Checked under the entry lock against teams' current roster (`isLeader`): an admin removing the leader names a new one. |
+| **Big pattern** | A pattern of at least **5** (`game.locked_pattern_points`) waypoints. **Locked** until the team has defeated **5** (`game.unlock_after_bosses`) bosses: it can't be cast, a shape made only of big patterns can't be selected (`409 shape_locked`), and in a shape mixing sizes a scan that could only grow into a big pattern is a wrong scan. The 2025 seed has none (all its patterns have 3 or 4 points), so this only matters for content that does. |
+| **Unlocked points** | `unlockedPoints(State)`, `unlocked_points` in JSON: the most waypoints a pattern the team can cast may have. **4** (`game.locked_pattern_points` − 1) until it has defeated `game.unlock_after_bosses` bosses, then **6** (`game.max_pattern_points`). `locked_shapes` lists the shapes whose every pattern is bigger. |
 
 **Client words.** The client's **"type"** is our **Shape**, its **"shape"** is our **Pattern**, its **"point"** is our **Waypoint**, and its **"buffer"** is our **Stack**. This README and the code always use the code's words. The full vocabulary, spells included, is in [`internal/atlas/README.md`](../atlas/README.md).
 
 ## The game flow
 0. **Start.** When the leader starts the team (teams' `Start`; any size from 1 to **6** (`teams.size`) may start, once every non-leader is ready), every member's stream gets the `IN_GAME` `team` and then the team's `team_state`, empty: no selection, no stack, no progress, `poisoned: false`, health **10** (`game.health`), and boss 1's attack clock started at the team's start. teams calls `PublishTeam` through its `Rules.OnStart` hook, wired in `server.Build`, because teams may not import teamstate (AGENTS.md §4). The play screen has its state at once, without reconnecting.
-1. **Select.** Any member selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}`. **Every selection purges the stack**, reselecting the same shape included. Reselecting is how a team restarts an attempt.
+1. **Select.** **The leader** selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}` (anyone else: `403 not_leader`). **Every selection purges the stack**, reselecting the same shape included. Reselecting is how a team restarts an attempt. A shape whose patterns are all bigger than the team's unlocked points is refused (`409 shape_locked`) until it has defeated **5** (`game.unlock_after_bosses`) bosses.
 2. **Scan.** Members scan waypoints: `POST /api/teams/me/state/scans {"waypoint_id":"1001"}`. No time limit, and any member may scan any number of the pattern's waypoints (one player can scan a whole pattern). A scan is **rejected with an error and not pushed** if:
    - no shape is selected: `409 no_shape_selected`
    - the attempt is **poisoned**: `409 selection_poisoned`
    - its **waypoint is already in the stack**, whoever scanned it, the same member included: `409 waypoint_already_scanned`
 
-   Otherwise it's pushed on top. If the waypoint, with the stack, can't be part of any pattern of the selected shape, it's pushed **marked wrong**, the response says `wrong_scan`, and the attempt is poisoned.
+   Otherwise it's pushed on top. If the waypoint, with the stack, can't be part of any pattern of the selected shape **that the team has unlocked**, it's pushed **marked wrong**, the response says `wrong_scan`, and the attempt is poisoned.
 3. **Complete (cast).** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, the cast is appended to the cast log (`State.Casts`, `team_cast`) and becomes `last_cast`, its damage (× the team's multiplier) goes to the current **boss** (a defeat moves the team to the next; see [Bosses](#bosses)), and **the stack and the selection are purged**. The team selects again for its next attempt.
-4. **Restart.** After a wrong scan, any member reselects (the same shape or another): the stack, wrong scan included, is purged and the team scans again.
-5. **Give up.** `DELETE /api/teams/me/state/selection` clears the selection and the stack.
+4. **Restart.** After a wrong scan, the leader reselects (the same shape or another): the stack, wrong scan included, is purged and the team scans again.
+5. **Give up.** The leader's `DELETE /api/teams/me/state/selection` clears the selection and the stack.
 6. **The boss attacks** every `attack_interval_s` of the phase, with nobody acting: the server lowers health and publishes `boss_attacked` (`knocked_out` when health reaches 0). Defeating the boss starts the next boss's clock. A knocked-out team can't select or scan until an admin revives it. See [Boss attacks and health](#boss-attacks-and-health).
 
 **"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is correct if it's in *any* pattern of the shape. Each later scan must keep the stack inside at least one pattern of the shape that contains everything already scanned. A scan that doesn't is wrong.
@@ -83,6 +86,10 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 
 **Why no time limit.** The game used to give a pattern's scans 1 minute (plus grace) bottom to top. That's gone: an attempt lasts until it casts, is restarted or is cleared, so there are no stale scans. The pressure of time comes from the bosses instead: a slow team loses health, not scans.
 
+**Why only the leader selects.** A selection purges the stack, so any member selecting could wipe teammates' scans mid-attempt, by accident or in a race. One person choosing the type (and deciding when to restart or give up) makes the team's plan unambiguous; scanning stays open to everyone.
+
+**Why big patterns are locked, and why as "they don't exist yet".** 5- and 6-point patterns are the hardest and deal the most damage, so they're a reward for getting through boss 5. Treating a locked pattern as absent (the fit check counts only unlocked patterns) keeps one rule for everything: a scan that can only lead to a locked pattern is simply wrong, so a team can't half-build one and wait.
+
 **Retries.** A phone resending a scan gets `409 waypoint_already_scanned` (or `selection_poisoned`, if its first copy was wrong); the app should treat that as "already in" and refresh from the returned state or the live event.
 
 ## How each file works
@@ -93,8 +100,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `shapes` returns `Store.Game()` to any signed-in user, in a team or not.
   - `getMine` returns the caller's team state (`Store.ForUser`).
   - `casts` returns the caller's team's cast log, newest first (`Store.CastsForUser`).
-  - `selectShape` decodes `{"shape"}` and calls `Store.Select`.
-  - `clearSelection` calls `Store.ClearSelection`.
+  - `selectShape` decodes `{"shape"}` and calls `Store.Select` (leader only).
+  - `clearSelection` calls `Store.ClearSelection` (leader only).
   - `scan` decodes `{"waypoint_id"}` and calls `Store.Scan`, returning a `ScanResult`.
   - `revive` takes `{team_id}` from the path, calls `Store.Revive`, and logs `admin revived team` with the admin's ID. A malformed ID isn't checked separately: it's just not found (`404 team_not_found`).
 - **`fail`** maps errors to statuses and codes via the `errorCodes` table; anything unmapped is logged and becomes `500`.
@@ -108,39 +115,42 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `Cast`: one completed pattern (`Pattern`, `By`, `At`, `AlreadyCompleted`), and what it did to the bosses (`Dealt`, `Boss` = the serial hit or 0, `DefeatedBoss`).
   - `BossProgress`: a team's progress (`Defeated`, `Damage`, `Multiplier`) and its phase (`PhaseStart`, `PhaseHealth`, and the derived `Attacks`, `Health`); a value inside `State`.
   - `BossProgress.KnockedOut()`: `Health <= 0`.
-  - `BossProgress.at(now, bosses)`: the progress with `Attacks` and `Health` as of `now`: `Attacks = floor((now − PhaseStart) / interval)` (0 if `now` is before `PhaseStart`), `Health = max(0, PhaseHealth − Attacks × attack_damage)`. Returns the progress unchanged if every boss is defeated or the team is knocked out (attacks stop). A pure function, so the timer, a write and `Load` all get the same answer for the same time.
+  - `BossProgress.at(now, bosses)`: the progress with `Attacks` and `Health` as of `now`: `Attacks = floor((now − PhaseStart) / interval)` (0 if `now` is before `PhaseStart`), capped at the knockout attack `ceil(PhaseHealth / attack_damage)` (no cap when `attack_damage` is 0), and `Health = max(0, PhaseHealth − Attacks × attack_damage)`. Returns the progress unchanged if every boss is defeated. A pure function of the stored phase and the time, so the timer, a write and `Load` all get the same answer for the same time, however they got there: the cap is what makes a knocked-out team's `Attacks` the same live (where attacks stopped at the knockout) and after a restart (where `Load` computes it fresh).
   - `BossProgress.nextAttack(bosses)`: `PhaseStart + (Attacks + 1) × interval`; `ok` false if every boss is defeated or the team is knocked out.
   - `deal(progress, damage, now, bosses)`: applies one cast: returns the new progress, the damage dealt (`math.Round(damage × Multiplier)`), the serial of the boss hit, and whether it was defeated. If every boss is already defeated it returns the progress unchanged, 0, 0, false. On a defeat it increments `Defeated`, resets `Damage` to 0 (the rest of the cast is lost), and **starts the next boss's phase**: `PhaseStart` = `now`, `PhaseHealth` = the current `Health`, `Attacks` = 0. The progress passed in must already be at `now` (`Scan` caught up first). Called by `Scan`.
-  - `View`, `SelectionView`, `CastView`, `BossView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast` and each entry of the cast log: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`, `damage`, `dealt`, `boss` (serial, or `null`), `defeated_boss`. `StackScanView` carries `wrong`; `View` carries `poisoned`, `bosses_defeated`, `boss` (`BossView{serial, damage, phase_started_at, attacks, next_attack_at}`, or `null`), `damage_multiplier`, `health` and `knocked_out`.
-  - `Game`, `GameShape`, `DamageRange`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`) and `health` (`game.health`).
+  - `View`, `SelectionView`, `CastView`, `BossView`, `StackScanView`: the JSON shapes. `CastView` is `last_cast` and each entry of the cast log: `pattern` (sorted waypoint IDs), `shape`, `cast_by`, `cast_at`, `already_completed`, `damage`, `dealt`, `boss` (serial, or `null`), `defeated_boss`. `StackScanView` carries `wrong`; `View` carries `poisoned`, `bosses_defeated`, `boss` (`BossView{serial, damage, phase_started_at, attacks, next_attack_at}`, or `null`), `damage_multiplier`, `health`, `knocked_out`, `unlocked_points` and `locked_shapes`.
+  - `Game`, `GameShape`, `DamageRange`: the JSON of `GET /api/game/shapes`, including each shape's `damage` range (`{"min": …, "max": …}`) and `patterns_by_points` (its patterns counted by size), and the game's `health` (`game.health`), `locked_pattern_points` and `unlock_after_bosses`.
+  - `Store.unlockedPoints(State)`: `Rules.MaxPatternPoints` once `State.Boss.Defeated` ≥ `Rules.UnlockAfterBosses`, else `Rules.LockedPatternPoints` − 1. Used by `view`, `Select` and `Scan`.
+  - `Store.shapeLocked(shape, unlocked)`: true if the shape's smallest pattern (`Game.Shapes[shape].Points[0]`, the sizes being ascending) is bigger than `unlocked`. A shape with no patterns isn't locked.
 - **`Stack` methods** (all on values; none modifies the receiver):
   - `NewStack(maxPoints)` is an empty stack with `Cap` = `maxPoints` + 1 (exported so tests can build one).
   - `Len()` counts scans.
   - `At(i)` is the i-th from the bottom (`At(0)` the oldest).
   - `Push(sc)` returns the stack with `sc` on top. It **panics** on a full stack: `Scan` never pushes onto one (correct scans fit one pattern, and nothing is pushed after a wrong scan), so a full push would be a bug.
-- **`newGame(atlas, rules)`** builds the `Game` once, in `Load`: for each shape in index order (`ShapeCount`, `Shape(i)`), its ID and name, how many patterns it has (`len(ShapePatterns(i))`), the distinct sizes of those patterns (`Pattern(p).Waypoints.Len()`), ascending, and the minimum and maximum `Pattern(p).Spell.Damage`; plus `MaxPatternPoints` and `Health` from `Rules`.
+- **`newGame(atlas, rules)`** builds the `Game` once, in `Load`: for each shape in index order (`ShapeCount`, `Shape(i)`), its ID and name, how many patterns it has (`len(ShapePatterns(i))`), the distinct sizes of those patterns (`Pattern(p).Waypoints.Len()`), ascending, and the minimum and maximum `Pattern(p).Spell.Damage`, and the count of its patterns of each size (`PatternsByPoints`); plus `MaxPatternPoints`, `Health`, `LockedPatternPoints` and `UnlockAfterBosses` from `Rules`.
 - **Reads**, all from memory:
   - `Game()`: the prebuilt `Game`; no lock, it never changes
   - `ForTeam(teamID)` → `State` (the empty state for a team with no entry). Reads return the snapshot as last applied: health is as of the last catch-up (the timer keeps it current), not recomputed on read
   - `ForUser(userID)` → `View`, or `ErrNotInTeam`
   - `CastsForUser(userID)` → `[]CastView`, newest first, or `ErrNotInTeam`; `[]` before the first cast
   - `Snapshot(userID)`: the live event for a new stream, of type `snapshot`
-- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast()` (`null` when the log is empty), lists every stack scan with its `wrong` flag, sets `poisoned` from `State.Poisoned()`, and sets the boss fields: `bosses_defeated`, `damage_multiplier`, `health` and `knocked_out` from `State.Boss`, and `boss` from `Bosses.At(Defeated).Serial` with `Damage`, `PhaseStart`, `Attacks` and `next_attack_at` (`nextAttack`, `null` when knocked out), or `null` when `Defeated` ≥ `Bosses.Count()`.
+- **`view`** converts indexes and bits to IDs through the atlas (`WaypointIDs`, `Pattern`, `Shape`, `Waypoint`), times to UTC, builds `last_cast` from `State.LastCast()` (`null` when the log is empty), lists every stack scan with its `wrong` flag, sets `poisoned` from `State.Poisoned()`, and sets the boss fields: `bosses_defeated`, `damage_multiplier`, `health` and `knocked_out` from `State.Boss`, `unlocked_points` from `unlockedPoints` and `locked_shapes` (every shape `shapeLocked` at that size, in index order; `[]` when none), and `boss` from `Bosses.At(Defeated).Serial` with `Damage`, `PhaseStart`, `Attacks` and `next_attack_at` (`nextAttack`, `null` when knocked out), or `null` when `Defeated` ≥ `Bosses.Count()`.
 - **`castView`** turns one `Cast` into a `CastView`, the shape being the pattern's `Shape` `damage` the pattern's precomputed `Spell.Damage` (from `pattern.damage`, loaded by the atlas), and `dealt`, `boss` (`null` when the cast's `Boss` is 0) and `defeated_boss` from the `Cast`. Used by `view` and `CastsForUser`.
 
 ### `write.go`: writes, each written through
 - **`Select`**, **`ClearSelection`**, **`Scan`** and **`Revive`** each follow the [write-through](#the-write-through) steps, numbered in the code.
-- **Catch-up first.** Right after `1. lock` and `isMember`, `Select`, `ClearSelection` and `Scan` call **`catchUp`**, which applies any boss attack that has fallen due (its own change and its own event) and returns the current state; the write validates against that. Then `Select` and `Scan` refuse a knocked-out team (`ErrKnockedOut`, `409 knocked_out`) before anything else; `ClearSelection` doesn't (giving up is harmless). `Revive` catches up too, so the event order is the attack, then the revive.
+- **Catch-up first.** Right after `1. lock` and `isMember`, `Select`, `ClearSelection` and `Scan` call **`catchUp`**, which applies any boss attack that has fallen due (its own change and its own event) and returns the current state; the write validates against that. Then `Select` and `ClearSelection` refuse anyone but the leader (`isLeader`, `ErrNotLeader`, `403 not_leader`); `Select` and `Scan` refuse a knocked-out team (`ErrKnockedOut`, `409 knocked_out`); `ClearSelection` doesn't (giving up is harmless); and `Select` refuses a shape whose patterns are all locked (`shapeLocked`, `ErrShapeLocked`, `409 shape_locked`). `Revive` catches up too, so the event order is the attack, then the revive.
 - **`catchUp(e, teamID)`**: `cur.Boss.at(now)`; if `Attacks` and `Health` are unchanged, returns `cur`. Otherwise it builds the next state with the new progress and `Version.Next`, **skips persist** (memory-only, AGENTS.md §6: health is derived from the stored phase and the clock, and `Load` reproduces it exactly), applies, and publishes **`boss_attacked`**, or **`knocked_out`** if health is now 0. Several due attacks become **one** change and one event.
 - **`attack(teamID)`**: the attack timer's callback, run by the `Clock` in its own goroutine. `1. lock`, then nothing if the store is closed (`entry.closed`), else `catchUp` and `schedule` for the next attack. A timer that fires early finds nothing due and re-arms; one that fires late applies everything due.
 - **`Revive(ctx, teamID)`**: an admin's revive. `2. validate, before 1. lock`: `Teams.ByID` (unknown → `ErrTeamNotFound`, `404 team_not_found`), `IN_GAME` (else `ErrNotInGame`, `409 not_in_game`). `1. lock`, `catchUp`, `3. build`: a new phase of the same boss, `PhaseStart` = now, `PhaseHealth` = `Health` = `Rules.Health`, `Attacks` = 0. `4. persist`: `upsertBossPhase`. `5. apply`, `6. publish` **`revived`**, and `schedule`. Allowed whether or not the team is knocked out, so it also heals; `Defeated`, `Damage` and the multiplier are kept.
 - **Lock-free checks first** (§6 variation (a)): `Select` resolves the shape with `Atlas.ShapeIndex`, `Scan` the waypoint with `Atlas.WaypointIndex`, both before the team and the lock.
-- **`Scan`'s checks**, in order, under the lock: no selection → `ErrNoShapeSelected`; `cur.Poisoned()` → `ErrSelectionPoisoned`; the waypoint already in the stack → `ErrWaypointAlreadyScanned`. Then `Atlas.FitsShape(shape, stack ∪ {w})` decides whether the scan is **wrong** (pushed, marked `Wrong`, outcome `wrong_scan`). Completion is `!wrong` and `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, the cast's damage goes to the boss (`deal(cur.Boss, Pattern(p).Spell.Damage, bosses)` sets `next.Boss` and the cast's `Dealt`, `Boss`, `DefeatedBoss`; a defeat makes the event type `boss_defeated` instead of `spell_cast`, and starts the next boss's phase, after which `Scan` calls `schedule`), and the new `Cast` is appended to the log **copy-on-write**: `append(slices.Clip(cur.Casts), cast)`. `Clip` sets the slice's capacity to its length, so `append` always allocates a new backing array and the current snapshot's slice is never written to.
+- **`Scan`'s checks**, in order, under the lock: no selection → `ErrNoShapeSelected`; `cur.Poisoned()` → `ErrSelectionPoisoned`; the waypoint already in the stack → `ErrWaypointAlreadyScanned`. Then `Atlas.FitsShapeWithin(shape, stack ∪ {w}, unlockedPoints(cur))` decides whether the scan is **wrong** (pushed, marked `Wrong`, outcome `wrong_scan`): only patterns the team has unlocked count, so a scan that could only grow into a locked one is wrong too. Completion is `!wrong` and `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, the cast's damage goes to the boss (`deal(cur.Boss, Pattern(p).Spell.Damage, bosses)` sets `next.Boss` and the cast's `Dealt`, `Boss`, `DefeatedBoss`; a defeat makes the event type `boss_defeated` instead of `spell_cast`, and starts the next boss's phase, after which `Scan` calls `schedule`), and the new `Cast` is appended to the log **copy-on-write**: `append(slices.Clip(cur.Casts), cast)`. `Clip` sets the slice's capacity to its length, so `append` always allocates a new backing array and the current snapshot's slice is never written to.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME` (lock-free: a started team's status never goes back).
 - **`isMember(teamID, userID)`** reads the team's current roster through `Teams.ByID` (lock-free) and reports whether the user is in it. `Select`, `ClearSelection` and `Scan` call it **again under the entry lock**, right after `1. lock`, and refuse with `ErrNotInTeam` (`404 not_in_team`) if an admin removed the caller since `inGameTeam` looked them up. A started team's roster can shrink (teams' `RemoveMember`), so the lock-free lookup alone isn't enough.
+- **`isLeader(teamID, userID)`** reads the team through `Teams.ByID` (lock-free) and reports whether the user is its leader **now**. `Select` and `ClearSelection` call it under the entry lock, after `catchUp`: an admin removing the leader names a new one (teams' `RemoveMember`), and from then on only the new leader passes.
 - **`RosterChanged(teamID)`** is teams' `Rules.OnRosterChange` (wired in `server.Build`): an admin removed a member from a started team. It locks the entry (`lockTeam`) and drops `entry.members`, the roster cache, so the next publish re-reads the roster from teams and no longer reaches the removed player. **Memory-only** (AGENTS.md §6): the roster is teams' data, already saved. **Publishes nothing:** the team's `State` didn't change (the removed player's scans and casts stay), and teams has already sent the rest `team` and the removed player `no_team`.
 - **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing, and arms the team's first attack timer. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none, its phase starting at the team's `started_at`), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team), then `schedule`. Not a write: no build, persist or apply. It takes the entry lock so its event is ordered with the team's writes.
-- **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
+- **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
 
 ### `db.go`: SQL
 Only the per-team tables. The content tables are read by the atlas (`internal/atlas/db.go`).
@@ -282,6 +292,8 @@ Per team, written through:
 
 Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_cast` is written only inside `insertCompletingScan`'s transaction, so a cast is logged, and its damage counted, exactly when its scan and its `team_pattern` row are; `team_boss` is written there too, and by a revive.
 
+**Migration `0010`'s SQL comment states the attack formula without the knockout cap** (`attacks = floor((now − phase_started_at) / attack_interval_s)`). The code and this README are right: attacks stop at the knockout attack, `ceil(phase_health / attack_damage)` (see "Boss attacks and health"). An applied migration can't be edited (AGENTS.md §8: its checksum is recorded); a later migration can correct the comment in the database with `COMMENT ON` if it's ever worth one.
+
 **The stack isn't a table.** It's derived: the `team_scan` rows with `id > after_scan_id` (at most **7**, `game.max_pattern_points` + 1, which is the query's `LIMIT`). Selecting moves `after_scan_id` to the latest scan (purge); completing or clearing deletes the selection (no selection, no stack). Scans never leave an attempt any other way, so the rows after `after_scan_id` are exactly the stack.
 
 ## Memory ↔ Postgres
@@ -329,7 +341,7 @@ How a mistake plays out, end to end.
 **What the client shows** (`frontend/src/routes/play/+page.svelte`): on `wrong_scan`, a message that the point doesn't match any pattern of the selected type with the points already scanned; the stack lists the wrong scan in red, with who scanned it; while `poisoned`, a banner with a **restart attempt** button (which reselects the same shape) and the scan form disabled.
 
 ## Bosses
-Every team fights the same **7** (`game.bosses`) bosses in serial order. The bosses themselves are static ([`internal/bosses/README.md`](../bosses/README.md)); a team's place among them is `State.Boss`, changed only by casts.
+Every team fights the same **6** (`game.bosses`) bosses in serial order. The bosses themselves are static ([`internal/bosses/README.md`](../bosses/README.md)); a team's place among them is `State.Boss`, changed only by casts.
 
 **What a cast does** (`deal`, called by `Scan` on `pattern_completed`):
 1. If every boss is defeated (`Defeated` = `Count()`, or no bosses are loaded): nothing. The cast still counts (pattern, shape, cast log) with `dealt 0`, `boss null`.
@@ -339,19 +351,24 @@ Every team fights the same **7** (`game.bosses`) bosses in serial order. The bos
 
 **Repeats count.** A cast of an already-completed pattern (`already_completed: true`) deals damage like any other.
 
+**Defeating boss 5 unlocks the big patterns** (`game.unlock_after_bosses`, **5**): `unlocked_points` goes from 4 to 6 and `locked_shapes` empties in the same `boss_defeated` event.
+
 **The multiplier** is stored per team (`team_boss.multiplier`) and applied to every cast, but **nothing sets it yet**: it's 1 for every team unless changed in Postgres with the backend stopped. A future power-up would change it as a teamstate write.
 
 **What the client shows** (`/play`): the current boss from `GET /api/game/bosses` by `boss.serial` (image, name, description), an HP bar of `hp − boss.damage` of `hp`, the multiplier when it isn't 1, "Every boss defeated!" when `boss` is `null`; a `boss_defeated` event shows "<name> defeated!" on every phone; the cast log shows each cast's `dealt` and the boss it hit.
 
 ## Boss attacks and health
-Every team has health, **10** (`game.health`) at the start. Its current boss attacks it every `attack_interval_s` seconds of the phase, for `attack_damage` (`boss` table; seed: boss 1 every 300 s for 1 … boss 7 every 120 s for 2). This is the game's one change caused by time passing, so the server applies and publishes it with nobody acting (AGENTS.md §9: the server owns time).
+Every team has health, **10** (`game.health`) at the start. Its current boss attacks it every `attack_interval_s` seconds of the phase, for `attack_damage` (`boss` table; seed: boss 1 every 300 s for 1 … boss 6, Gideon, every 120 s for 2). This is the game's one change caused by time passing, so the server applies and publishes it with nobody acting (AGENTS.md §9: the server owns time).
 
 **Health is derived, never stored per attack.** The phase is what's stored (`team_boss.phase_started_at`, `phase_health`), and at any time `now`:
 
 ```
-attacks = floor((now − PhaseStart) / interval)          the k-th attack is at PhaseStart + k × interval
+attacks = min(floor((now − PhaseStart) / interval),     the k-th attack is at PhaseStart + k × interval
+              ceil(PhaseHealth / attack_damage))         ...and the boss stops at the knockout attack
 health  = max(0, PhaseHealth − attacks × attack_damage)
 ```
+
+The cap matters only once the team is knocked out: without it, a knocked-out team's `boss.attacks` stayed at the knockout attack in memory but was recomputed from every elapsed interval by `Load`, so a restart changed it. `TestGameLoopSimulation` caught that (a team on boss 7 knocked out after 2 attacks came back with 7). With `attack_damage` 0 there's no knockout and no cap.
 
 So an attack writes nothing: it's a memory-only change that `Load` reproduces exactly (the kind AGENTS.md §6 allows). Only a phase boundary writes:
 
@@ -377,12 +394,13 @@ So an attack writes nothing: it's a memory-only change that `Load` reproduces ex
 **What the client shows** (`/play`): a health bar of `health` of `Game.health`; the current boss's interval and damage, and a countdown to `boss.next_attack_at` on the server's clock (`hello`, `ServerClock`); when `knocked_out`, a red banner and the type buttons and scan form disabled; on `boss_attacked`, `knocked_out` and `revived`, a message on every phone. The client only displays: the server applies attacks.
 
 ## Walkthroughs
-Team `482913`, members A–F, 2025 seed (square = `1001 1002 1007 1008` = indexes 0, 1, 6, 7, bitmask 195; `square` = shape 2), config.toml as shipped. Times are `mm:ss` after 12:00. Stacks are written bottom → top as `waypoint/member@time`; a wrong scan is marked ✗.
+Team `482913`, members A–F, **F the leader** (only F selects and clears), 2025 seed (square = `1001 1002 1007 1008` = indexes 0, 1, 6, 7, bitmask 195; `square` = shape 2), config.toml as shipped. Times are `mm:ss` after 12:00. Stacks are written bottom → top as `waypoint/member@time`; a wrong scan is marked ✗.
 
 ### 1. A square, with every rejection
 | Time | Request | Check | Stack after | Postgres after | Response |
 |---|---|---|---|---|---|
-| 00:00 | F: select `square` | team IN_GAME, shape known | empty | `team_selection(square, F, after_scan_id = latest)` | `200`, `selection.shape = "square"` |
+| 00:00 | A: select `square` | **A isn't the leader** | empty | unchanged | `403 not_leader` |
+| 00:00 | F: select `square` | team IN_GAME, shape known, F leads, `square` (4 points) not locked | empty | `team_selection(square, F, after_scan_id = latest)` | `200`, `selection.shape = "square"` |
 | 00:01 | A: scan `1001` | `{1001}` (bitmask 1) is inside some square | `1001/A@01` | `team_scan` +1 | `scan_added` |
 | 00:02 | A: scan `1001` (a retry) | **1001 is already in the stack** | unchanged | unchanged | `409 waypoint_already_scanned` |
 | 00:03 | B: scan `1001` | **1001 is already in the stack** | unchanged | unchanged | `409 waypoint_already_scanned` |
@@ -418,23 +436,24 @@ F selects `square`. D scans `1001`, `1002`, `1007`, `1008` in turn: `scan_added`
 | Time | Request | `last_cast` after | `GET /api/teams/me/casts` | `patterns` | `team_cast` rows | `team_pattern` rows |
 |---|---|---|---|---|---|---|
 | (start) | | `null` | `[]` | `[]` | 0 | 0 |
-| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":107,"dealt":107,"boss":1,"defeated_boss":false}` | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
+| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":107,"dealt":107,"boss":1,"defeated_boss":true}` (107 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
 | 01:00 | F selects `triangle` | **unchanged** (a selection doesn't clear it) | unchanged | unchanged | 1 | 1 |
 | 02:00 | F selects `square` again | unchanged | unchanged | unchanged | 1 | 1 |
-| 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true,"dealt":107,"boss":1,"defeated_boss":true}` (107 + 107 = 214 ≥ boss 1's 200 HP) | `[02:04 cast (already_completed: true), 00:12 cast]` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
+| 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true,"dealt":107,"boss":2,"defeated_boss":true}` (107 ≥ boss 2's 100 HP) | `[02:04 cast (already_completed: true), 00:12 cast]` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
 | (restart) | | the 02:04 cast | the same two, same order | unchanged | 2 | 1 |
 
 `ScanResult.already_completed` and `last_cast.already_completed` agree for the scan that cast.
 
-### 7. Two casts defeat boss 1 (seed: Matthew Patel, 200 HP; square damage 107; multiplier 1)
-| Cast | `boss` before | `dealt` | `boss` after | `bosses_defeated` | `team_boss` after | Event type |
+### 7. Casts through the first bosses (seed HP 25, 100, 250; square damage 107; multiplier 1)
+| Cast | `boss` before | `dealt` | `boss` after | `bosses_defeated` | `team_boss` after (defeated, damage, multiplier) | Event type |
 |---|---|---|---|---|---|---|
-| 00:12 | `{serial 1, damage 0}` | 107 | `{serial 1, damage 107}` | 0 | `(0, 107, 1)` (row inserted) | `spell_cast` |
-| 02:04 | `{serial 1, damage 107}` | 107 | `{serial 2, damage 0}` (214 − 200 = 14 lost) | 1 | `(1, 0, 1)` | `boss_defeated` |
+| 00:12 | `{serial 1, damage 0}` | 107 | `{serial 2, damage 0}` (107 − 25 = 82 lost) | 1 | `(1, 0, 1)` (row inserted) | `boss_defeated` |
+| 02:04 | `{serial 2, damage 0}` | 107 | `{serial 3, damage 0}` (7 lost) | 2 | `(2, 0, 1)` | `boss_defeated` |
+| 04:00 | `{serial 3, damage 0}` | 107 | `{serial 3, damage 107}` | 2 | `(2, 107, 1)` | `spell_cast` |
 
-With `team_boss.multiplier = 1.5` instead, each cast deals 161: 00:12 → 161, 02:04 → 322 ≥ 200, boss 2 at 0.
+With `team_boss.multiplier = 1.5` instead, each cast deals 161: the same two defeats, then boss 3 at 161.
 
-After the seventh boss falls, `boss` is `null`, `bosses_defeated` 7, and further casts have `dealt 0`, `boss null`, type `spell_cast`.
+After the sixth boss (Gideon) falls, `boss` is `null`, `bosses_defeated` 6, and further casts have `dealt 0`, `boss null`, type `spell_cast`. The fifth defeat (the Katayanagi twins) is also the unlock: from that `boss_defeated` event on, `unlocked_points` is 6 and `locked_shapes` is `[]`.
 
 ### 8. Boss attacks, a knockout and a revive (seed: boss 1 every 300 s for 1, boss 2 every 300 s for 1; `game.health` 10)
 The team started at 12:00:00. Times are absolute.
@@ -448,8 +467,8 @@ The team started at 12:00:00. Times are absolute.
 | 12:12:30 | D's scan casts and defeats boss 1 | 8 | `{serial 2, damage 0, attacks 0, phase_started_at 12:12:30, next_attack_at 12:17:30}`; timer re-armed | `(1, 0, 1, phase_health 8, phase_started_at 12:12:30)` | `boss_defeated` |
 | 12:17:30 … 12:47:30 | the timer, every 300 s: 7 attacks | 7 … 1 | `attacks` 1 … 7 | unchanged | `boss_attacked` × 7 |
 | 12:52:30 | the 8th attack | **0** | `{…, attacks 8, next_attack_at null}`; no timer | unchanged | **`knocked_out`** |
-| 12:53:00 | A selects `square` | 0 | unchanged | unchanged | `409 knocked_out`, none |
-| 12:53:05 | A clears the selection (allowed while knocked out) | 0 | unchanged | unchanged | `200`, a no-op here (the cast had cleared the selection) |
+| 12:53:00 | F selects `square` | 0 | unchanged | unchanged | `409 knocked_out`, none |
+| 12:53:05 | F clears the selection (allowed while knocked out) | 0 | unchanged | unchanged | `200`, a no-op here (the cast had cleared the selection) |
 | 13:00:00 | admin revives | **10** | `{serial 2, attacks 0, phase_started_at 13:00:00, next_attack_at 13:05:00}`; timer re-armed | `(1, 0, 1, phase_health 10, phase_started_at 13:00:00)` | `revived` |
 
 **A restart at 12:20:00** (between the 12:17:30 attack and the next) reloads `phase_health 8, phase_started_at 12:12:30` from `team_boss`, computes `attacks = floor(450 s / 300 s) = 1`, `health = 8 − 1 = 7`, the same as before, and arms the timer for 12:22:30. **A backend down from 12:20:00 to 12:31:00** reloads with `attacks = floor(1110 / 300) = 3`, `health 5`: the two attacks it missed are applied at load, and clients see them in their `snapshot`.
@@ -514,6 +533,8 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "damage_multiplier": 1,
   "health": 9,
   "knocked_out": false,
+  "unlocked_points": 4,
+  "locked_shapes": [],
   "cast_count": 1,
   "version": {"epoch": 1760702400000, "seq": 4}
 }
@@ -526,12 +547,13 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 - `bosses_defeated` is how many bosses the team has defeated. `boss` is the one it's fighting: its `serial` (name, HP and asset are in `GET /api/game/bosses`) and the `damage` dealt to it so far, always below its HP; `null` once every boss is defeated (or none are loaded). `damage_multiplier` is what each cast's damage is multiplied by, 1 by default.
 - `boss.phase_started_at` is when the team began fighting it (or was last revived); `boss.attacks` how many times it has attacked since; `boss.next_attack_at` when it attacks next, or `null` if the team is knocked out. Clients count down to it on the server's clock (`hello`).
 - `health` is the team's health (**10**, `game.health`, at the start, less every attack); `knocked_out` is true at 0.
+- `unlocked_points` is the most waypoints a pattern the team can cast may have: **4** (`game.locked_pattern_points` − 1) until it has defeated **5** (`game.unlock_after_bosses`) bosses, then **6** (`game.max_pattern_points`). `locked_shapes` are the shapes it can't select yet (every pattern bigger), in index order; `[]` with the 2025 seed, whose patterns are all 3- or 4-point.
 
 **Cast log** (`GET /api/teams/me/casts`), after walkthrough 6:
 ```json
 [
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 107, "dealt": 107, "boss": 1, "defeated_boss": true},
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 107, "dealt": 107, "boss": 1, "defeated_boss": false}
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 107, "dealt": 107, "boss": 2, "defeated_boss": true},
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 107, "dealt": 107, "boss": 1, "defeated_boss": true}
 ]
 ```
 - Newest first; `[]` before the first cast, or for a team in the lobby.
@@ -541,18 +563,21 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 ```json
 {
   "shapes": [
-    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 65, "max": 106}},
-    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 86, "max": 131}},
-    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 93, "max": 131}},
-    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 84, "max": 129}},
-    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 60, "max": 113}}
+    {"id": "collinear", "name": "Collinear", "patterns": 9,   "points": [3], "damage": {"min": 65, "max": 106}, "patterns_by_points": {"3": 9}},
+    {"id": "lightning", "name": "Lightning", "patterns": 77,  "points": [4], "damage": {"min": 86, "max": 131}, "patterns_by_points": {"4": 77}},
+    {"id": "square",    "name": "Square",    "patterns": 18,  "points": [4], "damage": {"min": 93, "max": 131}, "patterns_by_points": {"4": 18}},
+    {"id": "tree",      "name": "Tree",      "patterns": 99,  "points": [4], "damage": {"min": 84, "max": 129}, "patterns_by_points": {"4": 99}},
+    {"id": "triangle",  "name": "Triangle",  "patterns": 156, "points": [3], "damage": {"min": 60, "max": 113}, "patterns_by_points": {"3": 156}}
   ],
   "health": 10,
+  "locked_pattern_points": 5,
+  "unlock_after_bosses": 5,
   "max_pattern_points": 6
 }
 ```
-- `shapes`: every selectable shape (the client's "types"), in index order (by ID). `id` is what `PUT …/selection` takes; `name` is for display; `patterns` is how many valid patterns the shape has; `points` is the distinct sizes of those patterns, ascending (a shape mixing 3- and 4-point patterns shows `[3, 4]`); `damage` is the minimum and maximum damage across the shape's patterns.
+- `shapes`: every selectable shape (the client's "types"), in index order (by ID). `id` is what `PUT …/selection` takes; `name` is for display; `patterns` is how many valid patterns the shape has; `points` is the distinct sizes of those patterns, ascending (a shape mixing 3- and 4-point patterns shows `[3, 4]`); `damage` is the minimum and maximum damage across the shape's patterns; `patterns_by_points` counts its patterns by size (JSON keys are the sizes): a team can cast those of at most its `team_state.unlocked_points`.
 - `health`: **10** (`game.health`), every team's starting health and what a revive restores.
+- `locked_pattern_points`: **5** (`game.locked_pattern_points`): patterns of at least this many waypoints are locked until a team has defeated `unlock_after_bosses` (**5**, `game.unlock_after_bosses`) bosses. Whether a given team has is in its `team_state` (`unlocked_points`, `locked_shapes`), not here: this route is the same for everyone.
 - `max_pattern_points`: **6** (`game.max_pattern_points`).
 - Any signed-in user may read it, in a team or not. It's built once at startup and never changes while the backend runs; no live event carries it.
 
@@ -580,6 +605,8 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | `ErrWaypointAlreadyScanned` | 409 | `waypoint_already_scanned` |
 | `ErrSelectionPoisoned` | 409 | `selection_poisoned` |
 | `ErrKnockedOut` | 409 | `knocked_out` |
+| `ErrNotLeader` (`Select`, `ClearSelection`) | 403 | `not_leader` |
+| `ErrShapeLocked` (`Select`) | 409 | `shape_locked` |
 | `ErrTeamNotFound` (`Revive`) | 404 | `team_not_found` |
 | a body that doesn't decode | 400 | `invalid_body` |
 
@@ -613,7 +640,7 @@ The backend refuses to start if any of these hold:
 
 | Case | Error |
 |---|---|
-| `config.toml` is invalid (see `internal/platform/config`), e.g. a missing key, or `max_pattern_points` outside 1–15 | from `config.Load`, before anything loads |
+| `config.toml` is invalid (see `internal/platform/config`), e.g. a missing key, `max_pattern_points` outside 1–15, `locked_pattern_points` outside 1–`max_pattern_points` + 1, or `unlock_after_bosses` outside 0–`game.bosses` | from `config.Load`, before anything loads |
 | The content is invalid (bad waypoint IDs, too many items, unknown, empty, oversized, duplicate or nested patterns, missing damage) | from `atlas.Load`, before this `Load` runs: every case, in order, is in [`internal/atlas/README.md`](../atlas/README.md), "Loading at startup" |
 | Reading the per-team tables fails | `load team state: …` |
 | Stored visited waypoints name a waypoint the atlas doesn't have | `team 482913 state: unknown waypoint "1012"` |
@@ -622,7 +649,7 @@ The backend refuses to start if any of these hold:
 | A `team_cast` row's pattern the atlas doesn't have | `team 482913 state: cast: unknown pattern 400` |
 | A stack scan's waypoint the atlas doesn't have | `team 482913 state: stack scan: unknown waypoint "1012"` |
 | The boss content is invalid (wrong count for `game.bosses`, gaps, no name or asset, HP ≤ 0, attack interval ≤ 0, attack damage < 0) | from `bosses.Load`, before this `Load`: [`internal/bosses/README.md`](../bosses/README.md), "Loading at startup" (an empty `boss` table is allowed) |
-| A `team_boss` row with more bosses defeated than `game.bosses` | `team 482913 state: team_boss: 8 bosses defeated, but game.bosses is 7` |
+| A `team_boss` row with more bosses defeated than `game.bosses` | `team 482913 state: team_boss: 7 bosses defeated, but game.bosses is 6` |
 
 ### Select: `PUT /api/teams/me/state/selection`
 Checked in this order:
@@ -634,8 +661,10 @@ Checked in this order:
 | Caller not in a team | `404 not_in_team` |
 | Team not `IN_GAME` | `409 not_in_game` |
 | (any boss attack that fell due is applied first: `boss_attacked` / `knocked_out`) | |
+| Caller isn't the team's leader (read now, under the lock) | `403 not_leader`: nothing written, no event |
 | Team knocked out | `409 knocked_out`: nothing written, no event |
-| Any member selects (not just the leader) | Allowed |
+| Every pattern of the shape has more waypoints than the team's `unlocked_points` (before `game.unlock_after_bosses` defeats: 5+ points) | `409 shape_locked`: nothing written, no event |
+| A shape mixing locked and unlocked sizes | Allowed: only its unlocked patterns can be cast (see Scan) |
 | Same shape already selected | `200`: **stack purged** (a wrong scan included: `poisoned: false`), selection re-stamped with the caller and now; written; event |
 | A different shape, or nothing selected | `200`: selection set; stack purged; written; event |
 | Shape already completed before | Allowed; completing another of its patterns adds the pattern |
@@ -646,6 +675,7 @@ Checked in this order:
 | Caller not in a team | `404 not_in_team` |
 | Team not `IN_GAME` | `409 not_in_game` |
 | (any boss attack that fell due is applied first) | |
+| Caller isn't the team's leader | `403 not_leader`: nothing written, no event |
 | Team knocked out | Allowed: clearing only gives up |
 | Nothing selected | `200`, no-op: nothing written, no event |
 | Otherwise | `200`: selection and stack removed (a wrong scan included); visited waypoints, completions and the cast log kept; event |
@@ -666,7 +696,7 @@ Checked in this order. Every rejection changes nothing, isn't logged and sends n
 | Waypoint already in the stack, by anyone (a retry included) | `409 waypoint_already_scanned` |
 | Caller already has scans in the stack | Allowed: any member may scan any number of waypoints |
 | Any time since the selection or the last scan, however long | Allowed: there's no time limit |
-| The waypoint, with the stack, isn't part of any pattern of the selected shape | `200 wrong_scan`: pushed with `wrong: true`, `poisoned: true`; logged with `wrong = true`; event |
+| The waypoint, with the stack, isn't part of any pattern of the selected shape **of at most `unlocked_points` waypoints** (a set only a locked pattern contains is wrong) | `200 wrong_scan`: pushed with `wrong: true`, `poisoned: true`; logged with `wrong = true`; event |
 | Stack plus this scan is exactly a pattern of the **selected** shape | `200 pattern_completed`: pattern and shape marked; **stack and selection purged**; cast appended to the log and `last_cast` (`already_completed: false`); `team_cast` +1; the damage × multiplier dealt to the current boss, `team_boss` upserted; event `spell_cast` |
 | ... and the damage brings the boss to its HP | The boss is defeated: `bosses_defeated` + 1, `boss` the next one at 0 damage (or `null` after the last); the excess is lost; `defeated_boss: true`; the next boss's phase starts now with the current health (`team_boss.phase_*`), timer re-armed; event `boss_defeated` |
 | ... and every boss is already defeated (or none are loaded) | Cast as usual with `dealt: 0`, `boss: null`; progress unchanged; event `spell_cast` |
@@ -674,7 +704,9 @@ Checked in this order. Every rejection changes nothing, isn't logged and sends n
 | Stack plus this scan is a pattern of **another** shape | Not completed → `scan_added` |
 | Otherwise | `scan_added` |
 | 1-point pattern | Completes on its only scan |
-| 6-point pattern | Completes on the sixth scan (the stack never needs its seventh slot for correct scans) |
+| 6-point pattern, after the unlock | Completes on the sixth scan (the stack never needs its seventh slot for correct scans) |
+| 5- or 6-point pattern before the unlock | Can't complete: the scan that would leave the 4-point patterns is wrong |
+| A non-leader scanning | Allowed: every member scans |
 | Any accepted scan (wrong included) | Logged in `team_scan` (with `wrong`); waypoint added to visited `waypoints` |
 | Postgres write fails | `500`; state reloaded from Postgres; nothing applied |
 
@@ -710,7 +742,7 @@ Checked in this order:
 | Case | Result |
 |---|---|
 | Caller not in a team | `404 not_in_team` |
-| Team in the lobby or with no activity | `200`, empty lists, `selection` and `last_cast` null, `poisoned: false`, `bosses_defeated: 0`, `boss: {serial: 1, damage: 0, …}` (or `null` with no bosses loaded), `damage_multiplier: 1`, `health: 10` less any attacks since the start, `knocked_out: false` |
+| Team in the lobby or with no activity | `200`, empty lists, `selection` and `last_cast` null, `poisoned: false`, `bosses_defeated: 0`, `boss: {serial: 1, damage: 0, …}` (or `null` with no bosses loaded), `damage_multiplier: 1`, `health: 10` less any attacks since the start, `knocked_out: false`, `unlocked_points: 4`, `locked_shapes` (`[]` with the 2025 seed) |
 | Knocked out | `200`, `health: 0`, `knocked_out: true`, `boss.next_attack_at: null` |
 | Reads never catch up | Health is as of the last `catchUp`; the timer keeps it current, so a read can only lag a due attack by the timer's delay |
 | Poisoned attempt | `200`, the stack with its wrong scan marked, `poisoned: true` |
@@ -722,7 +754,7 @@ Checked in this order:
 | Exactly at phase start + k × interval | The k-th attack is due (`floor` includes the boundary) |
 | One attack due | `health` − `attack_damage`, `attacks` + 1, `boss_attacked`; nothing written |
 | Several due at once (late timer, a jump, downtime) | All applied as one change: one `boss_attacked` (or `knocked_out`) |
-| Health reaches 0 | `health: 0`, `knocked_out: true`, `next_attack_at: null`, `knocked_out` event; no timer |
+| Health reaches 0 | `health: 0`, `knocked_out: true`, `next_attack_at: null`, `knocked_out` event; no timer. `attacks` stays at the knockout attack, `ceil(PhaseHealth / attack_damage)`, however much time passes, and the same after a restart |
 | Health would go below 0 | Floors at 0 |
 | `attack_damage` 0 | Attacks counted and published; health unchanged |
 | Knocked out | Nothing attacks; no timer |
@@ -761,6 +793,8 @@ Checked in this order:
 - **An admin's removal versus the removed player's write.** teams applies the removal (the roster in `ByID` no longer has them), publishes, then calls `RosterChanged`, which takes this team's `entry.mu`. A write by the removed player either:
   - holds `entry.mu` and passed `isMember` before the removal was applied: it finishes first and counts (it happened before the removal), and `RosterChanged` waits for it; or
   - checks `isMember` after the removal was applied: refused, `404 not_in_team`.
+- **An admin removing the leader versus the old leader's select or clear.** The same ordering, with `isLeader` read under the entry lock: a select that passed `isLeader` before teams applied the new leader counts; one checked after gets `403 not_leader` (and `404 not_in_team`, if the old leader was the one removed, from `isMember` first). The new leader can select from the moment the removal is applied.
+- **The unlock versus a select or scan.** `unlocked_points` is derived from `State.Boss.Defeated` in the same snapshot the write validates against, under the entry lock: a scan racing the cast that defeats boss 5 runs either before it (the old limit) or after it (the new one), never half.
 
   So no write by a removed player is accepted once the removal is visible, and none is half-applied. Their earlier scans stay in the stack and still count toward a pattern (`TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`). After `RosterChanged`, publishes go to the remaining members only. Lock order is the same as the start hook's: teams entry → teamstate entry.
 - **The attack timer versus writes.** The timer's callback (`attack`) takes `entry.mu` like a write, so an attack and a write never interleave. Whichever takes the lock first applies due attacks (`catchUp`); the other finds nothing more due. So every attack is applied exactly once, before any write that comes after its time, and its `boss_attacked` precedes that write's event. A timer delayed behind a held lock costs nothing: the write catches up.
@@ -786,7 +820,8 @@ Checked in this order:
 |---|---|---|
 | 6 points per pattern; stack capacity 7 | `config.toml` `game.max_pattern_points` (1–15) | Edit and restart. Content with bigger patterns is refused at startup (by `atlas.Load`) |
 | 16 slots in a `Stack` | `config.MaxPatternPoints` (15) + 1 | Fixed array size; raise the constant to allow bigger patterns. Every snapshot grows by 56 bytes per slot |
-| **7** bosses | `config.toml` `game.bosses` | Edit, match the `boss` table, restart ([`internal/bosses/README.md`](../bosses/README.md)) |
+| **6** bosses | `config.toml` `game.bosses` | Edit, match the `boss` table, restart ([`internal/bosses/README.md`](../bosses/README.md)) |
+| Big patterns (**5**+ points, `game.locked_pattern_points`) locked until **5** bosses are defeated (`game.unlock_after_bosses`) | `config.toml` | Edit and restart. `locked_pattern_points` = `max_pattern_points` + 1 locks nothing; `unlock_after_bosses` = 0 unlocks from the start. A restart re-derives each team's unlock from `bosses_defeated`, so nothing is stored |
 | Cast log length | none | Unbounded; 80 bytes per cast in memory, and a cast copies the team's log once |
 | Starting health **10** | `config.toml` `game.health` (at least 1) | Edit and restart |
 | Attack interval and damage | the `boss` table (`attack_interval_s` > 0, `attack_damage` ≥ 0) | Edit with the backend stopped, restart; applies retroactively (above) |
@@ -795,7 +830,8 @@ Checked in this order:
 
 ## Not decided yet
 - **⚠ QR verification.** `POST …/scans` accepts the raw 4-digit waypoint ID, so a player can claim a scan without being there. This must be replaced before the event (rotating or signed QR codes, verified server-side).
-- **Whether the leader alone should select.** Currently any member can, so any member can restart a poisoned attempt.
+- **No big patterns in the 2025 seed.** Every seed pattern has 3 or 4 points, so the unlock changes nothing until content with 5- and 6-point patterns is loaded; the tests add some by SQL.
+- **A non-leader can't restart a poisoned attempt.** Only the leader selects, so a team whose leader is away can't purge a wrong scan until the leader acts (or an admin removes the leader and names another).
 - **Score and winning.** Damage now goes to bosses (`bosses_defeated`, `boss.damage`), but nothing ranks teams or marks one `FINISHED` after the last boss.
 - **What sets the multiplier.** Stored and applied, never changed by any route yet.
 - **Boss content changes mid-event apply retroactively.** Health is derived from the phase start with the boss's *current* interval and damage; storing them in the phase would freeze them.
@@ -810,7 +846,7 @@ Checked in this order:
   |---|---|
   | `TestStack` | `NewStack(3)` has `Cap` 4 (a pattern's points plus one wrong scan); bottom-to-top order; a wrong scan on top keeps its flag; `Push` leaves the original alone; a push onto a full stack panics |
 
-- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load` and `bosses.Load`, config.toml's rules including `game.health`, a fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` records a timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, earliest first (never from inside `AfterFunc`, since the store calls it holding the team's lock); `pending()` counts live timers. Every helper (`scanAt`, `selectAt`) sets the clock first, so stored times are predictable. Times are written with `tick` (seconds). The fixture pins the team's `started_at` to `start` (and reloads teams), so boss 1's attacks fall at exactly `start` + k × interval. **Bosses don't attack unless a test asks** (`fixtureOptions.attacks`): otherwise every seed boss's `attack_interval_s` is set to `neverAttack` (10 years; it fits the `INTEGER` column), so tests that move the clock by minutes see no attacks. The tests use up to 6 members (`minTestTeam`), and the seed's 7 bosses (`seedBosses`); with a smaller `teams.size`, or another `game.bosses`, in `config.toml` they **skip** rather than fail:
+- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load` and `bosses.Load`, config.toml's rules including `game.health`, a fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` records a timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, earliest first (never from inside `AfterFunc`, since the store calls it holding the team's lock); `pending()` counts live timers. Every helper (`scanAt`, `selectAt`) sets the clock first, so stored times are predictable. Times are written with `tick` (seconds). The fixture pins the team's `started_at` to `start` (and reloads teams), so boss 1's attacks fall at exactly `start` + k × interval. **Bosses don't attack unless a test asks** (`fixtureOptions.attacks`): otherwise every seed boss's `attack_interval_s` is set to `neverAttack` (10 years; it fits the `INTEGER` column), so tests that move the clock by minutes see no attacks. The tests use up to 6 members (`minTestTeam`), and the seed's 6 bosses (`seedBosses`); with a smaller `teams.size`, or another `game.bosses`, in `config.toml` they **skip** rather than fail:
 
   | Test | Covers |
   |---|---|
@@ -827,13 +863,15 @@ Checked in this order:
   | `TestCompletionPurges` | stack and selection purged; rescans need a new selection |
   | `TestOutOfOrderScanning` | a square completes when scanned in reverse order (a pattern is an unordered set) |
   | `TestSinglePointPattern` | a 1-point pattern |
-  | `TestSixPointPatternAtCapacity` | a 6-point pattern (`game.max_pattern_points`) completes on the sixth scan |
+  | `TestSixPointPatternAtCapacity` | a 6-point pattern (`game.max_pattern_points`) completes on the sixth scan (run with `unlock_after_bosses` 0, so big patterns are unlocked) |
+  | `TestBigPatternsUnlock` | a 5-point pentagon and a shape mixing a 4- and a 5-point pattern (added by SQL; every boss at 1 HP): before 5 defeats `unlocked_points` is 4, the pentagon is in `locked_shapes` and selecting it is `ErrShapeLocked`, and in the mixed shape a point only in the 5-point pattern is a wrong scan; after `game.unlock_after_bosses` casts `unlocked_points` is `max_pattern_points`, nothing is locked, and the pentagon casts |
+  | `TestOnlyLeaderSelects` | a member's select and clear are `ErrNotLeader` and change nothing; the leader's select works and members still scan |
   | `TestCompletingAgain` | `already_completed`, progress counted once |
   | `TestClearSelection` | clear with and without a selection; waypoints kept |
   | `TestRestartRestoresEverything` | restart reproduces the JSON view exactly, except `version`, which restarts at seq 0 in the new epoch; rescans still rejected |
   | `TestConcurrentScans` | two members at one waypoint (one accepted); one member at two waypoints (both accepted) |
   | `TestFailedWriteReconciles` | reload after a hand-edited database, published as `resync` one version on |
-  | `TestVersionAndTypes` | each publish's type (`game_started`, `shape_selected`, `scan_added`, `spell_cast`, `wrong_scan`, `selection_cleared`) and version: `PublishTeam` repeats it, every change adds one, a rejected scan and a no-op clear publish nothing and keep it; `cast_count` 0 until the cast, then 1; `Snapshot` is of type `snapshot` |
+  | `TestVersionAndTypes` | (boss 1 given huge HP, so the cast stays a plain `spell_cast`) each publish's type (`game_started`, `shape_selected`, `scan_added`, `spell_cast`, `wrong_scan`, `selection_cleared`) and version: `PublishTeam` repeats it, every change adds one, a rejected scan and a no-op clear publish nothing and keep it; `cast_count` 0 until the cast, then 1; `Snapshot` is of type `snapshot` |
   | `TestReadsDoNotTouchDatabase` | reads with the database closed; a failed write leaves memory alone |
   | `TestStateIsPublished` | live events reach teammates |
   | `TestPublishTeam` | `PublishTeam` sends the empty state to every member of a started team; after a selection it sends the current state (square selected) without changing it; nothing for an unknown team or a lobby team |
@@ -857,6 +895,29 @@ Checked in this order:
   | `TestWriteCatchesUpAttacks` | with the timers off (`Close`), a scan after the first attack publishes `boss_attacked` then `scan_added` and sees the lower health; after a knockout's worth of attacks a select is refused with `ErrKnockedOut` and publishes `knocked_out` |
   | `TestReviveErrors` | `Revive` of an unknown team → `ErrTeamNotFound`; of a lobby team → `ErrNotInGame` |
 
+- `tests/gameloop_test.go`: **the game-loop simulation**, its own fixture (`newLeague`, schema `teamstate_sim`): the 2025 seed with its boss attacks, **100** teams (`simTeams`) of every size from 1 to `teams.size`, all started at the fake clock's start, the teams store's `OnRosterChange` wired to `RosterChanged`, plus a 5-point **pentagon** and a 6-point **hexagon** (`simBigPatterns`, each its own shape: the seed has no big patterns). One pick in five is a big pattern (`randomPattern`), so every team tries them before and after its unlock: before, `lockedFor` expects `shape_locked` (or `knocked_out`, checked first). Every select and clear is made by the leader (the first active member: member 1 once an admin removed member 0). Team *i* plays strategy *i* mod 12 at size 1 + (*i* / 12) mod 6, so each strategy runs at several sizes:
+
+  | Strategy | What it does |
+  |---|---|
+  | `steady` | casts a random pattern every 2 steps, members taking turns |
+  | `rush` | casts every step: defeats every boss, then casts for nothing |
+  | `solo` | one member scans every point, every 3 steps |
+  | `idle` | never plays: knocked out by boss 1 (10 attacks × 5 min), revived at step 110, attacked again |
+  | `sloppy` | a wrong scan (`wrong_scan`, `poisoned`), a refused scan (`selection_poisoned`), a reselect, a cast |
+  | `retrier` | sends every scan twice: the resend gets `waypoint_already_scanned` (`no_shape_selected` after the completing one) |
+  | `quitter` | gives up half its attempts after one scan (`ClearSelection`: no selection, empty stack) |
+  | `repeater` | casts the same pattern every time: `already_completed` after the first |
+  | `slowpoke` | casts every 8 steps: attacked mid-fight, knocked out, revived 3 steps later |
+  | `racer` | two members (one member twice, for a team of one) scan the same point at once: exactly one accepted |
+  | `shrinking` | an admin removes a member at step 40 (the leader, with member 1 as the new leader, for even teams), or is refused the last member (`ErrLastMember`); the removed member's scans get `ErrNotInTeam` |
+  | `multiplier` | a stored multiplier (×2, ×1.5, ×0.5, ×3) scales every cast |
+
+  | Test | Covers |
+  |---|---|
+  | `TestGameLoopSimulation` | **180 steps of 30 s** (90 min of game time). Each step moves the fake clock (firing every due attack), then all 100 teams act at once by strategy, every call's error checked. After each step every team's state is compared with **`model`**, an independent re-implementation of the rules: `bosses_defeated`, `boss` (serial, damage, `attacks`, `phase_started_at`, `next_attack_at`), `health`, `knocked_out`, `damage_multiplier`, `cast_count`, `unlocked_points` and whether the pentagon and hexagon are in `locked_shapes` (`model.unlocked`); and each cast's `dealt`, `boss`, `defeated_boss`, `already_completed`. At the end, every team's watcher (a member never removed, subscribed to the hub) must hold the team's state as its last `team_state`, version included (`converge`). Counters fail the test if any configuration never happened. Last run (race detector, ~5 s): 13 teams through every boss, 505 locked-shape refusals, 386 big patterns cast after the unlock, and every other counter above zero (run with `-v` for all of them). It found the knockout-cap bug ("Boss attacks and health") |
+  | `TestGameLoopRestart` | The same league, backend down part way: **45 steps**, then the store waits for every event (`converge`), is closed (no timers fire), the clock moves on by the downtime, and a new store loads in a new epoch; then **45 more steps**. Subtests per downtime: **0** (every view must survive exactly, JSON with version aside), **90 s** (shorter than every seed boss's attack interval), **15 min** (several attacks of every boss), **1 h** (must knock teams out while down). After the restart every team must equal its `model` at the new time, so the attacks that fell due while down are applied at load, knockouts included; each watcher gets the new store's `Snapshot`, as a reconnecting phone would, and every phone must converge at the end. Last run (race detector, ~16 s for all four): knocked out while down 0, 0, 32 and 88 |
+  | `BenchmarkGameLoopCast` | casts per second with the 100 teams playing at once, boss attacks off: each goroutine owns a team and casts random patterns (a select plus every scan, each a Postgres write). **433,873 ns per cast** (`-benchtime 3s`, 16 CPUs, local Postgres 17), about 2,300 casts or 11,000 writes a second |
+
 - `tests/publish_bench_test.go`: **`BenchmarkTeamStatePublish`**, parallel `PublishTeam` calls across 1,666 `IN_GAME` teams (10,000 players at `teams.size` 6; an in-memory `Teams`, so no team rows), every member with an open subscription. It measures the lock, encoding once and queueing for each member: about **1.0 µs** a publish on a 10-core laptop, down from 4.4 µs before the sharded hub and roster cache (`internal/platform/README.md`, "Performance"). Measured before the cast log and `poisoned` were added to the `View`; a team with no casts encodes the same size plus `"poisoned":false`.
 - `internal/server/tests/teamstate_test.go`:
 
@@ -874,6 +935,7 @@ Checked in this order:
   | `TestSimTeamCompletesUnderLatency` | four players scan the square at once with delays up to 150 ms each way: exactly one `pattern_completed`; every screen ends with an empty stack and the square completed |
   | `TestSimRaceSameWaypoint` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every screen converges on a one-scan stack |
   | `TestSimWrongScanReachesEveryone` | a wrong scan racing a teammate's correct one: the wrong one gets `wrong_scan`, the other is accepted or gets `selection_poisoned`; every phone sees `poisoned`; a reselect clears it on every phone |
+  | `TestSim100Teams` | **100 teams** of every size at once over real HTTP and event streams, each player on its own delays (0–30 ms each way), 6 rounds each by one of 7 strategies (`steady`, `solo`, `sloppy` with waypoint `1012`, `racer`, `retrier`, `quitter`, `shrinking` with an admin removal over HTTP); bosses never attack. Every request's status and code is checked; at the end each team's `cast_count` is the casts it made, every phone holds the team's state (same `version`, kept newest-by-version like the frontend), and every removed player got `no_team` |
 
 - `internal/server/tests/admin_test.go`:
 

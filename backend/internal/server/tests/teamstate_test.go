@@ -56,7 +56,9 @@ func TestSelectAndScanRoutes(t *testing.T) {
 	huge := strings.Repeat("x", int(e.cfg.Settings.Server.MaxBodyBytes))
 	expect(t, "body over server.max_body_bytes", sel(ps[0], map[string]string{"shape": huge}), http.StatusBadRequest, "invalid_body")
 
-	r := sel(ps[1], map[string]string{"shape": "square"})
+	expect(t, "select by a non-leader", sel(ps[1], map[string]string{"shape": "square"}), http.StatusForbidden, "not_leader")
+	expect(t, "clear by a non-leader", e.call("DELETE", "/api/teams/me/state/selection", ps[1], nil), http.StatusForbidden, "not_leader")
+	r := sel(ps[0], map[string]string{"shape": "square"})
 	expect(t, "select", r, http.StatusOK, "")
 	if r.payload["selection"].(map[string]any)["shape"] != "square" {
 		t.Fatalf("selection: %v", r.payload)
@@ -84,7 +86,7 @@ func TestSelectAndScanRoutes(t *testing.T) {
 	}
 
 	expect(t, "select again", sel(ps[0], map[string]string{"shape": "triangle"}), http.StatusOK, "")
-	r = e.call("DELETE", "/api/teams/me/state/selection", ps[len(ps)-1], nil)
+	r = e.call("DELETE", "/api/teams/me/state/selection", ps[0], nil)
 	expect(t, "clear", r, http.StatusOK, "")
 	if r.payload["selection"] != nil || len(r.payload["stack"].([]any)) != 0 {
 		t.Fatalf("after clear: %v", r.payload)
@@ -227,8 +229,15 @@ func TestGameBosses(t *testing.T) {
 	}
 	st := r.payload["state"].(map[string]any)
 	lc := st["last_cast"].(map[string]any)
-	if lc["boss"] != float64(1) || lc["dealt"] != lc["damage"] || lc["defeated_boss"] != false ||
-		st["boss"].(map[string]any)["damage"] != lc["dealt"] {
+	// Whether the square defeats boss 1 depends on its seeded HP.
+	defeated := lc["dealt"].(float64) >= got[0].(map[string]any)["hp"].(float64)
+	wantBoss, wantDamage, wantDefeated := float64(1), lc["dealt"], float64(0)
+	if defeated {
+		wantBoss, wantDamage, wantDefeated = 2, float64(0), 1
+	}
+	if lc["boss"] != float64(1) || lc["dealt"] != lc["damage"] || lc["defeated_boss"] != defeated ||
+		st["boss"].(map[string]any)["serial"] != wantBoss || st["boss"].(map[string]any)["damage"] != wantDamage ||
+		st["bosses_defeated"] != wantDefeated {
 		t.Fatalf("after a cast: %v", st)
 	}
 }

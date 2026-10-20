@@ -1,5 +1,7 @@
 # CI: the backend/AGENTS.md §14 checklist, plus the frontend's checks, on
-# every push to main and every pull request.
+# every push to main and every pull request. Each backend use case's tests
+# run in their own job, so a PR shows one red/green check per use case and
+# they run in parallel.
 name: CI
 
 on:
@@ -16,13 +18,79 @@ permissions:
   contents: read
 
 jobs:
-  backend:
-    name: backend (gofmt, vet, docaudit, race tests ×3)
+  lint:
+    name: backend lint (gofmt, vet, docaudit)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
-    # A throwaway Postgres, as in AGENTS.md §14. Tests drop schemas in it.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: docaudit (every declaration documented)
+        run: go run ./cmd/docaudit
+
+  # The matrix is built from the code, not kept by hand: every package with
+  # tests (internal/<use case>/tests, internal/platform/<pkg>/tests, …) gets
+  # a job, so a new use case is covered the moment it has tests.
+  plan:
+    name: list the use cases with tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - id: list
+        name: packages with tests, by use case
+        run: |
+          matrix="$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.Dir}}{{end}}' ./... \
+            | sed "s#^$PWD/##; s#/tests\$##" \
+            | jq -R -s -c 'split("\n") | map(select(. != "")) | map({name: (sub("^internal/"; "")), dir: .})')"
+          echo "$matrix" | jq .
+          if [ "$(echo "$matrix" | jq length)" -eq 0 ]; then
+            echo "no packages with tests found"
+            exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: test (${{ matrix.name }})
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # see every use case's result, not just the first failure
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: backend
+    # A throwaway Postgres per job, as in AGENTS.md §14. Tests drop schemas in it.
     services:
       postgres:
         image: postgres:17-alpine
@@ -47,26 +115,11 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: docaudit (every declaration documented)
-        run: go run ./cmd/docaudit
-
       # Three runs, as AGENTS.md §14 asks: a flaky pass is a fail. -v so the
       # next step can check nothing was skipped (a skip here usually means
       # TEST_DATABASE_URL didn't reach the tests).
-      - name: race tests ×3
-        run: go test -race -count=3 -v ./... 2>&1 | tee test.log; exit "${PIPESTATUS[0]}"
+      - name: race tests ×3 (${{ matrix.dir }})
+        run: go test -race -count=3 -timeout 20m -v ./${{ matrix.dir }}/... 2>&1 | tee test.log; exit "${PIPESTATUS[0]}"
         shell: bash
 
       - name: no skipped tests
@@ -74,6 +127,21 @@ jobs:
         run: |
           if grep -E -- '--- SKIP' test.log; then
             echo "Tests were skipped; AGENTS.md §14 requires none."
+            exit 1
+          fi
+
+  # One required check for branch protection: green only if lint and every
+  # use case's job passed.
+  backend:
+    name: backend (all use cases)
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: every backend job passed
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ]; then
+            echo "lint: ${{ needs.lint.result }}, tests: ${{ needs.test.result }}"
             exit 1
           fi
 

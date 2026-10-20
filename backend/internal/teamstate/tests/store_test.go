@@ -117,7 +117,7 @@ func (c *clock) pending() int {
 
 // seedBosses is how many bosses the 2025 dev seed has; with another
 // game.bosses the seed doesn't load, so these tests skip.
-const seedBosses = 7
+const seedBosses = 6
 
 // seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
 // smaller game.max_pattern_points the seed can't load, so these tests skip.
@@ -229,10 +229,12 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		}))
 	}
 	rules := teamstate.Rules{
-		MaxPatternPoints: set.Game.MaxPatternPoints,
-		Health:           set.Game.Health,
-		WriteTimeout:     set.Storage.WriteTimeout.Duration,
-		Epoch:            1, // a restart in a test passes another
+		MaxPatternPoints:    set.Game.MaxPatternPoints,
+		Health:              set.Game.Health,
+		LockedPatternPoints: set.Game.LockedPatternPoints,
+		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
+		WriteTimeout:        set.Storage.WriteTimeout.Duration,
+		Epoch:               1, // a restart in a test passes another
 	}
 	if o.rules != nil {
 		o.rules(&rules)
@@ -361,7 +363,7 @@ func TestScanNeedsSelection(t *testing.T) {
 func TestSquareCasts(t *testing.T) {
 	f := started(t)
 
-	if v := f.selectAt(t, 0, 5, "square"); v.Selection == nil || v.Selection.SelectedBy != f.users[5] {
+	if v := f.selectAt(t, 0, 0, "square"); v.Selection == nil || v.Selection.SelectedBy != f.users[0] {
 		t.Fatalf("selection: %+v", v.Selection)
 	}
 	expectOutcome(t, "first scan", f.scanAt(t, f.tick(1), 0, "1001"), teamstate.OutcomeScanAdded)
@@ -428,7 +430,7 @@ func TestEverySelectionPurges(t *testing.T) {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
 	}
 
-	if v := f.selectAt(t, f.tick(4), 1, "square"); len(v.Stack) != 0 || v.Selection.SelectedBy != f.users[1] {
+	if v := f.selectAt(t, f.tick(4), 0, "square"); len(v.Stack) != 0 || v.Selection.SelectedBy != f.users[0] {
 		t.Fatalf("reselecting the same shape should purge: %+v", v)
 	}
 	res := f.scanAt(t, f.tick(5), 3, "1008") // without the purge this would complete the square
@@ -439,7 +441,7 @@ func TestEverySelectionPurges(t *testing.T) {
 	// Members who scanned before the purge may scan again at once.
 	expectOutcome(t, "member 0 after purge", f.scanAt(t, f.tick(6), 0, "1001"), teamstate.OutcomeScanAdded)
 
-	if v := f.selectAt(t, f.tick(7), 2, "triangle"); len(v.Stack) != 0 || v.Selection.Shape != "triangle" {
+	if v := f.selectAt(t, f.tick(7), 0, "triangle"); len(v.Stack) != 0 || v.Selection.Shape != "triangle" {
 		t.Fatalf("selecting another shape should purge: %+v", v)
 	}
 }
@@ -608,10 +610,11 @@ func TestSinglePointPattern(t *testing.T) {
 }
 
 // TestSixPointPatternAtCapacity checks that a pattern with
-// max_pattern_points waypoints completes exactly as the stack fills.
+// max_pattern_points waypoints completes exactly as the stack fills (big
+// patterns unlocked from the start: unlock_after_bosses 0).
 func TestSixPointPatternAtCapacity(t *testing.T) {
 	hex := []string{"1003", "1004", "1005", "1006", "1009", "1010"}
-	f := started(t, fixtureOptions{sql: `
+	f := started(t, fixtureOptions{rules: func(r *teamstate.Rules) { r.UnlockAfterBosses = 0 }, sql: `
 		INSERT INTO shape (id, name) VALUES ('hexagon', 'Hexagon');
 		INSERT INTO pattern (id, shape_id, damage) VALUES (1002, 'hexagon', 150);
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
@@ -658,7 +661,7 @@ func TestClearSelection(t *testing.T) {
 	}
 	f.selectAt(t, 0, 0, "square")
 	f.scanAt(t, f.tick(1), 0, "1001")
-	v := pgtest.Must(f.state.ClearSelection(ctx, f.users[3]))
+	v := pgtest.Must(f.state.ClearSelection(ctx, f.users[0]))
 	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"1001"}) {
 		t.Fatalf("after clear: %+v", v)
 	}
@@ -677,7 +680,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
 	later := f.tick(100) // long after the square
-	f.selectAt(t, later, 4, "triangle")
+	f.selectAt(t, later, 0, "triangle")
 	f.scanAt(t, later, 4, "1003")
 	f.scanAt(t, later+f.tick(1), 5, "1004")
 	f.clock.at(later + f.tick(2))
@@ -759,7 +762,7 @@ func TestFailedWriteReconciles(t *testing.T) {
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
 	seq := f.view(t).Version.Seq
-	if _, err := f.state.ClearSelection(ctx, f.users[1]); err == nil {
+	if _, err := f.state.ClearSelection(ctx, f.users[0]); err == nil {
 		t.Fatal("clearing a selection deleted from Postgres should fail")
 	}
 	// The reload is published as resync, one version on: never back.
@@ -770,7 +773,7 @@ func TestFailedWriteReconciles(t *testing.T) {
 	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"1001"}) {
 		t.Fatalf("not reconciled from Postgres: %+v", v)
 	}
-	f.selectAt(t, f.tick(2), 1, "square")
+	f.selectAt(t, f.tick(2), 0, "square")
 }
 
 // TestReadsDoNotTouchDatabase checks that reads keep working with the
@@ -927,7 +930,7 @@ func TestCastLog(t *testing.T) {
 // a clear with nothing selected publish nothing and keep it; cast_count
 // counts the cast.
 func TestVersionAndTypes(t *testing.T) {
-	f := started(t)
+	f := started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1000000 WHERE serial = 1"}) // the cast is a plain spell_cast
 	ctx := context.Background()
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
@@ -985,5 +988,72 @@ func TestVersionAndTypes(t *testing.T) {
 	want("clear", teamstate.SelectionCleared, 1, 1)
 	if got, _ := f.state.Snapshot(f.users[0]); got.Type() != live.Snapshot {
 		t.Fatalf("snapshot type %q", got.Type())
+	}
+}
+
+// TestBigPatternsUnlock adds a 5-point pentagon and a shape mixing a 4-point
+// and a 5-point pattern, and checks the unlock: before the team has defeated
+// unlock_after_bosses bosses, unlocked_points is locked_pattern_points − 1,
+// the pentagon is in locked_shapes and can't be selected (shape_locked), and
+// in the mixed shape a scan that only fits the 5-point pattern is wrong;
+// after that many defeats (every boss at 1 HP) unlocked_points is
+// max_pattern_points and both cast.
+func TestBigPatternsUnlock(t *testing.T) {
+	pent := []string{"1003", "1004", "1005", "1006", "1009"}
+	f := started(t, fixtureOptions{sql: `
+		UPDATE boss SET hp = 1;
+		INSERT INTO shape (id, name) VALUES ('pentagon', 'Pentagon'), ('mixed', 'Mixed');
+		INSERT INTO pattern (id, shape_id, damage) VALUES (1003, 'pentagon', 150), (1004, 'mixed', 100), (1005, 'mixed', 150);
+		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
+			(1003, '1003'), (1003, '1004'), (1003, '1005'), (1003, '1006'), (1003, '1009'),
+			(1004, '1001'), (1004, '1002'), (1004, '1008'), (1004, '1009'),
+			(1005, '1003'), (1005, '1004'), (1005, '1005'), (1005, '1006'), (1005, '1010');`})
+	if f.rules.LockedPatternPoints != 5 || f.rules.MaxPatternPoints < 5 || f.rules.UnlockAfterBosses < 1 {
+		t.Skipf("test assumes locked_pattern_points = 5 and something to unlock (unlock_after_bosses %d)", f.rules.UnlockAfterBosses)
+	}
+	v := f.view(t)
+	if v.UnlockedPoints != 4 || !slices.Contains(v.LockedShapes, "pentagon") || slices.Contains(v.LockedShapes, "mixed") {
+		t.Fatalf("before the unlock: unlocked_points %d, locked %v", v.UnlockedPoints, v.LockedShapes)
+	}
+	if _, err := f.state.Select(context.Background(), f.users[0], "pentagon"); !errors.Is(err, teamstate.ErrShapeLocked) {
+		t.Fatalf("selecting a locked shape: %v", err)
+	}
+	f.selectAt(t, 0, 0, "mixed")
+	if res := f.scanAt(t, f.tick(1), 0, "1010"); res.Outcome != teamstate.OutcomeWrongScan {
+		t.Fatalf("a point only in the locked 5-point pattern: %s", res.Outcome)
+	}
+
+	for round := range f.rules.UnlockAfterBosses {
+		f.castSquare(t, round+1) // each defeats a 1-HP boss
+	}
+	v = f.view(t)
+	if v.BossesDefeated != f.rules.UnlockAfterBosses || v.UnlockedPoints != f.rules.MaxPatternPoints || len(v.LockedShapes) != 0 {
+		t.Fatalf("after %d defeats: unlocked_points %d, locked %v", v.BossesDefeated, v.UnlockedPoints, v.LockedShapes)
+	}
+	t0 := f.tick(1000)
+	f.selectAt(t, t0, 0, "pentagon")
+	var res teamstate.ScanResult
+	for i, w := range pent {
+		res = f.scanAt(t, t0+f.tick(float64(i+1)), i, w)
+	}
+	expectOutcome(t, "the pentagon after the unlock", res, teamstate.OutcomePatternCompleted)
+}
+
+// TestOnlyLeaderSelects checks that selecting and clearing are the leader's:
+// any other member gets not_leader for both and changes nothing, and still
+// scans.
+func TestOnlyLeaderSelects(t *testing.T) {
+	f := started(t)
+	ctx := context.Background()
+	if _, err := f.state.Select(ctx, f.users[1], "square"); !errors.Is(err, teamstate.ErrNotLeader) {
+		t.Fatalf("a member selecting: %v", err)
+	}
+	f.selectAt(t, 0, 0, "square")
+	f.scanAt(t, f.tick(1), 3, "1001")
+	if _, err := f.state.ClearSelection(ctx, f.users[2]); !errors.Is(err, teamstate.ErrNotLeader) {
+		t.Fatalf("a member clearing: %v", err)
+	}
+	if v := f.view(t); v.Selection == nil || len(v.Stack) != 1 {
+		t.Fatalf("a refused clear changed the state: %+v", v)
 	}
 }

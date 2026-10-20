@@ -181,7 +181,7 @@ func TestWriteCatchesUpAttacks(t *testing.T) {
 	// game.health 10 at 4 a hit: the third attack knocks the team out.
 	knockout := (f.rules.Health + 3) / 4
 	f.clock.at(time.Duration(knockout) * f.interval(1))
-	if _, err := f.state.Select(context.Background(), f.users[1], "square"); !errors.Is(err, teamstate.ErrKnockedOut) {
+	if _, err := f.state.Select(context.Background(), f.users[0], "square"); !errors.Is(err, teamstate.ErrKnockedOut) {
 		t.Fatalf("select after a knockout's worth of attacks: %v", err)
 	}
 	expectType(t, sub, "caught-up knockout", teamstate.KnockedOut)

@@ -32,12 +32,13 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 1. **Sign in** with Google (an `snu.edu.in` account) through the SvelteKit frontend.
 2. **Form a team** in the lobby: one player creates it and shares its 6-digit code; others join. Up to `teams.size` (6) players, one leader. Members mark themselves ready, and the leader starts with however many there are (1 or more). From then on the roster is locked to players: nobody joins or leaves. **An admin** can still remove a member from any team, lobby or started (naming the new leader when removing the leader; never the last member), on `/admin`; the removed player is teamless and free to join again.
 3. **Play:**
-   - The team **selects a shape type** (square, triangle, …). Each type has many precomputed valid patterns: sets of 1–6 waypoints.
+   - **The leader** selects a shape type (square, triangle, …); only the leader selects, restarts or gives up (`403 not_leader`), and every member scans. Each type has many precomputed valid patterns: sets of 1–6 waypoints.
+   - **Big patterns are locked.** Patterns of **5** (`game.locked_pattern_points`) or more waypoints unlock once the team has defeated **5** (`game.unlock_after_bosses`) bosses. Until then a type made only of big patterns can't be selected (`shape_locked`), and a scan that could only grow into a big pattern is a wrong scan. `team_state.unlocked_points` and `locked_shapes` say what's open (`GET /api/game/shapes` stays the same for everyone).
    - Members **scan waypoints**. There's **no time limit**, and any member may scan any number of the points.
    - A scan of a waypoint that's already in the attempt is **rejected** (`waypoint_already_scanned`).
-   - A scan that can't be part of any pattern of the type (with the scans already in) is **accepted, marked wrong, and reported** (`wrong_scan`, `stack[].wrong`, `poisoned`). It **poisons** the attempt: every later scan is refused (`selection_poisoned`) until someone selects again.
+   - A scan that can't be part of any pattern of the type (with the scans already in) is **accepted, marked wrong, and reported** (`wrong_scan`, `stack[].wrong`, `poisoned`). It **poisons** the attempt: every later scan is refused (`selection_poisoned`) until the leader selects again.
    - When the scans are exactly one valid pattern, it **completes** (a cast, logged in `team_cast` and listed by `GET /api/teams/me/casts`). Every new selection and every completion **purges** the scans.
-   - **Every cast damages the team's current boss.** All teams fight the same **7** (`game.bosses`) bosses in serial order (`GET /api/game/bosses`: name, asset, description, HP). A cast deals its pattern's damage × the team's multiplier (1 unless something sets it; nothing does yet), rounded. Reaching the boss's HP defeats it and moves the team to the next; the excess is lost. After the last boss, casts still count but deal nothing.
+   - **Every cast damages the team's current boss.** All teams fight the same **6** (`game.bosses`) bosses in serial order (`GET /api/game/bosses`: name, asset, description, HP). A cast deals its pattern's damage × the team's multiplier (1 unless something sets it; nothing does yet), rounded. Reaching the boss's HP defeats it and moves the team to the next; the excess is lost. After the last boss, casts still count but deal nothing.
    - **Bosses attack back.** Every team starts with **10** (`game.health`) health. Every `attack_interval_s` of a team's phase against its current boss (from its start, or the cast that defeated the previous boss), the boss takes its `attack_damage` off the team's health: the server applies and publishes it with nobody acting (`boss_attacked`). At 0 the team is **knocked out** (`knocked_out`): it can't select or scan until an admin revives it (`POST /api/admin/teams/{team_id}/revive`, full health and a fresh clock).
 4. Progress (patterns and shapes completed, waypoints visited, the cast log, bosses defeated, health) is the team's score.
 
@@ -302,6 +303,10 @@ Each use case's `README.md` documents it **completely enough to rebuild it witho
   - a reconcile test (Postgres edited by hand, the next write fails and memory corrects)
   - a race test for every invariant concurrency could break (`TestConcurrentJoinsRespectTeamSize`, `TestConcurrentRescansAddOneScan`)
 - **Hot reads get a benchmark,** and a result sink so the compiler can't discard the work.
+- **The game loop has two 100-team simulations; new gameplay joins both.**
+  - `internal/teamstate/tests/gameloop_test.go` (`TestGameLoopSimulation`): 100 teams of every size play 90 minutes of game time on the fake clock, each by one of 12 strategies, checked after every step against `model`, an independent re-implementation of the rules written from the README (not copied from the code), with counters that fail if a configuration never happened. `TestGameLoopRestart` plays the same league with the backend down part way (0, 90 s, 15 min, 1 h of game time passing while it's down), then restarts it: every team must equal its model at the new time, the attacks that fell due while down included. `BenchmarkGameLoopCast` measures casts per second with 100 teams at once.
+  - `internal/server/tests/simulation_test.go` (`TestSim100Teams`): 100 teams over real HTTP and event streams with per-phone delays, every request's status and code checked, every phone converging on its team's state by `version`.
+  - **A gameplay change isn't done** until the model knows the rule, a strategy exercises it (with a counter, so it can't silently stop happening), and the HTTP simulation covers any new route or code. A mismatch with the model is a bug in one of them: decide which from the README, never by loosening the check. (The simulation found that a knocked-out team's `boss.attacks` changed across a restart.)
 - **Postgres-only use cases** still get store tests for their SQL (`internal/user/tests/store_test.go`, `internal/auth/tests/codes_test.go`).
 
 ## 14. Before calling a change done
@@ -314,7 +319,13 @@ docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t
   -e POSTGRES_DB=t -p 55432:5432 postgres:17-alpine
 TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -race -count=1 ./...
 ```
-- **CI runs this checklist** on every push to `main` and every pull request (`.github/workflows/ci.yml`): gofmt, vet, docaudit, the race tests three times against a throwaway Postgres (failing on any skipped test), and the frontend's `bun run check` and `bun run test`. Don't merge a PR with a red CI run.
+- **CI runs this checklist** on every push to `main` and every pull request (`.github/workflows/ci.yml`), **one job per use case**:
+  - `lint`: gofmt, vet, docaudit.
+  - `plan`: lists every package with tests (`go list`, the ones with `_test.go` files) and turns them into the matrix: `internal/<use case>/tests` becomes `test (<use case>)` (`test (teamstate)`, `test (platform/live)`, `test (server)`). Nothing to edit when a use case is added: its first test adds its job. (`jq` builds the JSON; it's preinstalled on GitHub's runners, not necessarily on your machine.)
+  - `test (<use case>)`: that package's tests with `-race -count=3 -v`, against its own throwaway Postgres, failing on any `--- SKIP`. `fail-fast` is off, so every use case reports.
+  - `backend`: green only if `lint` and every `test` job passed. **Make this the one required status check** in branch protection: the per-use-case job names change as use cases are added, this one doesn't.
+  - `frontend`: `bun run check` and `bun run test`.
+  - Don't merge a PR with a red CI run.
 - **Run the race tests three times**; a flaky pass is a fail.
 - **Check tests ran:** with `-v`, nothing may be `SKIP`.
 - **Hot-path changes:** `go run ./cmd/loadtest -players 600 -rush-window 3s` with 0 errors.

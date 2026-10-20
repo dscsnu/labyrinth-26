@@ -66,6 +66,8 @@
     };
 
     let selected = $derived(ts.selection?.shape ?? null);
+    // Only the leader picks a type, restarts or gives up; everyone scans.
+    let isLeader = $derived(!!team && team.leader_id === user?.id);
     let selectedShape = $derived(game.shapes.find((s) => s.id === selected));
     let busy = $state(false);
     let waypoint = $state("");
@@ -215,18 +217,27 @@
 
 
 <h2>1. Pick a type</h2>
+{#if !isLeader}
+    <p><small>Your leader picks the type; you scan.</small></p>
+{/if}
+{#if ts.unlocked_points < game.max_pattern_points}
+    <p><small>
+        Patterns of {game.locked_pattern_points}+ points unlock after defeating {game.unlock_after_bosses} bosses
+        ({ts.bosses_defeated}/{game.unlock_after_bosses}).
+    </small></p>
+{/if}
 <p>
     {#each game.shapes as s (s.id)}
-        <button disabled={busy || ts.knocked_out} onclick={() => selectShape(s.id)} style:font-weight={s.id === selected ? "bold" : "normal"}>
-            {s.name} ({s.points.join("/")} pts · {s.damage.min}–{s.damage.max} dmg · {s.patterns} patterns){ts.shapes.includes(s.id) ? " ✓" : ""}
+        <button disabled={busy || ts.knocked_out || !isLeader || ts.locked_shapes.includes(s.id)} onclick={() => selectShape(s.id)} style:font-weight={s.id === selected ? "bold" : "normal"}>
+            {ts.locked_shapes.includes(s.id) ? "🔒 " : ""}{s.name} ({s.points.join("/")} pts · {s.damage.min}–{s.damage.max} dmg · {s.patterns} patterns){ts.shapes.includes(s.id) ? " ✓" : ""}
         </button>
     {/each}
 </p>
 {#if selected}
     <p>
         Selected: <b>{selectedShape?.name ?? selected}</b>
-        <button disabled={busy} onclick={restart}>restart attempt</button>
-        <button disabled={busy} onclick={giveUp}>give up</button>
+        <button disabled={busy || !isLeader} onclick={restart}>restart attempt</button>
+        <button disabled={busy || !isLeader} onclick={giveUp}>give up</button>
     </p>
     <p><small>
         No time limit, and anyone can scan any of the points. A point that doesn't fit any
@@ -240,7 +251,7 @@
 {#if ts.poisoned}
     <p style="color: red">
         A scan doesn't match any {selectedShape?.name ?? selected} pattern, so this attempt can't cast.
-        <button disabled={busy} onclick={restart}>restart attempt</button>
+        <button disabled={busy || !isLeader} onclick={restart}>restart attempt</button>
     </p>
 {/if}
 <form onsubmit={scan}>

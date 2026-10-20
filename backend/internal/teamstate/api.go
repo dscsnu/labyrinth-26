@@ -68,6 +68,8 @@ var errorCodes = []struct {
 	{ErrWaypointAlreadyScanned, http.StatusConflict, "waypoint_already_scanned"},
 	{ErrSelectionPoisoned, http.StatusConflict, "selection_poisoned"},
 	{ErrKnockedOut, http.StatusConflict, "knocked_out"},
+	{ErrNotLeader, http.StatusForbidden, "not_leader"},
+	{ErrShapeLocked, http.StatusConflict, "shape_locked"},
 	{ErrTeamNotFound, http.StatusNotFound, "team_not_found"},
 }
 

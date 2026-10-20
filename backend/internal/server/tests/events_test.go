@@ -475,9 +475,11 @@ func TestEventTypes(t *testing.T) {
 	scan(a, "1008") // completes the square
 	sel()
 	scan(b, "1012") // wrong
-	expect(t, "clear", e.call("DELETE", "/api/teams/me/state/selection", c, nil), http.StatusOK, "")
+	expect(t, "clear", e.call("DELETE", "/api/teams/me/state/selection", a, nil), http.StatusOK, "")
+	// Boss 1 has 25 HP in the seed: the first cast defeats it (boss_defeated,
+	// a spell_cast that finished the boss).
 	game := []string{"team:started", "team_state:game_started", "team_state:shape_selected",
-		"team_state:scan_added", "team_state:scan_added", "team_state:scan_added", "team_state:spell_cast",
+		"team_state:scan_added", "team_state:scan_added", "team_state:scan_added", "team_state:boss_defeated",
 		"team_state:shape_selected", "team_state:wrong_scan", "team_state:selection_cleared"}
 	waitSeen(t, "a in the game", sa, append(append(slices.Clone(open), lobby...), game...)...)
 

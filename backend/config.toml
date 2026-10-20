@@ -28,11 +28,19 @@ max_pattern_points = 6
 # exactly serials 1 to this, or startup is refused. (An empty table is allowed,
 # before content is loaded: then casts hit no boss.) A team that defeats them
 # all keeps casting, but its casts deal no more damage. Allowed: at least 1.
-bosses = 7
+bosses = 6
 # Every team's starting health. Each boss attack takes its attack_damage off
 # it (boss table); at 0 the team is knocked out (no selecting or scanning)
 # until an admin revives it, back to this. Allowed: at least 1.
 health = 10
+# Big patterns are locked: a team can't cast a pattern of at least
+# locked_pattern_points waypoints until it has defeated unlock_after_bosses
+# bosses. Until then a shape made only of big patterns can't be selected, and
+# a scan that could only grow into a big pattern is a wrong scan. Allowed:
+# locked_pattern_points 1 to max_pattern_points + 1 (+ 1 locks nothing);
+# unlock_after_bosses 0 (nothing locked) to bosses.
+locked_pattern_points = 5
+unlock_after_bosses = 5
 
 [qr]
 # How often a waypoint's rotating QR changes, and thus how often the /qr

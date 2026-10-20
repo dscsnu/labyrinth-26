@@ -18,8 +18,10 @@ name_max_length = 32
 code_attempts = 10
 [game]
 max_pattern_points = 6
-bosses = 7
+bosses = 6
 health = 10
+locked_pattern_points = 5
+unlock_after_bosses = 5
 [qr]
 rotate = "5s"
 tolerance = "5s"
@@ -74,7 +76,7 @@ func TestLoadSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 7 || s.Game.Health != 10 ||
+	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
@@ -87,38 +89,42 @@ func TestLoadSettings(t *testing.T) {
 // validate can reject.
 func TestLoadSettingsRejects(t *testing.T) {
 	cases := map[string]struct{ from, to, wantInErr string }{
-		"unknown key":                       {"size = 6", "size = 6\nsizee = 7", "unknown key"},
-		"missing value":                     {"heartbeat = \"25s\"\n", "", "live.heartbeat"},
-		"bad duration":                      {`heartbeat = "25s"`, `heartbeat = "a while"`, "heartbeat"},
-		"missing per_100m (zero is valid)":  {"per_100m = 2\n", "", "missing key spell.per_100m"},
-		"state ttl under a second":          {`oauth_state_ttl = "10m"`, `oauth_state_ttl = "500ms"`, "oauth_state_ttl"},
-		"read timeout under header timeout": {`read_timeout = "30s"`, `read_timeout = "1s"`, "read_timeout"},
-		"zero body limit":                   {"max_body_bytes = 1048576", "max_body_bytes = 0", "max_body_bytes"},
-		"team too big":                      {"size = 6", "size = 17", "teams.size"},
-		"name longer than the database":     {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
-		"pattern bigger than the stack":     {"max_pattern_points = 6", "max_pattern_points = 16", "max_pattern_points"},
-		"no bosses":                         {"bosses = 7", "bosses = 0", "game.bosses must be at least 1"},
-		"no health":                         {"health = 10", "health = 0", "game.health must be at least 1"},
-		"zero qr rotate":                    {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
-		"zero qr tolerance":                 {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
-		"zero per_point":                    {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},
-		"negative per_100m":                 {"per_100m = 2", "per_100m = -1", "spell.per_100m must not be negative"},
-		"walkability under 1.0":             {"walkability = 1.5", "walkability = 0.5", "spell.walkability must be at least 1.0"},
-		"zero code attempts":                {"code_attempts = 10", "code_attempts = 0", "teams.code_attempts must be at least 1"},
-		"zero token ttl":                    {`token_ttl = "12h"`, `token_ttl = "0s"`, "auth.token_ttl must be positive"},
-		"zero login code ttl":               {`login_code_ttl = "2m"`, `login_code_ttl = "0s"`, "auth.login_code_ttl must be positive"},
-		"zero login code sweep":             {`login_code_sweep = "10m"`, `login_code_sweep = "0s"`, "auth.login_code_sweep must be positive"},
-		"zero heartbeat":                    {`heartbeat = "25s"`, `heartbeat = "0s"`, "live.heartbeat must be positive"},
-		"zero subscriber buffer":            {"subscriber_buffer = 16", "subscriber_buffer = 0", "live.subscriber_buffer must be at least 1"},
-		"zero hub shards":                   {"hub_shards = 64", "hub_shards = 0", "live.hub_shards must be at least 1"},
-		"zero live write timeout":           {`write_timeout = "10s"`, `write_timeout = "0s"`, "live.write_timeout must be positive"},
-		"zero retry min":                    {`retry_min = "1s"`, `retry_min = "0s"`, "live.retry_min must be at least 1ms"},
-		"retry max below min":               {`retry_max = "6s"`, `retry_max = "500ms"`, "live.retry_max must be at least live.retry_min"},
-		"zero header timeout":               {`read_header_timeout = "10s"`, `read_header_timeout = "0s"`, "server.read_header_timeout must be positive"},
-		"zero idle timeout":                 {`idle_timeout = "2m"`, `idle_timeout = "0s"`, "server.idle_timeout must be positive"},
-		"zero shutdown timeout":             {`shutdown_timeout = "10s"`, `shutdown_timeout = "0s"`, "server.shutdown_timeout must be positive"},
-		"zero write timeout":                {`write_timeout = "5s"`, `write_timeout = "0s"`, "storage.write_timeout must be positive"},
-		"zero instance lock check":          {`instance_lock_check = "5s"`, `instance_lock_check = "0s"`, "storage.instance_lock_check must be positive"},
+		"unknown key":                         {"size = 6", "size = 6\nsizee = 7", "unknown key"},
+		"missing value":                       {"heartbeat = \"25s\"\n", "", "live.heartbeat"},
+		"bad duration":                        {`heartbeat = "25s"`, `heartbeat = "a while"`, "heartbeat"},
+		"missing per_100m (zero is valid)":    {"per_100m = 2\n", "", "missing key spell.per_100m"},
+		"state ttl under a second":            {`oauth_state_ttl = "10m"`, `oauth_state_ttl = "500ms"`, "oauth_state_ttl"},
+		"read timeout under header timeout":   {`read_timeout = "30s"`, `read_timeout = "1s"`, "read_timeout"},
+		"zero body limit":                     {"max_body_bytes = 1048576", "max_body_bytes = 0", "max_body_bytes"},
+		"team too big":                        {"size = 6", "size = 17", "teams.size"},
+		"name longer than the database":       {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
+		"pattern bigger than the stack":       {"max_pattern_points = 6", "max_pattern_points = 16", "max_pattern_points"},
+		"no bosses":                           {"bosses = 6", "bosses = 0", "game.bosses must be at least 1"},
+		"locked size past the stack":          {"locked_pattern_points = 5", "locked_pattern_points = 8", "game.locked_pattern_points must be 1-7"},
+		"locked size zero":                    {"locked_pattern_points = 5", "locked_pattern_points = 0", "game.locked_pattern_points must be 1-7"},
+		"unlock after more bosses than exist": {"unlock_after_bosses = 5", "unlock_after_bosses = 7", "game.unlock_after_bosses must be 0-6"},
+		"negative unlock":                     {"unlock_after_bosses = 5", "unlock_after_bosses = -1", "game.unlock_after_bosses must be 0-6"},
+		"no health":                           {"health = 10", "health = 0", "game.health must be at least 1"},
+		"zero qr rotate":                      {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
+		"zero qr tolerance":                   {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
+		"zero per_point":                      {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},
+		"negative per_100m":                   {"per_100m = 2", "per_100m = -1", "spell.per_100m must not be negative"},
+		"walkability under 1.0":               {"walkability = 1.5", "walkability = 0.5", "spell.walkability must be at least 1.0"},
+		"zero code attempts":                  {"code_attempts = 10", "code_attempts = 0", "teams.code_attempts must be at least 1"},
+		"zero token ttl":                      {`token_ttl = "12h"`, `token_ttl = "0s"`, "auth.token_ttl must be positive"},
+		"zero login code ttl":                 {`login_code_ttl = "2m"`, `login_code_ttl = "0s"`, "auth.login_code_ttl must be positive"},
+		"zero login code sweep":               {`login_code_sweep = "10m"`, `login_code_sweep = "0s"`, "auth.login_code_sweep must be positive"},
+		"zero heartbeat":                      {`heartbeat = "25s"`, `heartbeat = "0s"`, "live.heartbeat must be positive"},
+		"zero subscriber buffer":              {"subscriber_buffer = 16", "subscriber_buffer = 0", "live.subscriber_buffer must be at least 1"},
+		"zero hub shards":                     {"hub_shards = 64", "hub_shards = 0", "live.hub_shards must be at least 1"},
+		"zero live write timeout":             {`write_timeout = "10s"`, `write_timeout = "0s"`, "live.write_timeout must be positive"},
+		"zero retry min":                      {`retry_min = "1s"`, `retry_min = "0s"`, "live.retry_min must be at least 1ms"},
+		"retry max below min":                 {`retry_max = "6s"`, `retry_max = "500ms"`, "live.retry_max must be at least live.retry_min"},
+		"zero header timeout":                 {`read_header_timeout = "10s"`, `read_header_timeout = "0s"`, "server.read_header_timeout must be positive"},
+		"zero idle timeout":                   {`idle_timeout = "2m"`, `idle_timeout = "0s"`, "server.idle_timeout must be positive"},
+		"zero shutdown timeout":               {`shutdown_timeout = "10s"`, `shutdown_timeout = "0s"`, "server.shutdown_timeout must be positive"},
+		"zero write timeout":                  {`write_timeout = "5s"`, `write_timeout = "0s"`, "storage.write_timeout must be positive"},
+		"zero instance lock check":            {`instance_lock_check = "5s"`, `instance_lock_check = "0s"`, "storage.instance_lock_check must be positive"},
 	}
 	for name, c := range cases {
 		if strings.Count(validTOML, c.from) != 1 {

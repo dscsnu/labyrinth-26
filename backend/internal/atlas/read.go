@@ -146,6 +146,22 @@ func (a *Atlas) FitsShape(shape int, set WaypointSet) bool {
 	return false
 }
 
+// FitsShapeWithin is FitsShape counting only the shape's patterns of at most
+// maxPoints waypoints: whether set can still grow into one of those. Team
+// state uses it for patterns a team hasn't unlocked yet. The same scan, with
+// a popcount per pattern checked.
+func (a *Atlas) FitsShapeWithin(shape int, set WaypointSet, maxPoints int) bool {
+	if set == 0 {
+		return false
+	}
+	for _, p := range a.shapePatterns[shape] {
+		if w := a.patterns[p].Waypoints; w.Len() <= maxPoints && w.Contains(set) {
+			return true
+		}
+	}
+	return false
+}
+
 // WaypointIDs turns a set back into IDs, sorted.
 func (a *Atlas) WaypointIDs(set WaypointSet) []string {
 	ids := make([]string, 0, set.Len())

@@ -14,6 +14,9 @@ export const GameShapeSchema = z.object({
     patterns: z.number(),
     points: z.array(z.number()),
     damage: DamageRangeSchema,
+    // Its patterns counted by size ({"3": 12, "4": 6}); a team casts those of
+    // at most its team_state.unlocked_points.
+    patterns_by_points: z.record(z.string(), z.number()),
 });
 
 export const GameSchema = z.object({
@@ -21,6 +24,10 @@ export const GameSchema = z.object({
     max_pattern_points: z.number(),
     // game.health: every team's starting health.
     health: z.number(),
+    // Patterns of at least locked_pattern_points waypoints unlock once a
+    // team has defeated unlock_after_bosses bosses.
+    locked_pattern_points: z.number(),
+    unlock_after_bosses: z.number(),
 });
 
 // The team_state event and GET /api/teams/me/state.
@@ -92,6 +99,10 @@ export const TeamStateSchema = z.object({
     // (selecting and scanning refused) until an admin revives it.
     health: z.number(),
     knocked_out: z.boolean(),
+    // The biggest pattern the team can cast now, and the types it can't
+    // select yet (all their patterns are bigger).
+    unlocked_points: z.number(),
+    locked_shapes: z.array(z.string()),
     // How many casts the log holds; more than the client's copy means it
     // missed some and should re-fetch GET /api/teams/me/casts.
     cast_count: z.number(),
