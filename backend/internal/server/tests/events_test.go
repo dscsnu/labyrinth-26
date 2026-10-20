@@ -381,7 +381,7 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 
 	// Pattern 1 has waypoints 1001, 1003, 1004.
 	scan := func(p player, waypoint string) {
-		r := e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": waypoint})
+		r := e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(waypoint, time.Now().Unix())})
 		expect(t, "scan "+waypoint, r, http.StatusOK, "")
 	}
 	scan(ps[0], "1001")
@@ -462,7 +462,7 @@ func TestEventTypes(t *testing.T) {
 
 	// The game: start, a cast, a wrong scan, a clear.
 	scan := func(p player, w string) {
-		expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": w}), http.StatusOK, "")
+		expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())}), http.StatusOK, "")
 	}
 	sel := func() {
 		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", a, map[string]string{"shape": "square"}), http.StatusOK, "")

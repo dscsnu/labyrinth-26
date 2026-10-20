@@ -120,6 +120,14 @@ func (c *clock) pending() int {
 // game.bosses the seed doesn't load, so these tests skip.
 const seedBosses = 6
 
+// passQR is a teamstate.QR that treats the token as the waypoint ID it names,
+// so these tests exercise team state without the qr use case's signing and
+// expiry. Real verification is covered by internal/qr and the server tests.
+type passQR struct{}
+
+// Verify returns the token as the waypoint ID.
+func (passQR) Verify(token string) (string, error) { return token, nil }
+
 // seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
 // smaller game.max_pattern_points the seed can't load, so these tests skip.
 const seedMaxPoints = 4
@@ -255,7 +263,7 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		o.bossRules(&br)
 	}
 	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
-	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, rules))
+	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, passQR{}, hub, pgtest.Quiet, rules))
 	return &fixtureEnv{atlas: at, bosses: bs, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
 }
 
@@ -700,7 +708,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 	beforeView := f.view(t)
 	rules := f.rules
 	rules.Epoch = 2 // a new process
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, rules))
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, rules))
 	afterView := pgtest.Must(restarted.ForUser(f.users[0]))
 	// Version is memory-only: a restart starts again at seq 0, in the new
 	// epoch. Everything else reloads exactly.
@@ -928,7 +936,7 @@ func TestCastLog(t *testing.T) {
 		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&rows); err != nil || rows != 2 {
 		t.Fatalf("team_cast has %d rows (%v), want 2", rows, err)
 	}
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, f.rules))
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
 	before := pgtest.Must(json.Marshal(cs))
 	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.CastsForUser(f.users[2]))))
 	if string(before) != string(after) {

@@ -25,8 +25,9 @@ shows. Config values appear with their key: **5 s** (`qr.rotate`) and **5 s**
    (`qr.rotate`) and renders it as a QR. No further requests.
 4. A player scans the QR; their phone reads the token and submits it.
 5. The backend derives the same per-waypoint key, verifies the signature, and
-   checks the token is within the window (future: `teamstate.Scan` calls
-   `Verify`).
+   checks the token is within the window. `teamstate.Scan` does this through
+   the `QR` interface it declares (`Verify`), then resolves the waypoint it
+   names.
 
 **Why the token rotates.** A screenshot stops working: a friend who receives a
 photo must scan and submit within **10 s** of issue. **Why the display signs
@@ -159,10 +160,10 @@ a valid secret). Nothing else can fail: there is no database and no network.
 
 ## Not decided yet
 
-- ⚠ `POST /api/teams/me/state/scans` still takes a raw `waypoint_id`. It will
-  switch to `Verify` (through a small interface teamstate declares) once the
-  `/qr` display and `/test-scan` page prove the flow; until then a player can
-  still scan by typing an ID.
+- ⚠ The frontend `/play` page still has no camera scanner: it submits the raw
+  waypoint ID, which `POST /api/teams/me/state/scans` no longer accepts
+  (`400 invalid_body`). The backend verifies tokens; the play page and
+  `/test-scan` need to be wired to submit `{"qr"}` before the event.
 - ⚠ The signing key sits on the display's page. A player who can open `/qr`
   (staff-only in production) could sign their own tokens. The staff gate is
   what closes this; the per-waypoint key limits one display to its waypoint.

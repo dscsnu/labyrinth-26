@@ -71,6 +71,8 @@ var errorCodes = []struct {
 	{ErrNotLeader, http.StatusForbidden, "not_leader"},
 	{ErrShapeLocked, http.StatusConflict, "shape_locked"},
 	{ErrTeamNotFound, http.StatusNotFound, "team_not_found"},
+	{ErrInvalidQR, http.StatusBadRequest, "invalid_qr"},
+	{ErrExpiredQR, http.StatusConflict, "qr_expired"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or
@@ -143,20 +145,17 @@ func (a *API) clearSelection(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, v)
 }
 
-// scan handles POST /api/teams/me/state/scans {"waypoint_id"}: the caller
-// scans a waypoint. Returns a ScanResult.
-//
-// The body carries the raw 4-digit waypoint ID, so it doesn't prove the
-// player was there; it must be replaced by QR verification before the event.
+// scan handles POST /api/teams/me/state/scans {"qr"}: the caller scans a
+// waypoint by submitting its signed, fresh QR token. Returns a ScanResult.
 func (a *API) scan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		WaypointID string `json:"waypoint_id"`
+		Token string `json:"qr"`
 	}
-	if err := httpx.DecodeJSON(w, r, &req); err != nil || req.WaypointID == "" {
-		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body", `body must be {"waypoint_id": string}`)
+	if err := httpx.DecodeJSON(w, r, &req); err != nil || req.Token == "" {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body", `body must be {"qr": string}`)
 		return
 	}
-	res, err := a.store.Scan(r.Context(), identity.UserID(r), req.WaypointID)
+	res, err := a.store.Scan(r.Context(), identity.UserID(r), req.Token)
 	if err != nil {
 		a.fail(w, err)
 		return

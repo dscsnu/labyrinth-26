@@ -217,7 +217,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 		br.AttackInterval = simAttackInterval
 	}
 	l.bosses = pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
-	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, l.hub, pgtest.Quiet, l.rules))
+	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
 	return l
 }
 
@@ -455,7 +455,7 @@ func (l *league) downAndRestart(t *testing.T, down time.Duration, step int, coun
 	l.elapsed += down
 	l.clock.at(l.elapsed) // fires nothing: the store is closed
 	l.rules.Epoch++
-	l.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, l.dbURL), l.atlas, l.bosses, l.teams, l.hub, pgtest.Quiet, l.rules))
+	l.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, l.dbURL), l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
 	for _, st := range l.sims {
 		if after := withoutVersionJSON(t, l.view(t, st)); down == 0 && after != before[st.id] {
 			t.Fatalf("team %d (%s) across the restart\nbefore: %s\nafter:  %s", st.i, st.strategy, before[st.id], after)

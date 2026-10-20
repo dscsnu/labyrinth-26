@@ -92,7 +92,13 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	authAPI := auth.NewAPI(cfg, g, tokens, codes, users, func(u user.User) {
 		teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL)
 	}, log)
-	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{
+	// The QR verifier teamstate uses to check scanned tokens; the same one
+	// serves the qr use case's routes below.
+	qrVerifier := qr.New(cfg.QRSecret, qr.Rules{
+		Rotate:    set.QR.Rotate.Duration,
+		Tolerance: set.QR.Tolerance.Duration,
+	}, theAtlas)
+	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, hub, log, teamstate.Rules{
 		MaxPatternPoints:    set.Game.MaxPatternPoints,
 		Health:              set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints,
@@ -131,10 +137,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	stateAPI.Routes(mux, authAPI.Authed)
 	stateAPI.AdminRoutes(mux, admin)
 	bosses.NewAPI(theBosses).Routes(mux, authAPI.Authed)
-	qrAPI := qr.NewAPI(qr.New(cfg.QRSecret, qr.Rules{
-		Rotate:    set.QR.Rotate.Duration,
-		Tolerance: set.QR.Tolerance.Duration,
-	}, theAtlas), log)
+	qrAPI := qr.NewAPI(qrVerifier, log)
 	qrAPI.Routes(mux, authAPI.Authed)
 	qrAPI.StaffRoutes(mux, staff)
 	// The one event stream. Browsers open it on the shared domain with the
