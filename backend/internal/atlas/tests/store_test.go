@@ -324,6 +324,47 @@ func TestFitsShapeWithin(t *testing.T) {
 	}
 }
 
+// TestFitsShapeCastable checks the cooldown-aware fit: a line shape with a
+// 2-point (class_2) and a 3-point (class_3) pattern. Leaving a class out
+// counts only the other pattern; the size limit still applies on top; with
+// no cooldown it equals FitsShapeWithin; and the empty set fits nothing.
+func TestFitsShapeCastable(t *testing.T) {
+	rows := fixture()
+	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
+	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50, Class: "class_3"})
+	c, err := atlas.New(rows, atlas.Rules{MaxPatternPoints: maxPoints(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _ := c.ShapeIndex("line")
+	cases := []struct {
+		ids      []string
+		max      int
+		cooldown string
+		want     bool
+	}{
+		{[]string{"1001"}, 3, "", true},                 // in the 2-point line
+		{[]string{"1001"}, 3, "class_2", false},         // only in the 2-point line, on cooldown
+		{[]string{"1001"}, 3, "class_3", true},          // the other class is on cooldown
+		{[]string{"1002"}, 3, "class_3", false},         // only in the 3-point line, on cooldown
+		{[]string{"1002"}, 3, "class_2", true},          // the 3-point line is castable
+		{[]string{"1002"}, 2, "class_2", false},         // castable class, but bigger than the limit
+		{[]string{"1002", "1005"}, 3, "class_2", true},  // the 3-point line grows
+		{[]string{"1001", "1004"}, 3, "class_2", false}, // exactly the cooled-down pattern: no fit, so it can't complete
+		{[]string{"1001"}, 3, "class_9", true},          // an unknown class excludes nothing
+		{nil, 3, "", false},                             // the empty set fits nothing
+	}
+	for _, c2 := range cases {
+		set, _ := c.SetOf(c2.ids)
+		if got := c.FitsShapeCastable(line, set, c2.max, c2.cooldown); got != c2.want {
+			t.Errorf("FitsShapeCastable(line, %v, %d, %q) = %v, want %v", c2.ids, c2.max, c2.cooldown, got, c2.want)
+		}
+		if c2.cooldown == "" && c.FitsShapeCastable(line, set, c2.max, "") != c.FitsShapeWithin(line, set, c2.max) {
+			t.Errorf("FitsShapeCastable(line, %v, %d, \"\") should equal FitsShapeWithin", c2.ids, c2.max)
+		}
+	}
+}
+
 // TestDevSeedLoads checks, against a real Postgres (TEST_DATABASE_URL, schema
 // atlas_test), that the 2025 seed loads and validates under config.toml's
 // rules, that a known square is found, and that the seed can be applied twice.

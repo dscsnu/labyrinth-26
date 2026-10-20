@@ -298,6 +298,14 @@ type View struct {
 	// LockedShapes are the shapes the team can't select yet: every one of
 	// their patterns is bigger than UnlockedPoints. In index order.
 	LockedShapes []string `json:"locked_shapes"`
+	// CooldownClass is the spell class the team can't cast now: the class
+	// of its last cast, until it casts a spell of another class. Null
+	// before the first cast.
+	CooldownClass *string `json:"cooldown_class"`
+	// CooldownShapes are the shapes the team can't select because of the
+	// cooldown: every one of their patterns it has unlocked is of
+	// CooldownClass. Not in LockedShapes. In index order.
+	CooldownShapes []string `json:"cooldown_shapes"`
 	// CastCount is how many casts are in the team's cast log, repeats
 	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
 	// it when this is more than its length plus the cast it just saw.
@@ -440,6 +448,39 @@ func (s *Store) shapeLocked(shape, unlocked int) bool {
 	return len(points) > 0 && points[0] > unlocked
 }
 
+// cooldown returns the spell class st's team can't cast now: its last
+// cast's class, or "" before its first cast. Derived from the cast log, so a
+// restart reproduces it with nothing more stored.
+func (s *Store) cooldown(st State) string {
+	lc, ok := st.LastCast()
+	if !ok {
+		return ""
+	}
+	return s.atlas.Pattern(lc.Pattern).Spell.Class
+}
+
+// shapeOnCooldown reports whether shape has patterns of at most unlocked
+// waypoints but every one of them is of spell class cooldown, so a team
+// with that limit and cooldown can't select it. False for a locked shape
+// (shapeLocked says so) and when cooldown is "".
+func (s *Store) shapeOnCooldown(shape, unlocked int, cooldown string) bool {
+	if cooldown == "" {
+		return false
+	}
+	sh := s.game.Shapes[shape]
+	within := false
+	for i, n := range sh.Points { // a shape's sizes and their classes, ascending
+		if n > unlocked {
+			break
+		}
+		within = true
+		if sh.Classes[i] != cooldown {
+			return false
+		}
+	}
+	return within
+}
+
 // Game returns the shapes for GET /api/game/shapes.
 func (s *Store) Game() Game { return s.game }
 
@@ -550,10 +591,18 @@ func (s *Store) view(teamID string, st State) View {
 	v := View{TeamID: teamID, Waypoints: c.WaypointIDs(st.Waypoints), Patterns: [][]string{}, Shapes: []string{},
 		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version,
 		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier,
-		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut(), UnlockedPoints: s.unlockedPoints(st), LockedShapes: []string{}}
+		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut(), UnlockedPoints: s.unlockedPoints(st), LockedShapes: []string{},
+		CooldownShapes: []string{}}
+	cooldown := s.cooldown(st)
+	if cooldown != "" {
+		v.CooldownClass = &cooldown
+	}
 	for i := range c.ShapeCount() {
-		if s.shapeLocked(i, v.UnlockedPoints) {
+		switch {
+		case s.shapeLocked(i, v.UnlockedPoints):
 			v.LockedShapes = append(v.LockedShapes, c.Shape(i).ID)
+		case s.shapeOnCooldown(i, v.UnlockedPoints, cooldown):
+			v.CooldownShapes = append(v.CooldownShapes, c.Shape(i).ID)
 		}
 	}
 	if p := st.Boss; p.Defeated < s.bosses.Count() {

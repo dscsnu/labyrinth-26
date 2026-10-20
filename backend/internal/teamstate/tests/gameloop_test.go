@@ -66,14 +66,14 @@ const (
 // simStrategies are the ways a team plays; team i plays simStrategies[i %
 // len] with size 1 + (i / len) % 6, so each strategy runs at several sizes.
 var simStrategies = []string{
-	"steady",     // casts a random pattern every 2 steps, members taking turns
+	"steady",     // casts a random pattern every 2 steps, members taking turns; every 7 tries its cooldown class (refused)
 	"rush",       // casts every step: defeats every boss, then casts for nothing
 	"solo",       // one member scans every point, every 3 steps
 	"idle",       // never plays: knocked out by boss 1, revived, attacked again
 	"sloppy",     // a wrong scan poisons the attempt; a rescan is refused; reselects and casts
 	"retrier",    // sends every scan twice: the resend is refused, changing nothing
 	"quitter",    // half its attempts are given up (cleared) after one scan
-	"repeater",   // casts the same pattern every time: already_completed after the first
+	"repeater",   // alternates two patterns of different classes (the cooldown forbids one twice in a row): already_completed after the first two
 	"slowpoke",   // casts every 8 steps: attacked mid-fight, knocked out, revived
 	"racer",      // two members scan the same point at once: exactly one is accepted
 	"shrinking",  // an admin removes a member (the leader for even teams), or is refused the last one
@@ -137,7 +137,7 @@ type simTeam struct {
 type simCounts struct {
 	casts, defeats, allDefeated, knockouts, revives, wrongScans, poisoned, retries,
 	cleared, already, races, removals, lastMember, refusedRemoved, knockedRefused,
-	lockedRefused, bigCasts atomic.Int64
+	lockedRefused, bigCasts, cooldownRefused atomic.Int64
 }
 
 // newLeague seeds the dev content and starts simTeams teams of every size,
@@ -230,6 +230,9 @@ type model struct {
 	mult             float64
 	casts            int
 	patterns         map[int]bool
+	// cooldown is the spell class the team can't cast: its last cast's, ""
+	// before its first.
+	cooldown string
 }
 
 // health returns the team's health and the current boss's attacks this
@@ -302,6 +305,7 @@ func TestGameLoopSimulation(t *testing.T) {
 		"last-member refusals": &counts.lastMember, "removed members refused": &counts.refusedRemoved,
 		"knocked-out refusals":  &counts.knockedRefused,
 		"locked shapes refused": &counts.lockedRefused, "big patterns cast after the unlock": &counts.bigCasts,
+		"cooldown refusals": &counts.cooldownRefused,
 	} {
 		if c.Load() == 0 {
 			t.Errorf("the simulation never exercised %s", name)
@@ -511,6 +515,9 @@ func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	if v.DamageMultiplier != m.mult {
 		fail("damage_multiplier", v.DamageMultiplier, m.mult)
 	}
+	if got := v.CooldownClass; (got == nil) != (m.cooldown == "") || (got != nil && *got != m.cooldown) {
+		fail("cooldown_class", got, m.cooldown)
+	}
 	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
 	if v.UnlockedPoints != unlocked || slices.Contains(v.LockedShapes, "pentagon") != (unlocked < 5) ||
 		slices.Contains(v.LockedShapes, "hexagon") != (unlocked < 6) {
@@ -553,7 +560,9 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 
 	switch st.strategy {
 	case "steady", "multiplier":
-		if every(2) {
+		if st.strategy == "steady" && every(7) && st.model.cooldown != "" {
+			l.tryCooldown(t, st, knocked, counts)
+		} else if every(2) {
 			l.castRandom(t, st, knocked, counts, rotate(st))
 		}
 	case "rush":
@@ -584,7 +593,7 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 		}
 	case "repeater":
 		if every(2) {
-			l.castPattern(t, st, l.atlas.ShapePatterns(0)[0], knocked, counts, rotate(st), false)
+			l.castPattern(t, st, l.repeated(st), knocked, counts, rotate(st), false)
 		}
 	case "slowpoke":
 		if knocked && st.koStep >= 0 && step >= st.koStep+simReviveDelay {
@@ -626,18 +635,98 @@ func rotate(st *simTeam) func(k int) int {
 	}
 }
 
-// randomPattern picks a random pattern of at least minPoints waypoints:
-// one time in five a big (locked until the unlock) one, so every team tries
-// them before and after.
+// randomPattern picks a random pattern of at least minPoints waypoints and
+// not of the team's cooldown class (tryCooldown tries those): one time in
+// five a big (locked until the unlock) one, so every team tries them before
+// and after.
 func (l *league) randomPattern(st *simTeam, minPoints int) int {
 	if len(l.big) > 0 && st.rng.IntN(5) == 0 {
-		return l.big[st.rng.IntN(len(l.big))]
+		if p := l.big[st.rng.IntN(len(l.big))]; l.atlas.Pattern(p).Spell.Class != st.model.cooldown {
+			return p
+		}
 	}
 	for {
 		p := st.rng.IntN(l.atlas.PatternCount())
-		if l.atlas.Pattern(p).Waypoints.Len() >= minPoints {
+		if pat := l.atlas.Pattern(p); pat.Waypoints.Len() >= minPoints && pat.Spell.Class != st.model.cooldown {
 			return p
 		}
+	}
+}
+
+// repeated returns the repeater's next pattern: shape 0's first pattern, or,
+// when its class is on cooldown, the first pattern of another class, so the
+// team alternates between the two.
+func (l *league) repeated(st *simTeam) int {
+	first := l.atlas.ShapePatterns(0)[0]
+	if l.atlas.Pattern(first).Spell.Class != st.model.cooldown {
+		return first
+	}
+	for p := range l.atlas.PatternCount() {
+		if c := l.atlas.Pattern(p).Spell.Class; c != st.model.cooldown && l.atlas.Pattern(p).Waypoints.Len() < l.rules.LockedPatternPoints {
+			return p
+		}
+	}
+	panic("no pattern of another class")
+}
+
+// tryCooldown tries a pattern of the team's cooldown class (one it has
+// unlocked): if every unlocked pattern of its shape is of that class,
+// selecting the shape must be refused (shape_on_cooldown, or knocked_out
+// first); otherwise the shape selects, and scanning the pattern's points in
+// order must hit a wrong scan before it could complete, after which the
+// leader clears the attempt.
+func (l *league) tryCooldown(t *testing.T, st *simTeam, knocked bool, counts *simCounts) {
+	ctx := context.Background()
+	unlocked := st.model.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
+	var candidates []int
+	for p := range l.atlas.PatternCount() {
+		if pat := l.atlas.Pattern(p); pat.Spell.Class == st.model.cooldown && pat.Waypoints.Len() <= unlocked {
+			candidates = append(candidates, p)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	pat := l.atlas.Pattern(candidates[st.rng.IntN(len(candidates))])
+	shape := l.atlas.Shape(pat.Shape).ID
+	onCooldown := true // every unlocked pattern of the shape is of the cooldown class
+	for _, p := range l.atlas.ShapePatterns(pat.Shape) {
+		if q := l.atlas.Pattern(p); q.Waypoints.Len() <= unlocked && q.Spell.Class != st.model.cooldown {
+			onCooldown = false
+		}
+	}
+	leader := st.members[rotate(st)(0)]
+	_, err := l.state.Select(ctx, leader, shape)
+	switch {
+	case knocked:
+		if !errors.Is(err, teamstate.ErrKnockedOut) {
+			t.Errorf("team %d: select %s while knocked out: %v", st.i, shape, err)
+		}
+		counts.knockedRefused.Add(1)
+		return
+	case onCooldown:
+		if !errors.Is(err, teamstate.ErrShapeOnCooldown) {
+			t.Errorf("team %d: select %s (all %s): %v, want shape_on_cooldown", st.i, shape, st.model.cooldown, err)
+		}
+		counts.cooldownRefused.Add(1)
+		return
+	case err != nil:
+		t.Errorf("team %d: select %s (not all %s): %v", st.i, shape, st.model.cooldown, err)
+		return
+	}
+	for k, w := range l.atlas.WaypointIDs(pat.Waypoints) {
+		res, err := l.state.Scan(ctx, st.members[rotate(st)(k)], w)
+		if err != nil || res.Outcome == teamstate.OutcomePatternCompleted {
+			t.Errorf("team %d: scanning a %s pattern on cooldown: %v %s", st.i, st.model.cooldown, err, res.Outcome)
+			return
+		}
+		if res.Outcome == teamstate.OutcomeWrongScan {
+			counts.cooldownRefused.Add(1)
+			break
+		}
+	}
+	if _, err := l.state.ClearSelection(ctx, leader); err != nil {
+		t.Errorf("team %d: clear after the cooldown try: %v", st.i, err)
 	}
 }
 
@@ -728,6 +817,7 @@ func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.Scan
 	before := m.defeated
 	already := m.patterns[p]
 	m.patterns[p] = true
+	m.cooldown = l.atlas.Pattern(p).Spell.Class
 	dealt, boss, defeated := m.cast(l.clock.Now(), l.atlas.Pattern(p).Spell.Damage, l.bosses)
 	lc := res.State.LastCast
 	if res.Outcome != teamstate.OutcomePatternCompleted || lc == nil || lc.Dealt != dealt || lc.DefeatedBoss != defeated ||

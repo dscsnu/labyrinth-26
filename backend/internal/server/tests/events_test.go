@@ -468,16 +468,16 @@ func TestEventTypes(t *testing.T) {
 	scan := func(p player, w string) {
 		expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())}), http.StatusOK, "")
 	}
-	sel := func() {
-		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", a, map[string]string{"shape": "square"}), http.StatusOK, "")
+	sel := func(shape string) {
+		expect(t, "select "+shape, e.call("PUT", "/api/teams/me/state/selection", a, map[string]string{"shape": shape}), http.StatusOK, "")
 	}
 	expect(t, "start", e.call("POST", "/api/teams/me/start", a, nil), http.StatusOK, "")
-	sel()
+	sel("square")
 	scan(a, "1001")
 	scan(b, "1002")
 	scan(c, "1007")
 	scan(a, "1008") // completes the square
-	sel()
+	sel("triangle") // the square's class is on cooldown now
 	scan(b, "1012") // wrong
 	expect(t, "clear", e.call("DELETE", "/api/teams/me/state/selection", a, nil), http.StatusOK, "")
 	// Boss 1 has 25 HP in the seed: the first cast defeats it (boss_defeated,

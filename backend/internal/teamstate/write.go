@@ -64,6 +64,10 @@ var (
 	// team has unlocked (game.locked_pattern_points, until it has defeated
 	// game.unlock_after_bosses bosses).
 	ErrShapeLocked = errors.New("this shape's patterns are locked until your team defeats more bosses")
+	// ErrShapeOnCooldown means every pattern of the shape the team has
+	// unlocked is of the spell class of its last cast: it must cast a spell
+	// of another class first.
+	ErrShapeOnCooldown = errors.New("every spell of this shape is on cooldown: cast a spell of another class first")
 	// ErrKnockedOut means the team's health is 0 (boss attacks): it can't
 	// select or scan until an admin revives it.
 	ErrKnockedOut = errors.New("your team is knocked out; an admin must revive it")
@@ -157,6 +161,9 @@ func (s *Store) Select(ctx context.Context, userID uuid.UUID, shapeID string) (V
 	}
 	if s.shapeLocked(shape, s.unlockedPoints(*cur)) {
 		return View{}, ErrShapeLocked
+	}
+	if s.shapeOnCooldown(shape, s.unlockedPoints(*cur), s.cooldown(*cur)) {
+		return View{}, ErrShapeOnCooldown
 	}
 
 	// 3. build
@@ -292,9 +299,10 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	set = set.With(w)
 	// A scan that doesn't fit isn't rejected: it's pushed, marked wrong, the
 	// player is told, and the attempt is poisoned until the team reselects.
-	// Patterns the team hasn't unlocked don't count: a scan that could only
-	// grow into one is wrong too.
-	wrong := !s.atlas.FitsShapeWithin(cur.Selection.Shape, set, s.unlockedPoints(*cur))
+	// Patterns the team can't cast now don't count: those it hasn't unlocked
+	// and those of its cooldown class (its last cast's). A scan that could
+	// only grow into one of them is wrong too.
+	wrong := !s.atlas.FitsShapeCastable(cur.Selection.Shape, set, s.unlockedPoints(*cur), s.cooldown(*cur))
 
 	// 3. build
 	next := *cur

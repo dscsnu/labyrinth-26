@@ -167,11 +167,21 @@ func (a *Atlas) FitsShape(shape int, set WaypointSet) bool {
 // state uses it for patterns a team hasn't unlocked yet. The same scan, with
 // a popcount per pattern checked.
 func (a *Atlas) FitsShapeWithin(shape int, set WaypointSet, maxPoints int) bool {
+	return a.FitsShapeCastable(shape, set, maxPoints, "")
+}
+
+// FitsShapeCastable is FitsShapeWithin also leaving out the patterns of spell
+// class cooldown ("" leaves none out): whether set can still grow into a
+// pattern the team may cast now. Team state uses it for a team's spell
+// cooldown, the class of its last cast. One string comparison more per
+// pattern than FitsShapeWithin.
+func (a *Atlas) FitsShapeCastable(shape int, set WaypointSet, maxPoints int, cooldown string) bool {
 	if set == 0 {
 		return false
 	}
 	for _, p := range a.shapePatterns[shape] {
-		if w := a.patterns[p].Waypoints; w.Len() <= maxPoints && w.Contains(set) {
+		pat := &a.patterns[p]
+		if pat.Waypoints.Len() <= maxPoints && pat.Spell.Class != cooldown && pat.Waypoints.Contains(set) {
 			return true
 		}
 	}

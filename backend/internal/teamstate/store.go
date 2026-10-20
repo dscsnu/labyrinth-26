@@ -110,7 +110,7 @@ type Atlas interface {
 	SetOf(ids []string) (atlas.WaypointSet, error)
 	PatternFor(set atlas.WaypointSet) (int, bool)
 	FitsShape(shape int, set atlas.WaypointSet) bool
-	FitsShapeWithin(shape int, set atlas.WaypointSet, maxPoints int) bool
+	FitsShapeCastable(shape int, set atlas.WaypointSet, maxPoints int, cooldown string) bool
 	WaypointIDs(set atlas.WaypointSet) []string
 	ShapePatterns(shape int) []int
 	ShapeCount() int

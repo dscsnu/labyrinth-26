@@ -347,7 +347,9 @@ var httpStrategies = []string{"steady", "solo", "sloppy", "racer", "retrier", "q
 // members racing for a point, resent scans, giving up, and an admin removing
 // a member mid-game. Every request's status and code must be the expected
 // one; at the end every phone must hold its team's state (version and cast
-// count), and every removed player must have had no_team.
+// count), and every removed player must have had no_team. Each team picks
+// its next pattern of another size than its last cast's (the spell cooldown
+// refuses a spell of the last cast's class).
 func TestSim100Teams(t *testing.T) {
 	const teams, rounds = 100, 6
 	e := setup(t)
@@ -383,6 +385,10 @@ func TestSim100Teams(t *testing.T) {
 		clients  []*simClient
 		removed  int // index of the removed member, or -1
 		casts    int
+		// cooldown is the waypoint count of the team's last cast: its
+		// spell class (class_n) is on cooldown, so the next pattern is
+		// picked of another size. 0 before the first cast.
+		cooldown int
 	}
 	sims := make([]*simTeam, teams)
 	for i := range sims {
@@ -447,11 +453,15 @@ func TestSim100Teams(t *testing.T) {
 					}
 				}
 				st.casts++
+				st.cooldown = len(p.waypoints)
 			}
 			turns := func(k int) *simClient { a := active(); return a[k%len(a)] }
 
 			for round := range rounds {
 				p := patterns[rng.IntN(len(patterns))]
+				for len(p.waypoints) == st.cooldown { // its class is on cooldown
+					p = patterns[rng.IntN(len(patterns))]
+				}
 				switch st.strategy {
 				case "steady":
 					cast(p, turns, false)
@@ -510,6 +520,7 @@ func TestSim100Teams(t *testing.T) {
 						want("scan "+w+" after the race", status, code, http.StatusOK, "")
 					}
 					st.casts++
+					st.cooldown = len(p.waypoints)
 				case "shrinking":
 					if round == rounds/2 && len(st.clients) > 1 {
 						st.removed = len(st.clients) - 1

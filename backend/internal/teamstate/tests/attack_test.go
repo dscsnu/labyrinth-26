@@ -118,7 +118,7 @@ func TestBossAttacks(t *testing.T) {
 		t.Fatalf("after revive: health %d, boss %+v, %d timers", v.Health, v.Boss, f.clock.pending())
 	}
 	expectType(t, sub, "revive", teamstate.Revived)
-	f.selectAt(t, now+f.tick(1), 0, "square")
+	f.selectAt(t, now+f.tick(1), 0, "triangle") // the square is on cooldown after its cast
 }
 
 // TestAttacksAcrossRestart checks that health is derived, not stored: with

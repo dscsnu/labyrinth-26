@@ -33,6 +33,11 @@ import (
 	"labyrinth/internal/user"
 )
 
+// triangle is a triangle in the 2025 seed (pattern 204, class_3): tests cast
+// it between two squares (class_4), since the spell cooldown refuses a spell
+// of the last cast's class.
+var triangle = []string{"1001", "1002", "1003"}
+
 // square is a square in the 2025 seed (T6, R, SARC, C1).
 var square = []string{"1001", "1002", "1007", "1008"}
 
@@ -591,8 +596,10 @@ func TestCompletionPurges(t *testing.T) {
 			t.Fatalf("member %d scanning %s after completion: %v", c.member, c.waypoint, err)
 		}
 	}
-	f.selectAt(t, f.tick(5), 0, "square")
-	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "1008"), teamstate.OutcomeScanAdded)
+	// A new selection works again (the triangle: the square's class is on
+	// cooldown after its cast).
+	f.selectAt(t, f.tick(5), 0, "triangle")
+	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "1001"), teamstate.OutcomeScanAdded)
 }
 
 // TestOutOfOrderScanning checks that a pattern completes whatever order the
@@ -653,21 +660,19 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 }
 
 // TestCompletingAgain checks that completing an already completed pattern
-// reports it and doesn't grow progress.
+// reports it and doesn't grow progress (a triangle cast in between: the
+// spell cooldown refuses two squares in a row).
 func TestCompletingAgain(t *testing.T) {
 	f := started(t)
-	for round := range 2 {
-		t0 := time.Duration(round) * f.tick(100)
-		f.selectAt(t, t0, 0, "square")
-		for i, w := range square {
-			res := f.scanAt(t, t0+f.tick(float64(i)), i, w)
-			if i == 3 && res.AlreadyCompleted != (round == 1) {
-				t.Fatalf("round %d: already_completed = %v", round, res.AlreadyCompleted)
-			}
-		}
+	if res := f.castSquare(t, 0); res.AlreadyCompleted {
+		t.Fatal("first square: already_completed")
 	}
-	if v := f.view(t); len(v.Patterns) != 1 {
-		t.Fatalf("patterns after completing twice: %v", v.Patterns)
+	f.castTriangle(t, 1)
+	if res := f.castSquare(t, 2); !res.AlreadyCompleted {
+		t.Fatal("second square: not already_completed")
+	}
+	if v := f.view(t); len(v.Patterns) != 2 || len(v.Shapes) != 2 {
+		t.Fatalf("patterns after the square twice and a triangle: %v, shapes %v", v.Patterns, v.Shapes)
 	}
 }
 
@@ -902,9 +907,10 @@ func nextState(t *testing.T, sub *live.Subscription) (live.EventType, teamstate.
 }
 
 // TestCastLog checks that every cast is logged in memory and in team_cast,
-// repeats included and marked: last_cast is the newest, CastsForUser lists
-// them newest first, a new selection keeps them, and a restart reloads the
-// whole log.
+// repeats included and marked: the square, a triangle (the cooldown forbids
+// two squares in a row), the square again; last_cast is the newest,
+// CastsForUser lists them newest first with their classes, a new selection
+// keeps them, and a restart reloads the whole log.
 func TestCastLog(t *testing.T) {
 	f := started(t)
 	if v := f.view(t); v.LastCast != nil {
@@ -913,29 +919,31 @@ func TestCastLog(t *testing.T) {
 	if cs := pgtest.Must(f.state.CastsForUser(f.users[0])); len(cs) != 0 {
 		t.Fatalf("casts before any cast: %v", cs)
 	}
-	for round := range 2 {
+	for round := range 3 {
 		t0 := time.Duration(round) * f.tick(100)
-		f.selectAt(t, t0, 0, "square")
-		for i, w := range square {
-			f.scanAt(t, t0+f.tick(float64(i)), i, w)
+		shape, ids, class := "square", square, "class_4"
+		if round == 1 {
+			shape, ids, class = "triangle", triangle, "class_3"
 		}
+		f.cast(t, round, shape, ids)
 		lc := f.view(t).LastCast
-		if lc == nil || !slices.Equal(lc.Pattern, square) || lc.Shape != "square" || lc.Class != "class_4" || lc.CastBy != f.users[3] ||
-			!lc.CastAt.Equal(start.Add(t0+f.tick(3))) || lc.AlreadyCompleted != (round == 1) || lc.Damage <= 0 {
+		if lc == nil || !slices.Equal(lc.Pattern, ids) || lc.Shape != shape || lc.Class != class || lc.CastBy != f.users[len(ids)-1] ||
+			!lc.CastAt.Equal(start.Add(t0+f.tick(float64(len(ids))))) || lc.AlreadyCompleted != (round == 2) || lc.Damage <= 0 {
 			t.Fatalf("round %d: last_cast %+v", round, lc)
 		}
 	}
 	f.selectAt(t, f.tick(500), 0, "triangle")
 
 	cs := pgtest.Must(f.state.CastsForUser(f.users[2]))
-	if len(cs) != 2 || !cs[0].AlreadyCompleted || cs[1].AlreadyCompleted || !cs[0].CastAt.After(cs[1].CastAt) ||
-		cs[0].Class != "class_4" || cs[1].Class != "class_4" {
+	if len(cs) != 3 || !cs[0].AlreadyCompleted || cs[1].AlreadyCompleted || cs[2].AlreadyCompleted ||
+		!cs[0].CastAt.After(cs[1].CastAt) || !cs[1].CastAt.After(cs[2].CastAt) ||
+		cs[0].Class != "class_4" || cs[1].Class != "class_3" || cs[2].Class != "class_4" {
 		t.Fatalf("cast log (newest first): %+v", cs)
 	}
 	var rows int
 	if err := f.db.Pool().QueryRow(context.Background(),
-		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&rows); err != nil || rows != 2 {
-		t.Fatalf("team_cast has %d rows (%v), want 2", rows, err)
+		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&rows); err != nil || rows != 3 {
+		t.Fatalf("team_cast has %d rows (%v), want 3", rows, err)
 	}
 	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
 	before := pgtest.Must(json.Marshal(cs))
@@ -995,13 +1003,17 @@ func TestVersionAndTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	quiet("clear with nothing selected")
-	f.selectAt(t, f.tick(6), 0, "square")
-	want("reselect", teamstate.ShapeSelected, 1, 1)
+	if _, err := f.state.Select(ctx, f.users[0], "square"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
+		t.Fatalf("reselecting the square right after its cast: %v, want shape_on_cooldown", err)
+	}
+	quiet("square on cooldown")
+	f.selectAt(t, f.tick(6), 0, "triangle")
+	want("select another class", teamstate.ShapeSelected, 1, 1)
 	f.scanAt(t, f.tick(7), 0, "1001")
 	want("scan", teamstate.ScanAdded, 1, 1)
-	f.scanAt(t, f.tick(7), 1, "1002")
+	f.scanAt(t, f.tick(7), 1, "1003")
 	want("scan", teamstate.ScanAdded, 1, 1)
-	f.scanAt(t, f.tick(8), 2, "1003") // in no square with 1001 and 1002: wrong
+	f.scanAt(t, f.tick(8), 2, "1004") // 1001 1003 1004 is a line, in no triangle: wrong
 	want("wrong scan", teamstate.WrongScan, 1, 1)
 	if _, err := f.state.ClearSelection(ctx, f.users[0]); err != nil {
 		t.Fatal(err)
@@ -1045,7 +1057,7 @@ func TestBigPatternsUnlock(t *testing.T) {
 	}
 
 	for round := range f.rules.UnlockAfterBosses {
-		f.castSquare(t, round+1) // each defeats a 1-HP boss
+		f.castAlternating(t, round+1) // each defeats a 1-HP boss
 	}
 	v = f.view(t)
 	if v.BossesDefeated != f.rules.UnlockAfterBosses || v.UnlockedPoints != f.rules.MaxPatternPoints || len(v.LockedShapes) != 0 {
