@@ -80,10 +80,10 @@ per_100m = 0.8
 # Base coordination damage by pattern waypoint count (1 to game.max_pattern_points).
 # Allowed: each at least 1.
 1 = 15
-2 = 18
-3 = 52
-4 = 179
-5 = 376
+2 = 22
+3 = 58
+4 = 186
+5 = 384
 6 = 1200
 
 [spell.bonus]

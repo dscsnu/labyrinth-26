@@ -4,7 +4,7 @@ The `spells` package owns the mathematical modeling for spell damage in **Labyri
 
 Damage values are **precomputed offline** and stored in the database (`pattern.damage`), loaded once into memory at startup (`atlas.Load`), and read as a plain field during gameplay. The game server **never imports** this package.
 
-Tunables appear with their `config.toml` key: **1.5** (`spell.walkability`), **0.8** (`spell.per_100m`), `spell.base` (**1: 15, 2: 18, 3: 52, 4: 179, 5: 376, 6: 1200**), and **75** (`spell.bonus.concave_quad`).
+Tunables appear with their `config.toml` key: **1.5** (`spell.walkability`), **0.8** (`spell.per_100m`), `spell.base` (**1: 15, 2: 22, 3: 58, 4: 186, 5: 384, 6: 1200**), and **75** (`spell.bonus.concave_quad`).
 
 ---
 
@@ -34,7 +34,7 @@ $$D(\sigma) = \operatorname{round}\left(\text{Base}(k) + \text{Bonus}(\text{conc
 
 | Parameter | Config Key | Default | Purpose |
 |---|---|:---:|---|
-| $\text{Base}(k)$ | `spell.base` | **18, 52, 179, 376, 1200** | Base coordination damage by pattern size $k \in [2, 6]$ (and 15 for $k=1$). Sets tier power. Note: $k=6$ deals a fixed value of 1200 (no more, no less), with no distance scaling. |
+| $\text{Base}(k)$ | `spell.base` | **22, 58, 186, 384, 1200** | Base coordination damage by pattern size $k \in [2, 6]$ (and 15 for $k=1$). Sets tier power. Note: $k=6$ deals a fixed value of 1200 (no more, no less), with no distance scaling. |
 | $\text{Bonus}$ | `spell.bonus.concave_quad` | **75** | Difficulty bonus awarded to concave quadrilaterals (4 points whose convex hull has 3 vertices). |
 | $b$ | `spell.per_100m` | **0.8** | Distance damage per 100 metres of walking. Rewards teams for physical coverage across campus. |
 | $\alpha$ | `spell.walkability` | **1.5** | Campus detour index ($\frac{\text{Walking Distance}}{\text{Euclidean Distance}}$). Real footpaths require walking $\approx 1.5\times$ straight-line distance due to buildings and terrain. |
