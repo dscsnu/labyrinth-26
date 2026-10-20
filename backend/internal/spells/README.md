@@ -31,11 +31,15 @@ For any pattern $\sigma$ with $k$ waypoints, shortest closed tour $P_{\text{tour
 
 $$D(\sigma) = \operatorname{round}\left(\text{Base}(k) + \text{Bonus}(\text{concave}) + b \cdot \frac{\alpha \cdot P_{\text{tour}}}{100}\right)$$
 
+except for the biggest size, $k$ = `game.max_pattern_points` (**6**), which deals its base flat, with no bonus and no distance term:
+
+$$D(\sigma) = \text{Base}(k) \quad \text{for } k = \texttt{game.max\_pattern\_points}$$
+
 ### Calibrated Parameters
 
 | Parameter | Config Key | Default | Purpose |
 |---|---|:---:|---|
-| $\text{Base}(k)$ | `spell.base` | **22, 58, 186, 384, 1200** | Base coordination damage by pattern size $k \in [2, 6]$ (and 15 for $k=1$). Sets tier power. Note: $k=6$ deals a fixed value of 1200 (no more, no less), with no distance scaling. |
+| $\text{Base}(k)$ | `spell.base` | **22, 58, 186, 384, 1200** | Base coordination damage by pattern size $k \in [2, 6]$ (and 15 for $k=1$). Sets tier power. The biggest size, `game.max_pattern_points` (**6**), deals its base flat (**1200**), with no distance term. |
 | $\text{Bonus}$ | `spell.bonus.concave_quad` | **75** | Difficulty bonus awarded to concave quadrilaterals (4 points whose convex hull has 3 vertices). |
 | $b$ | `spell.per_100m` | **0.8** | Distance damage per 100 metres of walking. Rewards teams for physical coverage across campus. |
 | $\alpha$ | `spell.walkability` | **1.5** | Campus detour index ($\frac{\text{Walking Distance}}{\text{Euclidean Distance}}$). Real footpaths require walking $\approx 1.5\times$ straight-line distance due to buildings and terrain. |
