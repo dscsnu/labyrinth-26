@@ -185,8 +185,45 @@
     const memberName = (id: string) => team?.members.find((m: Team["members"][number]) => m.id === id)?.name ?? id.slice(0, 8);
 </script>
 
-<!-- Top bar: full width, the top 20% of the screen. -->
-<div class="fixed inset-x-0 top-0 h-[20dvh] bg-[#b8963e]"></div>
+<!-- Top bar: full width, the top 20% of the screen. The current boss's image,
+     name and health, from ts, so it moves on every teammate's team_state. -->
+<div class="fixed inset-x-0 top-0 flex h-[20dvh] items-center gap-4 bg-gold px-4 py-2 font-pixel text-[16px] leading-[24px] text-ink">
+    {#if boss && ts.boss}
+        {@const hp = Math.max(0, boss.hp - ts.boss.damage)}
+        <!-- The boss's image (static/<asset>), as tall as the bar; hidden if
+             the file is missing, leaving the name and health. Keyed by serial
+             so the next boss's image never inherits the last one's hiding. -->
+        {#key boss.serial}
+            <img
+                src="/{boss.asset}"
+                alt=""
+                width="628"
+                height="802"
+                draggable="false"
+                onerror={(e) => ((e.currentTarget as HTMLImageElement).hidden = true)}
+                class="h-full w-auto shrink-0 object-contain"
+            />
+        {/key}
+        <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
+            <p class="truncate uppercase">{boss.name}</p>
+            <div
+                role="progressbar"
+                aria-label="{boss.name}'s health"
+                aria-valuemin={0}
+                aria-valuemax={boss.hp}
+                aria-valuenow={hp}
+                class="pixel-box mx-1 h-4 bg-ink"
+            >
+                <div class="h-full bg-danger transition-[width] duration-300" style:width="{(hp / boss.hp) * 100}%"></div>
+            </div>
+            <p class="text-[8px] leading-[16px]">{hp} / {boss.hp} HP</p>
+        </div>
+    {:else if bosses.length > 0}
+        <p class="uppercase">Every boss defeated!</p>
+    {:else}
+        <p class="uppercase">No bosses loaded.</p>
+    {/if}
+</div>
 
 <!-- The map: the rest of the screen, below the bar. -->
 <div class="fixed inset-x-0 top-[20dvh] bottom-0">
