@@ -1,6 +1,6 @@
 # Read before integration
 
-How `/play`'s **top banner** (the current boss's image, name and HP) and the **spell book** (the book button) get their data, and what to keep in mind when building on them.
+How `/play`'s **top banner** (the current boss's image, name and HP), the **spell book** (the book button) and the **map markers** get their data, and what to keep in mind when building on them.
 
 Both are fed by the same two mechanisms, and neither makes a request of its own:
 
@@ -12,9 +12,10 @@ Both are fed by the same two mechanisms, and neither makes a request of its own:
 2. [Live updates](#2-live-updates)
 3. [The top banner: boss name, HP and asset](#3-the-top-banner-boss-name-hp-and-asset)
 4. [The spell book: the spells](#4-the-spell-book-the-spells)
-5. [What the backend doesn't send](#5-what-the-backend-doesnt-send)
-6. [Rules for integrating](#6-rules-for-integrating)
-7. [Troubleshooting](#7-troubleshooting)
+5. [The map markers](#5-the-map-markers)
+6. [What the backend doesn't send](#6-what-the-backend-doesnt-send)
+7. [Rules for integrating](#7-rules-for-integrating)
+8. [Troubleshooting](#8-troubleshooting)
 
 ---
 
@@ -150,17 +151,61 @@ In the backend, a **pattern** is a set of waypoints that forms a **shape**. Comp
 - The book opens on the team's selected shape, or on the page it was left on. It only turns to the selected shape **on opening**, so a teammate's selection never turns someone's page while they're reading.
 - The `<` and `>` buttons at the bottom (and the left and right arrow keys) turn pages. Close is in the middle; Escape or a tap on the dimmed map also closes the book.
 
-## 5. What the backend doesn't send
+## 5. The map markers
+
+The arrows on the map. They're **frontend-only for now**: the positions belong to the map image, and they aren't connected to the backend yet.
+
+### Where they're defined
+
+Everything is in **`src/lib/game/mapPoints.ts`**. To move, rename, add or remove a marker, edit that file only.
+
+```ts
+export const MAP_SIZE = { width: 1168, height: 1346 };   // map.webp's pixels
+
+export const MAP_POINTS: MapPoint[] = [
+    { name: "G Block", x: 517, y: 222, waypoint: null },
+    …
+];
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | The place's name. Read by screen readers; must be unique, because it keys the marker. |
+| `x`, `y` | Where the arrow's tip touches, in `map.webp`'s own pixels, from `(0, 0)` at the top-left. To find them, hover the spot in an image editor and read the cursor's position. |
+| `waypoint` | The backend waypoint (the 4-digit ID its QR code prints). `null` until the backend's waypoints are final. |
+
+### How they're drawn
+
+- `+page.svelte` passes the points in: `<MapView bind:level={zoomLevel} markers={MAP_POINTS} />`.
+- In `src/lib/components/MapView.svelte`, the map image and the markers share one box. The box is as tall as the viewport × zoom, with `map.webp`'s shape (`aspect-ratio`). Each marker is placed at `x / width` and `y / height` **as percentages** of the box, so zooming and panning carry the markers along.
+- The sprite is `src/lib/assets/MapIcons/down-arrow.png` (16×16, shown at its own size, 16×16 screen pixels). Its tip is the bottom-centre of the image (columns 7–8 of the bottom row). The marker is shifted by `-translate-x-1/2 -translate-y-full`, so that point lands exactly on `(x, y)`.
+- Markers stay the same size at every zoom level, and taps pass through them to the map (`pointer-events-none`), so dragging still works.
+- If `map.webp` is replaced with an image of a different size, update `MAP_SIZE` and re-pick every point.
+
+### Integrating with the backend
+
+1. When the backend's 2026 waypoints are final, set each point's `waypoint` to its ID, e.g. `{ name: "G Block", x: 517, y: 222, waypoint: "1005" }`. Don't change the coordinates; they belong to the map, not the backend.
+2. Connect markers to live team data by matching `waypoint` against the team state, in `+page.svelte` (never inside `MapView`), and pass the result as a prop:
+   ```ts
+   const state = (id: string | null) =>
+       id && ts.stack.some((s) => s.waypoint_id === id) ? "active"   // in the current attempt
+     : id && ts.waypoints.includes(id) ? "visited"                     // scanned before
+     : "unvisited";
+   ```
+   `ts.waypoints` and `ts.stack` are live (§2), so markers would update on every teammate's phone with no new requests.
+3. The backend's waypoint list and `MAP_POINTS` should hold the same IDs. A point with a `waypoint` the backend doesn't know never lights up; a waypoint with no point has no marker.
+
+## 6. What the backend doesn't send
 
 These are deliberate. Don't build features that assume them:
 
 - **Undiscovered patterns.** The waypoints in each pattern, and each pattern's exact damage, are hidden until the team casts it. The book can show only the count of patterns still to find.
-- **Waypoint coordinates and names.** The game routes don't expose them.
+- **Waypoint coordinates and names.** The game routes don't expose them. The map markers' positions and names are in `src/lib/game/mapPoints.ts` (§5).
 - **Spell names, effects or icons.** A spell is only `pattern.damage`. Anything more needs a backend change (a column or table, plus the API).
 - **The cast log on the stream.** Only the newest cast (`last_cast`) is pushed. The full log comes from `/api/teams/me/casts`.
 - **The boss list on the stream.** It's static, so it's loaded once.
 
-## 6. Rules for integrating
+## 7. Rules for integrating
 
 - **Read from `ts`, `bosses`, `game` and `casts`; don't fetch.** Anything derived from them updates live for the whole team at no extra cost. A component that fetches the boss or state itself would go stale.
 - **Send every new team state through `observe`.** Never assign `live` directly: that skips the version check and the cast-log merge.
@@ -169,7 +214,7 @@ These are deliberate. Don't build features that assume them:
 - **Join bosses by `serial`**, not by array index.
 - **Clamp HP at 0** when displaying it.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|

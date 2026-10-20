@@ -1,6 +1,7 @@
 <script lang="ts">
   import MapView, { ZOOM_LEVELS } from "#lib/components/MapView.svelte";
   import SpellBook from "#lib/components/SpellBook.svelte";
+  import { MAP_POINTS } from "#lib/game/mapPoints.ts";
   import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
   import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
   import zoomOutIcon from "#lib/assets/UserInterfaceButtons/zoom-out-icon.webp";
@@ -278,7 +279,7 @@
 
 <!-- The map: the rest of the screen, below the bar. -->
 <div class="fixed inset-x-0 top-[20dvh] bottom-0">
-  <MapView bind:level={zoomLevel} />
+  <MapView bind:level={zoomLevel} markers={MAP_POINTS} />
 
   <!-- QR scanner button, bottom left. The scanner isn't built yet, so it does nothing. -->
   <button
