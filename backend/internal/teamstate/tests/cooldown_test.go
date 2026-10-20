@@ -47,7 +47,7 @@ func TestSpellCooldown(t *testing.T) {
 		t.Fatalf("before any cast: cooldown %v, shapes %v", v.CooldownClass, v.CooldownShapes)
 	}
 
-	f.castSquare(t, 0) // 107 damage: also defeats boss 1 (25 HP)
+	f.castSquare(t, 0) // also defeats boss 1 (25 HP)
 	for range 1 + len(square) {
 		nextState(t, sub)
 	}
