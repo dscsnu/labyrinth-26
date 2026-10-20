@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // startedTeam forms a team of teams.size through the API, starts it, and returns its
@@ -43,13 +44,27 @@ func TestSelectAndScanRoutes(t *testing.T) {
 		return e.call("PUT", "/api/teams/me/state/selection", p, body)
 	}
 	scan := func(p player, w string) apiResult {
-		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": w})
+		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())})
 	}
 
 	expect(t, "lobby select", sel(lobby, map[string]string{"shape": "square"}), http.StatusConflict, "not_in_game")
 	expect(t, "no team", scan(e.newPlayer("x"), "1001"), http.StatusNotFound, "not_in_team")
 	expect(t, "bad body", sel(ps[0], map[string]int{"shape": 1}), http.StatusBadRequest, "invalid_body")
 	expect(t, "empty scan body", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{}), http.StatusBadRequest, "invalid_body")
+
+	// QR verification: a tampered token and a stale one are refused before
+	// the waypoint or the team is even looked up.
+	fresh := qrToken("1001", time.Now().Unix())
+	last := fresh[len(fresh)-1]
+	replacement := byte('A')
+	if last == 'A' {
+		replacement = 'B'
+	}
+	expect(t, "tampered token", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": fresh[:len(fresh)-1] + string(replacement)}),
+		http.StatusBadRequest, "invalid_qr")
+	expect(t, "expired token", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix()-100)}),
+		http.StatusConflict, "qr_expired")
+
 	expect(t, "unknown shape", sel(ps[0], map[string]string{"shape": "hexagon"}), http.StatusNotFound, "unknown_shape")
 	expect(t, "unknown waypoint", scan(ps[0], "9999"), http.StatusNotFound, "unknown_waypoint")
 	expect(t, "scan before select", scan(ps[0], "1001"), http.StatusConflict, "no_shape_selected")
@@ -135,7 +150,7 @@ func TestCastLogRoute(t *testing.T) {
 	for range 2 {
 		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
 		for _, w := range []string{"1001", "1002", "1007", "1008"} {
-			expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"waypoint_id": w}), http.StatusOK, "")
+			expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken(w, time.Now().Unix())}), http.StatusOK, "")
 		}
 	}
 	got := casts()
@@ -225,7 +240,7 @@ func TestGameBosses(t *testing.T) {
 	}
 	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
 	for _, w := range []string{"1001", "1002", "1007", "1008"} {
-		r = e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"waypoint_id": w})
+		r = e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken(w, time.Now().Unix())})
 	}
 	st := r.payload["state"].(map[string]any)
 	lc := st["last_cast"].(map[string]any)

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"labyrinth/internal/atlas"
+	"labyrinth/internal/qr"
 	"labyrinth/internal/teams"
 )
 
@@ -71,6 +72,12 @@ var (
 	// ErrSelectionPoisoned means a wrong scan is in the stack: the attempt
 	// can't cast, and the team must select the shape again to start over.
 	ErrSelectionPoisoned = errors.New("a scan didn't fit any pattern of this shape; select the shape again to start over")
+	// ErrInvalidQR means the scan's token is malformed or its signature
+	// doesn't check out, so the scan is refused before it names a waypoint.
+	ErrInvalidQR = errors.New("invalid qr token")
+	// ErrExpiredQR means the scan's token is signed and well-formed but
+	// outside its validity window, so the scan is refused.
+	ErrExpiredQR = errors.New("qr token expired")
 )
 
 // Scan outcomes, reported in ScanResult.Outcome.
@@ -223,12 +230,26 @@ func (s *Store) ClearSelection(ctx context.Context, userID uuid.UUID) (View, err
 	return s.view(t.ID, next), nil
 }
 
-// Scan records that userID scanned waypointID (4 digits) toward the team's
-// selected shape, and completes the pattern once the stack is exactly one.
-// See the rules above. A rejected scan returns an error and changes nothing;
-// a wrong scan is still pushed, marked wrong, and poisons the selection.
-func (s *Store) Scan(ctx context.Context, userID uuid.UUID, waypointID string) (ScanResult, error) {
-	// 2. validate, before 1. lock: content and team need no lock
+// Scan records that userID scanned the waypoint a token names toward the
+// team's selected shape, and completes the pattern once the stack is exactly
+// one. The token is verified first (signature and freshness): an invalid or
+// expired token is refused before it names a waypoint. See the rules above. A
+// rejected scan returns an error and changes nothing; a wrong scan is still
+// pushed, marked wrong, and poisons the selection.
+func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanResult, error) {
+	// 2. validate, before 1. lock: verifying the token, then resolving the
+	// waypoint and team, all need no lock.
+	waypointID, err := s.qr.Verify(token)
+	if err != nil {
+		switch {
+		case errors.Is(err, qr.ErrInvalid):
+			return ScanResult{}, ErrInvalidQR
+		case errors.Is(err, qr.ErrExpired):
+			return ScanResult{}, ErrExpiredQR
+		default:
+			return ScanResult{}, err
+		}
+	}
 	w, ok := s.atlas.WaypointIndex(waypointID)
 	if !ok {
 		return ScanResult{}, ErrUnknownWaypoint

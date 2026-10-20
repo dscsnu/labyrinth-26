@@ -43,7 +43,7 @@ func (f *fixtureEnv) castSquare(t *testing.T, round int) teamstate.ScanResult {
 func (f *fixtureEnv) restart(t *testing.T) {
 	t.Helper()
 	f.state.Close() // the old store must not attack once replaced
-	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, f.rules))
+	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
 }
 
 // TestCastsDamageBosses casts the square until two bosses fall, checking after
@@ -168,7 +168,7 @@ func TestLoadRefusesTooManyDefeated(t *testing.T) {
 		"INSERT INTO team_boss (team_id, defeated) VALUES ($1, $2)", f.teamID, f.bosses.Count()+1); err != nil {
 		t.Fatal(err)
 	}
-	_, err := teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, f.hub, pgtest.Quiet, f.rules)
+	_, err := teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules)
 	if err == nil || !strings.Contains(err.Error(), "bosses defeated") {
 		t.Fatalf("load: %v", err)
 	}

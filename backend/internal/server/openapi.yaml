@@ -18,8 +18,6 @@ info:
     accepts the `labyrinth_token` cookie (a browser's EventSource can't send headers; the frontend and
     backend share a domain, so the browser sends it). The cookie is accepted on this route only.
 
-    ⚠ `POST /api/teams/me/state/scans` takes the raw 4-digit waypoint ID until QR verification exists.
-
     This file is checked against the code by `TestOpenAPIMatchesRoutes` (internal/server):
     every registered route and every error code must appear here, with codes listed
     in each response's description.
@@ -451,25 +449,25 @@ paths:
       tags: [game]
       summary: Scan a waypoint
       description: |
-        No time limit, and any member may scan any number of the pattern's waypoints. Rejected **without being
-        pushed** if no type is selected (`no_shape_selected`), the attempt is poisoned (`selection_poisoned`:
-        reselect to restart), or the waypoint is already in the stack (`waypoint_already_scanned`, a retry
-        included). A scan whose waypoint, with the stack, can't be part of any pattern of the selected type is
-        pushed **marked `wrong`**, with outcome `wrong_scan`: the attempt is poisoned (`poisoned: true`) until
-        someone reselects. Once the stack is exactly a pattern of the selected type, it completes (a cast,
-        logged in `team_cast`): the stack and selection are purged and `last_cast` is set.
-
-        ⚠ Takes the raw waypoint ID; to be replaced by QR verification.
+        No time limit, and any member may scan any number of the pattern's waypoints. The body carries the
+        waypoint's signed, fresh QR token (see `internal/qr/README.md`); an invalid token is refused with
+        `invalid_qr` and a stale one with `qr_expired`. Rejected **without being pushed** if no type is
+        selected (`no_shape_selected`), the attempt is poisoned (`selection_poisoned`: reselect to restart),
+        or the waypoint is already in the stack (`waypoint_already_scanned`, a retry included). A scan whose
+        waypoint, with the stack, can't be part of any pattern of the selected type is pushed **marked
+        `wrong`**, with outcome `wrong_scan`: the attempt is poisoned (`poisoned: true`) until someone
+        reselects. Once the stack is exactly a pattern of the selected type, it completes (a cast, logged in
+        `team_cast`): the stack and selection are purged and `last_cast` is set.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [waypoint_id]
+              required: [qr]
               additionalProperties: false
               properties:
-                waypoint_id: { type: string, pattern: "^[0-9]{4}$", example: "1007" }
+                qr: { type: string, description: The signed token read off the waypoint's QR code., example: "1001:1760000000.nR5…" }
       responses:
         "200":
           description: Accepted.
@@ -480,12 +478,12 @@ paths:
                   - $ref: "#/components/schemas/Success"
                   - properties:
                       payload: { $ref: "#/components/schemas/ScanResult" }
-        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_qr`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
         "409":
           $ref: "#/components/responses/Error"
-          description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`"
+          description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`, `qr_expired`"
 
   /api/qr/{waypoint_id}:
     get:

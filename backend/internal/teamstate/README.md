@@ -31,6 +31,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 |---|---|
 | **Atlas** | The static content (waypoints, shapes, patterns), loaded once at startup by the atlas use case and read here through the [`Atlas` interface](#storego-the-in-memory-layout). Never changes while the backend runs. |
 | **Waypoint** | A physical location with a QR code. Identified by a **4-digit ID** (`"1001"`; leading zeros allowed). |
+| **QR token** | The signed, rotating string a waypoint's QR shows (`"<waypoint>:<unix seconds>.<signature>"`). A scan submits it instead of the raw ID. Owned by the [`qr`](../qr/README.md) use case; verified here through the `QR` interface before the waypoint is resolved. |
 | **Pattern** | A set of **1 to 6** (`game.max_pattern_points`) waypoints that forms a shape on the map. Identified **by that set**, e.g. `["1001","1002","1007","1008"]`, in any order. Its database `id` is only an internal key. |
 | **Shape** | What a pattern looks like: `square`, `triangle`, `collinear`, `tree`, `lightning` in the 2025 seed. A shape has many patterns. Completing any one completes the shape. |
 | **Selection** | The shape a team is currently attempting. At most one per team. |
@@ -65,7 +66,10 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 ## The game flow
 0. **Start.** When the leader starts the team (teams' `Start`; any size from 1 to **6** (`teams.size`) may start, once every non-leader is ready), every member's stream gets the `IN_GAME` `team` and then the team's `team_state`, empty: no selection, no stack, no progress, `poisoned: false`, health **10** (`game.health`), and boss 1's attack clock started at the team's start. teams calls `PublishTeam` through its `Rules.OnStart` hook, wired in `server.Build`, because teams may not import teamstate (AGENTS.md §4). The play screen has its state at once, without reconnecting.
 1. **Select.** **The leader** selects a shape: `PUT /api/teams/me/state/selection {"shape":"square"}` (anyone else: `403 not_leader`). **Every selection purges the stack**, reselecting the same shape included. Reselecting is how a team restarts an attempt. A shape whose patterns are all bigger than the team's unlocked points is refused (`409 shape_locked`) until it has defeated **5** (`game.unlock_after_bosses`) bosses.
-2. **Scan.** Members scan waypoints: `POST /api/teams/me/state/scans {"waypoint_id":"1001"}`. No time limit, and any member may scan any number of the pattern's waypoints (one player can scan a whole pattern). A scan is **rejected with an error and not pushed** if:
+2. **Scan.** Members scan waypoints: `POST /api/teams/me/state/scans {"qr":"1001:1760000000.…"}`. The token is verified first (signature and freshness, through the `qr` use case); then the waypoint it names is used exactly as the raw ID was. No time limit, and any member may scan any number of the pattern's waypoints (one player can scan a whole pattern). A scan is **rejected with an error and not pushed** if:
+   - the token is malformed or tampered: `400 invalid_qr`
+   - the token is outside its validity window: `409 qr_expired`
+   - no shape is selected: `409 no_shape_selected`
    - no shape is selected: `409 no_shape_selected`
    - the attempt is **poisoned**: `409 selection_poisoned`
    - its **waypoint is already in the stack**, whoever scanned it, the same member included: `409 waypoint_already_scanned`
@@ -102,10 +106,9 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `casts` returns the caller's team's cast log, newest first (`Store.CastsForUser`).
   - `selectShape` decodes `{"shape"}` and calls `Store.Select` (leader only).
   - `clearSelection` calls `Store.ClearSelection` (leader only).
-  - `scan` decodes `{"waypoint_id"}` and calls `Store.Scan`, returning a `ScanResult`.
+  - `scan` decodes `{"qr"}` and calls `Store.Scan`, returning a `ScanResult`.
   - `revive` takes `{team_id}` from the path, calls `Store.Revive`, and logs `admin revived team` with the admin's ID. A malformed ID isn't checked separately: it's just not found (`404 team_not_found`).
 - **`fail`** maps errors to statuses and codes via the `errorCodes` table; anything unmapped is logged and becomes `500`.
-- **⚠** The scan body is the raw waypoint ID, so it doesn't prove presence. See [Not decided yet](#not-decided-yet).
 
 ### `read.go`: types and reads
 - **Types:**
@@ -143,14 +146,14 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 - **`catchUp(e, teamID)`**: `cur.Boss.at(now)`; if `Attacks` and `Health` are unchanged, returns `cur`. Otherwise it builds the next state with the new progress and `Version.Next`, **skips persist** (memory-only, AGENTS.md §6: health is derived from the stored phase and the clock, and `Load` reproduces it exactly), applies, and publishes **`boss_attacked`**, or **`knocked_out`** if health is now 0. Several due attacks become **one** change and one event.
 - **`attack(teamID)`**: the attack timer's callback, run by the `Clock` in its own goroutine. `1. lock`, then nothing if the store is closed (`entry.closed`), else `catchUp` and `schedule` for the next attack. A timer that fires early finds nothing due and re-arms; one that fires late applies everything due.
 - **`Revive(ctx, teamID)`**: an admin's revive. `2. validate, before 1. lock`: `Teams.ByID` (unknown → `ErrTeamNotFound`, `404 team_not_found`), `IN_GAME` (else `ErrNotInGame`, `409 not_in_game`). `1. lock`, `catchUp`, `3. build`: a new phase of the same boss, `PhaseStart` = now, `PhaseHealth` = `Health` = `Rules.Health`, `Attacks` = 0. `4. persist`: `upsertBossPhase`. `5. apply`, `6. publish` **`revived`**, and `schedule`. Allowed whether or not the team is knocked out, so it also heals; `Defeated`, `Damage` and the multiplier are kept.
-- **Lock-free checks first** (§6 variation (a)): `Select` resolves the shape with `Atlas.ShapeIndex`, `Scan` the waypoint with `Atlas.WaypointIndex`, both before the team and the lock.
+- **Lock-free checks first** (§6 variation (a)): `Scan` verifies the token (`QR.Verify`, mapping its errors to `ErrInvalidQR` / `ErrExpiredQR`) and resolves the waypoint with `Atlas.WaypointIndex`, `Select` the shape with `Atlas.ShapeIndex`, all before the team and the lock.
 - **`Scan`'s checks**, in order, under the lock: no selection → `ErrNoShapeSelected`; `cur.Poisoned()` → `ErrSelectionPoisoned`; the waypoint already in the stack → `ErrWaypointAlreadyScanned`. Then `Atlas.FitsShapeWithin(shape, stack ∪ {w}, unlockedPoints(cur))` decides whether the scan is **wrong** (pushed, marked `Wrong`, outcome `wrong_scan`): only patterns the team has unlocked count, so a scan that could only grow into a locked one is wrong too. Completion is `!wrong` and `Atlas.PatternFor(stack ∪ {w})` (one map lookup) being a pattern whose `Atlas.Pattern(p).Shape` is the selected shape. On completion, `Atlas.WaypointIDs` gives `ScanResult.Pattern`, `Atlas.Pattern(p).ID` is the key written to `team_pattern` and `team_cast`, `AlreadyCompleted` is `cur.Patterns.Has(p)`, the cast's damage goes to the boss (`deal(cur.Boss, Pattern(p).Spell.Damage, bosses)` sets `next.Boss` and the cast's `Dealt`, `Boss`, `DefeatedBoss`; a defeat makes the event type `boss_defeated` instead of `spell_cast`, and starts the next boss's phase, after which `Scan` calls `schedule`), and the new `Cast` is appended to the log **copy-on-write**: `append(slices.Clip(cur.Casts), cast)`. `Clip` sets the slice's capacity to its length, so `append` always allocates a new backing array and the current snapshot's slice is never written to.
 - **`inGameTeam`** fetches the caller's team and requires `IN_GAME` (lock-free: a started team's status never goes back).
 - **`isMember(teamID, userID)`** reads the team's current roster through `Teams.ByID` (lock-free) and reports whether the user is in it. `Select`, `ClearSelection` and `Scan` call it **again under the entry lock**, right after `1. lock`, and refuse with `ErrNotInTeam` (`404 not_in_team`) if an admin removed the caller since `inGameTeam` looked them up. A started team's roster can shrink (teams' `RemoveMember`), so the lock-free lookup alone isn't enough.
 - **`isLeader(teamID, userID)`** reads the team through `Teams.ByID` (lock-free) and reports whether the user is its leader **now**. `Select` and `ClearSelection` call it under the entry lock, after `catchUp`: an admin removing the leader names a new one (teams' `RemoveMember`), and from then on only the new leader passes.
 - **`RosterChanged(teamID)`** is teams' `Rules.OnRosterChange` (wired in `server.Build`): an admin removed a member from a started team. It locks the entry (`lockTeam`) and drops `entry.members`, the roster cache, so the next publish re-reads the roster from teams and no longer reaches the removed player. **Memory-only** (AGENTS.md §6): the roster is teams' data, already saved. **Publishes nothing:** the team's `State` didn't change (the removed player's scans and casts stay), and teams has already sent the rest `team` and the removed player `no_team`.
 - **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing, and arms the team's first attack timer. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none, its phase starting at the team's `started_at`), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team), then `schedule`. Not a write: no build, persist or apply. It takes the entry lock so its event is ordered with the team's writes.
-- **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
+- **Declared here:** the errors (`ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`, `ErrInvalidQR`, `ErrExpiredQR`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
 
 ### `db.go`: SQL
 Only the per-team tables. The content tables are read by the atlas (`internal/atlas/db.go`).
@@ -188,8 +191,9 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
   | `Pattern(i)` | `Scan` (the completed pattern's shape and Postgres `ID`), `stateOf` (a completed pattern's shape), `view` (patterns), `castView` (waypoints, shape, `Spell.Damage`), `newGame` |
 - **`Bosses`** is what team state needs from the bosses use case, satisfied by `*bosses.Bosses`: `Count()` (how many) and `At(i)` (the boss at index `i`, serial `i+1`). Static, so lock-free. Used by `deal` (the current boss's HP and serial), `at` and `nextAttack` (its `AttackInterval()` and `AttackDamage`), `view` (`boss.serial`) and `stateOf` (the load check).
 - **`Clock`** is the store's time source, an interface with `Now()` (UTC, truncated to microseconds) and `AfterFunc(d, f) (stop func() bool)` (call `f` in its own goroutine after `d`; `stop` cancels it). **`systemClock`** is the real one: `time.Now().UTC().Truncate(time.Microsecond)` and `time.AfterFunc(d, f).Stop`.
+- **`QR`** is what team state needs from the qr use case, declared here (AGENTS.md §4) and satisfied by `*qr.Verifier`: one method, `Verify(token) → (waypoint ID, error)`. It holds no state (the token is derived from the secret and the clock), so `Scan` calls it lock-free. It doesn't check the waypoint exists: `Scan` does that through `Atlas.WaypointIndex`.
 - **`Rules`** are the settings from `config.toml`: `MaxPatternPoints` (`game.max_pattern_points`; the stack holds that many plus one wrong scan), `Health` (`game.health`: starting health and what a revive restores), `WriteTimeout` (`storage.write_timeout`), and `Clock` and `Epoch` (not in config.toml; nil `Clock` means `systemClock`; tests pass a fake).
-- **`Load(ctx, pg, atlas, bosses, teams, hub, log, rules)`** reads every team's stored state (`selectTeams` with `stackSize` = `MaxPatternPoints` + 1), checking it against the atlas and bosses, and builds the `Game` (`newGame`). Then it creates an entry for every `IN_GAME` team in `Teams.All()` that had nothing stored (`lockTeam`), so every started team is attacked, and only once the map is complete arms each entry's attack timer (`schedule`). Every state is brought up to now as it's built (`emptyState` and `stateOf` call `at`), so attacks that fell due while the backend was down are applied at load (and published to nobody: no stream is open yet; clients get them in their `snapshot`). It runs after `atlas.Load` and `bosses.Load` (it's handed both) and after `teams.Load`.
+- **`Load(ctx, pg, atlas, bosses, teams, qr, hub, log, rules)`** reads every team's stored state (`selectTeams` with `stackSize` = `MaxPatternPoints` + 1), checking it against the atlas and bosses, and builds the `Game` (`newGame`). Then it creates an entry for every `IN_GAME` team in `Teams.All()` that had nothing stored (`lockTeam`), so every started team is attacked, and only once the map is complete arms each entry's attack timer (`schedule`). Every state is brought up to now as it's built (`emptyState` and `stateOf` call `at`), so attacks that fell due while the backend was down are applied at load (and published to nobody: no stream is open yet; clients get them in their `snapshot`). It runs after `atlas.Load` and `bosses.Load` (it's handed both) and after `teams.Load`.
 - **`Close()`** stops every pending attack timer and marks every entry `closed`, so no timer re-arms and one already running does nothing. `main.go` registers it with `srv.RegisterOnShutdown` (after `Hub.Close`); tests call it before loading another store on the same database.
 - **`emptyState(teamID)`** is a `State` with an empty stack of capacity `MaxPatternPoints` + 1 and `Boss: {Defeated: 0, Damage: 0, Multiplier: 1, PhaseStart: the team's started_at (from Teams.ByID; now if it has none), PhaseHealth: Rules.Health}`, then brought up to now (`at`): a team without a `team_boss` row is at boss 1 with multiplier 1, attacked since its start.
 - **`stateOf(teamID, teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes. Every `team_cast` row becomes a `Cast` in `State.Casts`, oldest first (`cast: unknown pattern N` if the atlas lacks it). Stack rows are pushed oldest first, with their `wrong` flag. A `team_boss` row becomes `State.Boss` (`defeated`, `damage`, `multiplier`, and `phase_health` / `phase_started_at` where not `NULL`, else `emptyState`'s full health and team start), then `at(now)`; if its `defeated` is more than `Bosses.Count()` (game.bosses lowered mid-event) the load fails (`team_boss: N bosses defeated, but game.bosses is M`).
@@ -210,6 +214,7 @@ Store
   db       db                        the pool, for db.go
   atlas    Atlas                     the static content (*atlas.Atlas); read with no lock
   bosses   Bosses                    the static boss sequence (*bosses.Bosses); read with no lock
+  qr       QR                        the qr use case's verifier; read with no lock
   game     Game                      built once by newGame; read with no lock
   teams    Teams                     the teams use case (*teams.Store)
   hub      *live.Hub                 where team_state events go
@@ -510,7 +515,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | GET | `/api/teams/me/casts` | none | `[CastView]`, newest first |
 | PUT | `/api/teams/me/state/selection` | `{"shape": "square"}` | `View` |
 | DELETE | `/api/teams/me/state/selection` | none | `View` |
-| POST | `/api/teams/me/state/scans` | `{"waypoint_id": "1007"}` | `ScanResult` |
+| POST | `/api/teams/me/state/scans` | `{"qr": "1007:1760000000.nR5…"}` | `ScanResult` |
 | POST | `/api/admin/teams/{team_id}/revive` | none; **admin only** (`403 not_admin`) | `View` |
 
 **`View`** (also the data of the `team_state` live event), here for a poisoned attempt:
@@ -608,6 +613,8 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | `ErrNotLeader` (`Select`, `ClearSelection`) | 403 | `not_leader` |
 | `ErrShapeLocked` (`Select`) | 409 | `shape_locked` |
 | `ErrTeamNotFound` (`Revive`) | 404 | `team_not_found` |
+| `ErrInvalidQR` | 400 | `invalid_qr` |
+| `ErrExpiredQR` | 409 | `qr_expired` |
 | a body that doesn't decode | 400 | `invalid_body` |
 
 The revive route also answers `401` (`missing_token`, `invalid_token`, `user_not_found`) and `403 not_admin` from the admin middleware.
@@ -685,8 +692,10 @@ Checked in this order. Every rejection changes nothing, isn't logged and sends n
 
 | Case | Result |
 |---|---|
-| Body not `{"waypoint_id": string}`, empty, or over 1 MiB | `400 invalid_body` |
-| Waypoint unknown | `404 unknown_waypoint` |
+| Body not `{"qr": string}`, empty, or over 1 MiB | `400 invalid_body` |
+| Token malformed or its signature doesn't check out | `400 invalid_qr` |
+| Token signed but outside its validity window (`qr.rotate` + `qr.tolerance`) | `409 qr_expired` |
+| Waypoint unknown (the token names a waypoint the atlas doesn't have) | `404 unknown_waypoint` |
 | Caller not in a team | `404 not_in_team` |
 | Team not `IN_GAME` | `409 not_in_game` |
 | (any boss attack that fell due is applied first: `boss_attacked` / `knocked_out`) | |
@@ -830,7 +839,7 @@ Checked in this order:
 | 64 waypoints, 64 shapes, 2048 patterns | the atlas's set types (`atlas.MaxWaypoints`, `atlas.MaxShapes`, `atlas.MaxPatterns`) | See [`internal/atlas/README.md`](../atlas/README.md), "Limits and how to change them". `State` holds one of each set, so a wider set makes every snapshot bigger |
 
 ## Not decided yet
-- **⚠ QR verification.** `POST …/scans` accepts the raw 4-digit waypoint ID, so a player can claim a scan without being there. This must be replaced before the event (rotating or signed QR codes, verified server-side).
+- **⚠ The frontend play page doesn't scan QR yet.** The backend verifies the token (`POST …/scans` takes `{"qr"}`); the play page still submits a raw ID, so it gets `400 invalid_body` until it's wired to the camera scanner (`/test-scan` already reads tokens).
 - **No big patterns in the 2025 seed.** Every seed pattern has 3 or 4 points, so the unlock changes nothing until content with 5- and 6-point patterns is loaded; the tests add some by SQL.
 - **A non-leader can't restart a poisoned attempt.** Only the leader selects, so a team whose leader is away can't purge a wrong scan until the leader acts (or an admin removes the leader and names another).
 - **Score and winning.** Damage now goes to bosses (`bosses_defeated`, `boss.damage`), but nothing ranks teams or marks one `FINISHED` after the last boss.
@@ -924,7 +933,7 @@ Checked in this order:
 
   | Test | Covers |
   |---|---|
-  | `TestSelectAndScanRoutes` | every route and error code over HTTP: `not_in_game`, `not_in_team`, `invalid_body` (the body size limit included), `unknown_shape`, `unknown_waypoint`, `no_shape_selected`, `waypoint_already_scanned`; one member scanning two waypoints; a square completing; a wrong scan (`wrong_scan`, `poisoned`, `stack[].wrong`), then `selection_poisoned`, then a reselect clearing it |
+  | `TestSelectAndScanRoutes` | every route and error code over HTTP: `not_in_game`, `not_in_team`, `invalid_body` (the body size limit included), `invalid_qr` (tampered) and `qr_expired` (stale) for a scan, `unknown_shape`, `unknown_waypoint`, `no_shape_selected`, `waypoint_already_scanned`; one member scanning two waypoints; a square completing; a wrong scan (`wrong_scan`, `poisoned`, `stack[].wrong`), then `selection_poisoned`, then a reselect clearing it. Scans submit tokens minted with the test secret (`qrToken`) |
   | `TestCastLogRoute` | `GET /api/teams/me/casts`: `404 not_in_team`, `[]` before any cast, then two casts newest first with `already_completed`, `shape` and `damage` |
   | `TestGameBosses` | `GET /api/game/bosses`: `401 missing_token`; `[]` before content; after seeding, `game.bosses` bosses in serial order with name, asset and HP; a started team's state shows boss 1 at 0 damage, multiplier 1; after a square over HTTP, `last_cast` hit boss 1 with `dealt` = `damage` and `boss.damage` = `dealt` |
   | `TestGameShapes` | `GET /api/game/shapes`: `401 missing_token` without a token; the seed's 5 shapes, `square` with 18 patterns of 4 points, a valid damage range per shape, `max_pattern_points` from `config.toml`, and no `scan_window_ms` |

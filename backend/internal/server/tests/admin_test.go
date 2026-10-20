@@ -124,7 +124,7 @@ func TestAdminRemoveFromStartedTeam(t *testing.T) {
 	ps := e.startedTeam("g")
 	teamID := e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)
 	scan := func(p player, w string) apiResult {
-		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": w})
+		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())})
 	}
 
 	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
@@ -171,7 +171,7 @@ func TestAdminRemoveFromStartedTeam(t *testing.T) {
 	if got := members(e.call("GET", "/api/teams/me", ps[0], nil)); len(got) != len(ps)-1 {
 		t.Fatalf("after restart: %d members", len(got))
 	}
-	expect(t, "removed after restart", e.call("POST", "/api/teams/me/state/scans", ps[1], map[string]string{"waypoint_id": "1003"}),
+	expect(t, "removed after restart", e.call("POST", "/api/teams/me/state/scans", ps[1], map[string]string{"qr": qrToken("1003", time.Now().Unix())}),
 		http.StatusConflict, "not_in_game")
 }
 
@@ -198,7 +198,7 @@ func TestAdminRemoveRacesScan(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			scanRes = e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"waypoint_id": "1001"})
+			scanRes = e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken("1001", time.Now().Unix())})
 		}()
 		go func() { defer wg.Done(); removeRes = e.call("DELETE", removePath(teamID, p.id, ""), admin, nil) }()
 		wg.Wait()
@@ -250,7 +250,7 @@ func TestAdminRevive(t *testing.T) {
 	}
 	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}),
 		http.StatusConflict, "knocked_out")
-	expect(t, "scan", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"waypoint_id": "1001"}),
+	expect(t, "scan", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix())}),
 		http.StatusConflict, "knocked_out")
 
 	expect(t, "player revives", revive(ps[0], teamID), http.StatusForbidden, "not_admin")

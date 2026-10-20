@@ -338,7 +338,7 @@ TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -ra
 - **Don't edit in-memory data with SQL while the backend runs.** Stop it, edit, start it.
 - **Every phone holds a stream open.** Raise the process's file-descriptor limit well above the expected players (one per stream, ~10,000 on game day), keep any proxy's idle timeout above `live.heartbeat`, and route `/api/events` straight to the backend rather than through the SvelteKit server (`internal/server/README.md`, "Endpoint").
 - **Never point `TEST_DATABASE_URL` at a real database:** tests drop schemas.
-- **⚠ Before the event:** QR verification must replace the raw waypoint ID in `POST /api/teams/me/state/scans`.
+- **⚠ Before the event:** the frontend `/play` page must submit a scanned QR token (`{"qr"}`) to `POST /api/teams/me/state/scans`; the backend already verifies it.
 
 ## 16. Adding a use case, step by step
 1. Decide its state (§5) and write the README's Concepts, flow, data model and rules tables **first**: they're the spec.

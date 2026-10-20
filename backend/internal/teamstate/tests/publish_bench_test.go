@@ -43,6 +43,14 @@ func (m memTeams) ByID(id string) (teams.Team, bool) {
 	return t, ok
 }
 
+// memQR is a teamstate.QR that treats the token as the waypoint ID it names;
+// the benchmark never scans, so it only needs a value that satisfies the
+// interface.
+type memQR struct{}
+
+// Verify returns the token as the waypoint ID.
+func (memQR) Verify(token string) (string, error) { return token, nil }
+
 // BenchmarkTeamStatePublish measures publishing team_state from many
 // goroutines across the game-day number of teams, every member with an open
 // stream: the team lock, encoding the state once, and queueing it for each
@@ -76,7 +84,7 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: set.Game.MaxPatternPoints}))
 	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bossRules(set, true)))
-	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, teamstate.Rules{
+	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, memQR{}, hub, pgtest.Quiet, teamstate.Rules{
 		MaxPatternPoints:    set.Game.MaxPatternPoints,
 		Health:              set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints,

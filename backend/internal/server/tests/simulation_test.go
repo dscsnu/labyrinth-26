@@ -99,7 +99,7 @@ func (c *simClient) apply(state map[string]any) {
 // code and outcome.
 func (c *simClient) scan(waypoint string) (status int, code, outcome string, err error) {
 	time.Sleep(c.up)
-	body, _ := json.Marshal(map[string]string{"waypoint_id": waypoint})
+	body, _ := json.Marshal(map[string]string{"qr": qrToken(waypoint, time.Now().Unix())})
 	req, _ := http.NewRequest("POST", c.e.backend.URL+"/api/teams/me/state/scans", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+c.p.token)
 	res, err := http.DefaultClient.Do(req)
