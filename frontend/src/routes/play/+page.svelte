@@ -6,6 +6,7 @@
   import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
   import zoomOutIcon from "#lib/assets/UserInterfaceButtons/zoom-out-icon.webp";
   import bookIcon from "#lib/assets/UserInterfaceButtons/book-icon.webp";
+  import scottFace from "#lib/assets/icons/scott-face.png";
   import { ServerClock } from "#lib/game/serverClock.ts";
   import {
     CastLogSchema,
@@ -27,6 +28,10 @@
   let zoomLevel = $state(0);
   // Whether the spell book (the book button) is open.
   let bookOpen = $state(false);
+  // The team's health, shown at the top bar's right. The backend has no
+  // such value yet: null shows "?" until team_state carries one, then
+  // derive it from ts here.
+  const teamHealth: number | null = null;
   let { user, game, bosses } = $derived(data);
 
   // Latest state from responses and events; until the first, the page load's.
@@ -232,53 +237,80 @@
     id.slice(0, 8);
 </script>
 
-<!-- Top bar: full width, the top 20% of the screen. The current boss's image,
-     name and health, from ts, so it moves on every teammate's team_state. -->
+<!-- Top bar: full width, the top 25% of the screen. A row for the back
+     button, then the current boss's image, name and health, from ts, so it
+     moves on every teammate's team_state. -->
 <div
-  class="fixed inset-x-0 top-0 flex h-[20dvh] items-center gap-4 bg-brown px-4 py-2 font-pixel text-[16px] leading-[24px] text-parchment"
+  class="fixed inset-x-0 top-0 flex h-[25dvh] flex-col gap-2 bg-brown px-4 py-3 font-pixel text-[16px] leading-[24px] text-parchment"
 >
-  {#if boss && ts.boss}
-    {@const hp = Math.max(0, boss.hp - ts.boss.damage)}
-    <!-- The boss's image (static/<asset>), as tall as the bar; hidden if
-             the file is missing, leaving the name and health. Keyed by serial
-             so the next boss's image never inherits the last one's hiding. -->
-    {#key boss.serial}
+  <!-- The top row: back to the team page (left), the team's health (right). -->
+  <div class="flex shrink-0 items-center justify-between gap-4">
+    <a
+      href="/team"
+      aria-label="Back to team"
+      class="pixel-box bg-ink px-2 py-1 text-parchment active:translate-y-[2px] active:pixel-box-pressed"
+    >
+      &lt;
+    </a>
+    <p class="flex items-center gap-2 text-[8px] leading-[16px] uppercase">
+      <!-- No visible label: the face says whose health it is. -->
+      <span class="sr-only">Team health</span>
+      <!-- A step below the face beside it (32px), so it doesn't crowd the bar. -->
+      <span class="text-[18px] leading-[32px]">{teamHealth ?? "x10"}</span>
       <img
-        src="/{boss.asset}"
+        src={scottFace}
         alt=""
-        width="628"
-        height="802"
+        width="64"
+        height="64"
         draggable="false"
-        onerror={(e) => ((e.currentTarget as HTMLImageElement).hidden = true)}
-        class="h-full w-auto shrink-0 object-contain"
+        class="h-8 w-8 [image-rendering:pixelated]"
       />
-    {/key}
-    <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
-      <p class="truncate uppercase">{boss.name}</p>
-      <div
-        role="progressbar"
-        aria-label="{boss.name}'s health"
-        aria-valuemin={0}
-        aria-valuemax={boss.hp}
-        aria-valuenow={hp}
-        class="pixel-box mx-1 h-4 bg-ink"
-      >
+    </p>
+  </div>
+  <div class="flex min-h-0 flex-1 items-center gap-4">
+    {#if boss && ts.boss}
+      {@const hp = Math.max(0, boss.hp - ts.boss.damage)}
+      <!-- The boss's image (static/<asset>), as tall as its row; hidden if
+           the file is missing, leaving the name and health. Keyed by serial
+           so the next boss's image never inherits the last one's hiding. -->
+      {#key boss.serial}
+        <img
+          src="/{boss.asset}"
+          alt=""
+          width="628"
+          height="802"
+          draggable="false"
+          onerror={(e) => ((e.currentTarget as HTMLImageElement).hidden = true)}
+          class="h-full w-auto shrink-0 object-contain"
+        />
+      {/key}
+      <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
+        <p class="truncate uppercase">{boss.name}</p>
         <div
-          class="h-full bg-danger transition-[width] duration-300"
-          style:width="{(hp / boss.hp) * 100}%"
-        ></div>
+          role="progressbar"
+          aria-label="{boss.name}'s health"
+          aria-valuemin={0}
+          aria-valuemax={boss.hp}
+          aria-valuenow={hp}
+          class="pixel-box mx-1 h-4 bg-ink"
+        >
+          <div
+            class="h-full bg-danger transition-[width] duration-300"
+            style:width="{(hp / boss.hp) * 100}%"
+          ></div>
+        </div>
+        <p class="text-[8px] leading-[16px]">{hp} / {boss.hp} HP</p>
       </div>
-      <p class="text-[8px] leading-[16px]">{hp} / {boss.hp} HP</p>
-    </div>
-  {:else if bosses.length > 0}
-    <p class="uppercase">Every boss defeated!</p>
-  {:else}
-    <p class="uppercase">No bosses loaded.</p>
-  {/if}
+    {:else if bosses.length > 0}
+      <p class="uppercase">Every boss defeated!</p>
+    {:else}
+      <p class="uppercase">No bosses loaded.</p>
+    {/if}
+  </div>
 </div>
 
 <!-- The map: the rest of the screen, below the bar. -->
-<div class="fixed inset-x-0 top-[20dvh] bottom-0">
+<div class="fixed inset-x-0 top-[25dvh] bottom-0">
   <MapView bind:level={zoomLevel} markers={MAP_POINTS} />
 
   <!-- QR scanner button, bottom left. The scanner isn't built yet, so it does nothing. -->

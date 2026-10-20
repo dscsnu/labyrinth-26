@@ -204,6 +204,7 @@ These are deliberate. Don't build features that assume them:
 - **Spell names, effects or icons.** A spell is only `pattern.damage`. Anything more needs a backend change (a column or table, plus the API).
 - **The cast log on the stream.** Only the newest cast (`last_cast`) is pushed. The full log comes from `/api/teams/me/casts`.
 - **The boss list on the stream.** It's static, so it's loaded once.
+- **Team health.** The top bar's "Team Health" (top right, next to `src/lib/assets/icons/scott-face.png`) is a placeholder: `teamHealth` in `+page.svelte` is `null` and shows "?". Once the backend adds the value to `team_state`, derive `teamHealth` from `ts` there and it updates live like everything else.
 
 ## 7. Rules for integrating
 
