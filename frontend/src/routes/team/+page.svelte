@@ -15,6 +15,26 @@
     let isLeader = $derived(team?.leader_id === user?.id);
     let me = $derived(team?.members.find((m) => m.id === user?.id));
 
+    // The backend's teams.size: a team holds up to 6, and the leader can
+    // start once every other member is ready (backend/internal/teams/README.md).
+    const PARTY_SIZE = 6;
+    let others = $derived(team?.members.filter((m) => m.id !== team?.leader_id) ?? []);
+    let readyCount = $derived(others.filter((m) => m.is_ready).length);
+    let allReady = $derived(readyCount === others.length);
+    let emptySlots = $derived(Math.max(0, PARTY_SIZE - (team?.members.length ?? 0)));
+
+    const STATUS_LABEL: Record<Team["status"], string> = { LOBBY: "Lobby", IN_GAME: "In game", FINISHED: "Finished" };
+
+    // Each member's avatar is a coloured block with their initial, the colour
+    // picked from their id so it's the same on every phone.
+    const AVATAR_COLOURS = ["bg-[#c0453a]", "bg-[#3a7bc0]", "bg-[#5fb04a]", "bg-[#9b59b6]", "bg-[#d98c2b]", "bg-[#2bb5a3]"];
+    const avatarColour = (id: string) =>
+        AVATAR_COLOURS[[...id].reduce((sum, c) => sum + c.charCodeAt(0), 0) % AVATAR_COLOURS.length];
+
+    // Shared button looks: a pixel box that presses in.
+    const button =
+        "pixel-box block w-full px-4 py-3 text-[16px] uppercase active:translate-y-[2px] active:pixel-box-pressed disabled:pointer-events-none disabled:opacity-50";
+
     onMount(() => {
         // EventSource reconnects by itself; the first event after each
         // (re)connect is the full current state.
@@ -34,51 +54,167 @@
     });
 </script>
 
-<p>
-    <a href="/">home</a> · signed in as {user?.name} ({user?.role}) ·
-    {connected ? "live ●" : "reconnecting…"}
-</p>
+<svelte:head><title>Party · Labyrinth</title></svelte:head>
 
-{#if form?.code}
-    <p style="color: red">[{form.action}] {form.code}: {form.message}</p>
-{/if}
+<div
+    class="min-h-dvh bg-night bg-[repeating-conic-gradient(var(--color-night)_0_25%,#30264a_0_50%)] bg-[length:16px_16px] pb-12 font-pixel text-[16px] leading-[24px] text-parchment"
+>
+    <!-- Top bar, the same gold as /play's -->
+    <header class="flex items-center justify-between bg-gold px-4 py-3 text-ink shadow-[0_4px_0_0_var(--color-gold-dark),0_8px_0_0_var(--color-ink)]">
+        <a href="/" class="uppercase hover:text-parchment">&lt; Home</a>
+        <span class="flex items-center gap-2 text-[8px] uppercase">
+            {#if connected}
+                <span class="h-2 w-2 bg-go motion-safe:animate-blink"></span> Live
+            {:else}
+                <span class="h-2 w-2 bg-danger"></span> Reconnecting
+            {/if}
+        </span>
+    </header>
 
-{#if !team}
-    <h1>No team</h1>
+    <main class="mx-auto flex max-w-md flex-col gap-8 px-5 pt-10">
+        <div>
+            <h1 class="text-[32px] leading-[40px] text-gold-light uppercase [text-shadow:4px_4px_0_var(--color-ink)]">Party</h1>
+            <p class="mt-2 text-[8px] uppercase opacity-80">Player: {user?.name}</p>
+        </div>
 
-    <form method="POST" action="?/create">
-        <label>Team name <input name="name" maxlength="32" required /></label>
-        <button>Create team</button>
-    </form>
-
-    <form method="POST" action="?/join">
-        <label>Team code <input name="team_id" inputmode="numeric" maxlength="6" required /></label>
-        <button>Join team</button>
-    </form>
-{:else}
-    <h1>{team.name}</h1>
-    {#if team.status === "IN_GAME"}<p><a href="/play"><b>→ Play</b></a></p>{/if}
-    <p>code: <b>{team.id}</b> · status: <b>{team.status}</b> · {team.members.length}/6</p>
-
-    <ul>
-        {#each team.members as m (m.id)}
-            <li>
-                {m.name}
-                {#if m.id === team.leader_id}(leader){:else}— {m.is_ready ? "ready" : "not ready"}{/if}
-                {#if m.id === user?.id}<b>← you</b>{/if}
-            </li>
-        {/each}
-    </ul>
-
-    {#if team.status === "LOBBY"}
-        {#if isLeader}
-            <form method="POST" action="?/start"><button>Start game</button></form>
-        {:else}
-            <form method="POST" action="?/ready">
-                <input type="hidden" name="ready" value={me?.is_ready ? "false" : "true"} />
-                <button>{me?.is_ready ? "Unready" : "Ready"}</button>
-            </form>
+        {#if form?.code}
+            <div role="alert" class="pixel-box bg-danger p-4">
+                <p class="uppercase">! Error</p>
+                <p class="mt-2 text-[8px] leading-[16px] uppercase [overflow-wrap:anywhere]">
+                    {form.action}: {form.code}: {form.message}
+                </p>
+            </div>
         {/if}
-        <form method="POST" action="?/leave"><button>Leave team</button></form>
-    {/if}
-{/if}
+
+        {#if !team}
+            <!-- No team: create one or join one by its code -->
+            <form method="POST" action="?/create" class="pixel-box flex flex-col gap-4 bg-panel p-5">
+                <h2 class="text-gold-light uppercase">New party</h2>
+                <label class="flex flex-col gap-2">
+                    <span class="text-[8px] uppercase">Party name</span>
+                    <input
+                        name="name"
+                        maxlength="32"
+                        required
+                        autocomplete="off"
+                        placeholder="Seven Exes"
+                        class="pixel-box bg-ink px-3 py-3 text-parchment placeholder:text-parchment/30 focus:outline-4 focus:outline-offset-4 focus:outline-gold-light"
+                    />
+                </label>
+                <button class="{button} bg-gold text-ink hover:bg-gold-light">Create</button>
+            </form>
+
+            <p class="text-center text-[8px] uppercase opacity-80">- or -</p>
+
+            <form method="POST" action="?/join" class="pixel-box flex flex-col gap-4 bg-panel p-5">
+                <h2 class="text-gold-light uppercase">Join a party</h2>
+                <label class="flex flex-col gap-2">
+                    <span class="text-[8px] uppercase">Party code</span>
+                    <input
+                        name="team_id"
+                        inputmode="numeric"
+                        pattern="[0-9]{6}"
+                        maxlength="6"
+                        required
+                        autocomplete="off"
+                        placeholder="000000"
+                        class="pixel-box bg-ink px-3 py-3 text-center text-[24px] leading-[32px] tracking-[8px] text-parchment placeholder:text-parchment/30 focus:outline-4 focus:outline-offset-4 focus:outline-gold-light"
+                    />
+                </label>
+                <button class="{button} bg-gold text-ink hover:bg-gold-light">Join</button>
+            </form>
+        {:else}
+            <!-- The team: name, status and the code to share -->
+            <section class="pixel-box flex flex-col gap-4 bg-panel p-5">
+                <div class="flex items-start justify-between gap-4">
+                    <h2 class="text-[24px] leading-[32px] text-gold-light [overflow-wrap:anywhere]">{team.name}</h2>
+                    <span
+                        class="shrink-0 px-2 py-1 text-[8px] uppercase {team.status === 'IN_GAME' ? 'bg-go text-ink' : team.status === 'LOBBY' ? 'bg-gold text-ink' : 'bg-ink text-parchment'}"
+                    >
+                        {STATUS_LABEL[team.status]}
+                    </span>
+                </div>
+                <div class="pixel-box bg-ink px-4 py-3 text-center">
+                    <p class="text-[8px] uppercase opacity-80">Party code</p>
+                    <p class="mt-2 text-[32px] leading-[40px] tracking-[8px] text-gold-light">{team.id}</p>
+                    {#if team.status === "LOBBY"}
+                        <p class="mt-2 text-[8px] uppercase opacity-80">Share it to recruit</p>
+                    {/if}
+                </div>
+            </section>
+
+            {#if team.status === "IN_GAME"}
+                <a href="/play" class="{button} bg-go text-center text-ink hover:brightness-110">
+                    Enter the labyrinth <span class="motion-safe:animate-blink">&gt;</span>
+                </a>
+            {/if}
+
+            <!-- The roster: one slot per member, then the empty ones -->
+            <section class="pixel-box flex flex-col gap-3 bg-panel p-5">
+                <div class="flex items-baseline justify-between">
+                    <h2 class="text-gold-light uppercase">Members</h2>
+                    <span class="text-[8px] uppercase">{team.members.length}/{PARTY_SIZE}</span>
+                </div>
+
+                <ul class="flex flex-col gap-3">
+                    {#each team.members as m (m.id)}
+                        {@const leader = m.id === team.leader_id}
+                        <li class="flex items-center gap-3 bg-ink/60 p-2 {m.id === user?.id ? 'outline-2 outline-gold' : ''}">
+                            <span class="flex h-10 w-10 shrink-0 items-center justify-center text-ink {avatarColour(m.id)}">
+                                {m.name.charAt(0).toUpperCase()}
+                            </span>
+                            <span class="flex min-w-0 flex-1 flex-col gap-1">
+                                <span class="truncate">{m.name}</span>
+                                <span class="flex flex-wrap gap-2 text-[8px] leading-[16px] uppercase">
+                                    {#if leader}
+                                        <span class="bg-gold px-1 text-ink">Leader</span>
+                                    {:else if m.is_ready}
+                                        <span class="bg-go px-1 text-ink">Ready</span>
+                                    {:else}
+                                        <span class="bg-danger px-1">Not ready</span>
+                                    {/if}
+                                    {#if m.id === user?.id}<span class="text-gold-light">You</span>{/if}
+                                </span>
+                            </span>
+                        </li>
+                    {/each}
+                    {#each { length: emptySlots }, i (i)}
+                        <li class="flex items-center gap-3 border-2 border-dashed border-parchment/20 p-2 text-parchment/40">
+                            <span class="h-10 w-10 shrink-0 bg-ink/40"></span>
+                            <span class="text-[8px] uppercase">Empty slot</span>
+                        </li>
+                    {/each}
+                </ul>
+            </section>
+
+            {#if team.status === "LOBBY"}
+                <div class="flex flex-col gap-6">
+                    {#if isLeader}
+                        <form method="POST" action="?/start" class="flex flex-col gap-3">
+                            <button disabled={!allReady} class="{button} bg-gold text-ink hover:bg-gold-light">Start game</button>
+                            <p class="text-center text-[8px] uppercase opacity-80">
+                                {#if others.length === 0}
+                                    Solo run: start whenever
+                                {:else if allReady}
+                                    Everyone's ready
+                                {:else}
+                                    Waiting: {readyCount}/{others.length} ready
+                                {/if}
+                            </p>
+                        </form>
+                    {:else}
+                        <form method="POST" action="?/ready">
+                            <input type="hidden" name="ready" value={me?.is_ready ? "false" : "true"} />
+                            <button class="{button} {me?.is_ready ? 'bg-panel text-parchment' : 'bg-go text-ink hover:brightness-110'}">
+                                {me?.is_ready ? "Unready" : "Ready up"}
+                            </button>
+                        </form>
+                    {/if}
+                    <form method="POST" action="?/leave">
+                        <button class="{button} bg-danger text-parchment hover:brightness-110">Leave party</button>
+                    </form>
+                </div>
+            {/if}
+        {/if}
+    </main>
+</div>

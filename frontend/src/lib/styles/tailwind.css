@@ -1,1 +1,52 @@
 @import 'tailwindcss';
+
+/* Kongtext: a pixel font drawn on an 8×8 grid, so it's crisp at multiples
+   of 8px (8, 16, 24, 32). Used with the font-pixel class. */
+@font-face {
+    font-family: 'Kongtext';
+    src: url('../assets/fonts/kongtext.ttf') format('truetype');
+    font-display: swap;
+}
+
+@theme {
+    --font-pixel: 'Kongtext', monospace;
+
+    /* The game's palette: gold like /play's top bar, on a night purple. */
+    --color-ink: #1a1423;
+    --color-night: #2b2240;
+    --color-panel: #3d3159;
+    --color-gold: #b8963e;
+    --color-gold-light: #e0c068;
+    --color-gold-dark: #7a5f22;
+    --color-parchment: #f1e3b8;
+    --color-go: #5fb04a;
+    --color-danger: #c0453a;
+
+    --animate-blink: blink 1s steps(1) infinite;
+    @keyframes blink {
+        50% { opacity: 0; }
+    }
+}
+
+/* A box with a 4px outline whose corners are notched, like a sprite, and
+   a light top / dark bottom edge inside. The outline sits outside the box,
+   so leave 4px of room around it. */
+@utility pixel-box {
+    box-shadow:
+        0 -4px 0 0 var(--color-ink),
+        0 4px 0 0 var(--color-ink),
+        -4px 0 0 0 var(--color-ink),
+        4px 0 0 0 var(--color-ink),
+        inset 0 4px 0 0 rgb(255 255 255 / 0.15),
+        inset 0 -4px 0 0 rgb(0 0 0 / 0.3);
+}
+
+/* The same box, pressed: the shading flips. For buttons' :active. */
+@utility pixel-box-pressed {
+    box-shadow:
+        0 -4px 0 0 var(--color-ink),
+        0 4px 0 0 var(--color-ink),
+        -4px 0 0 0 var(--color-ink),
+        4px 0 0 0 var(--color-ink),
+        inset 0 4px 0 0 rgb(0 0 0 / 0.3);
+}

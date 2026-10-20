@@ -1,4 +1,9 @@
 <script lang="ts">
+    import MapView, { ZOOM_LEVELS } from "#lib/components/MapView.svelte";
+    import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
+    import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
+    import zoomOutIcon from "#lib/assets/UserInterfaceButtons/zoom-out-icon.webp";
+    import bookIcon from "#lib/assets/UserInterfaceButtons/book-icon.webp";
     import { ServerClock } from "#lib/game/serverClock.ts";
     import { CastLogSchema, ScanResultSchema, TeamStateSchema, type Cast, type TeamState } from "#lib/types/Game.type.ts";
     import { envelope, isNewer } from "#lib/types/Live.type.ts";
@@ -9,6 +14,9 @@
     import type { PageProps } from "./$types";
 
     let { data }: PageProps = $props();
+
+    // The map's zoom step (an index into ZOOM_LEVELS), moved by the zoom buttons.
+    let zoomLevel = $state(0);
     let { user, game, bosses } = $derived(data);
 
     // Latest state from responses and events; until the first, the page load's.
@@ -177,6 +185,52 @@
     const memberName = (id: string) => team?.members.find((m: Team["members"][number]) => m.id === id)?.name ?? id.slice(0, 8);
 </script>
 
+<!-- Top bar: full width, the top 20% of the screen. -->
+<div class="fixed inset-x-0 top-0 h-[20dvh] bg-[#b8963e]"></div>
+
+<!-- The map: the rest of the screen, below the bar. -->
+<div class="fixed inset-x-0 top-[20dvh] bottom-0">
+    <MapView bind:level={zoomLevel} />
+
+    <!-- QR scanner button, bottom left. The scanner isn't built yet, so it does nothing. -->
+    <button
+        type="button"
+        aria-label="Scan QR code"
+        class="absolute bottom-4 left-4 h-20 w-20 rounded-full transition-transform active:scale-90"
+    >
+        <img src={qrSprite} alt="" width="128" height="128" draggable="false" class="h-full w-full [image-rendering:pixelated]" />
+    </button>
+
+    <!-- Map controls, bottom right, in a column. Zoom steps through
+         ZOOM_LEVELS, disabled at either end; the book isn't built yet. -->
+    <div class="absolute right-4 bottom-4 flex flex-col items-center gap-3">
+        <button
+            type="button"
+            aria-label="Zoom in"
+            disabled={zoomLevel >= ZOOM_LEVELS.length - 1}
+            onclick={() => zoomLevel++}
+            class="h-12 w-12 transition-transform active:scale-90 disabled:opacity-40"
+        >
+            <img src={zoomInIcon} alt="" width="48" height="48" draggable="false" class="h-full w-full [image-rendering:pixelated]" />
+        </button>
+        <button
+            type="button"
+            aria-label="Zoom out"
+            disabled={zoomLevel <= 0}
+            onclick={() => zoomLevel--}
+            class="h-12 w-12 transition-transform active:scale-90 disabled:opacity-40"
+        >
+            <img src={zoomOutIcon} alt="" width="48" height="48" draggable="false" class="h-full w-full [image-rendering:pixelated]" />
+        </button>
+        <button type="button" aria-label="Open book" class="h-16 w-16 transition-transform active:scale-90">
+            <img src={bookIcon} alt="" width="48" height="48" draggable="false" class="h-full w-full [image-rendering:pixelated]" />
+        </button>
+    </div>
+</div>
+
+<!-- The controls, hidden while the map takes the whole screen; they still
+     run (stream, state), ready for the UI to be built on top of the map. -->
+<div hidden>
 <p>
     <a href="/">home</a> · <a href="/team">team</a> · {user?.name} ·
     {connected ? "live ●" : "reconnecting…"}
@@ -300,3 +354,4 @@
     {#each ts.patterns as p (p.join("-"))}<li>{p.join("-")}</li>{/each}
 </ul>
 <p>Waypoints visited: {ts.waypoints.join(", ") || "none"}</p>
+</div>

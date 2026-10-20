@@ -8,4 +8,8 @@ export const variables = defineEnvVars({
     JWT_PUBLIC_KEY: {
         description: "Base64 SPKI Ed25519 public key matching the backend's JWT_PRIVATE_KEY (print it with `go run . pubkey` in backend/)",
     },
+    DEV_TOKEN: {
+        description: 'Dev only: a labyrinth_token JWT used when the request has no session cookie, so devices that cannot sign in (e.g. a phone on the LAN) see signed-in pages',
+        schema: (value) => value || undefined,
+    },
 });
