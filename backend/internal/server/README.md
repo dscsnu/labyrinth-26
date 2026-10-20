@@ -93,6 +93,7 @@ Every number below that comes from `config.toml` is shown with its current value
   4. `auth.NewLoginCodes(db, auth.login_code_ttl)`.
   5. `auth.NewGoogle(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, PUBLIC_URL + "/auth/google/callback", google)`.
   6. `atlas.Load(ctx, db, log, atlas.Rules{MaxPatternPoints: game.max_pattern_points})`: reads and validates the static content (waypoints, shapes, patterns) once. First, because every game use case reads it. An error (`load atlas: …`, `invalid atlas: …`) is returned as is. See `internal/atlas/README.md`. Then `bosses.Load(ctx, db, log, bosses.Rules{Count: game.bosses})`: reads and validates the boss sequence once (exactly serials 1…`game.bosses`, or an empty table). An error (`load bosses: …`, `invalid bosses: …`) is returned as is. See `internal/bosses/README.md`.
+     Then `bosses.Load(ctx, db, log, bosses.Rules{Count: game.bosses, AttackInterval: game.boss_attack.interval, AttackDamage: game.boss_attack.BossDamage()})`: the boss sequence from the `boss` table, each boss's attack from `config.toml` (`[game.boss_attack]`).
   7. `teams.Load(ctx, db, hub, log, teams.Rules{…, OnStart, OnRosterChange})`: reads every team into memory. An error is returned as is. `OnStart` is `func(t) { stateStore.PublishTeam(t.ID) }`, the start hook; `OnRosterChange` is `func(t) { stateStore.RosterChanged(t.ID) }`, the roster hook. `stateStore` is declared before this step and assigned in step 9, which is safe because no team can start, and no admin can remove anyone, before `Build` returns and routes are served.
   8. `auth.NewAPI(cfg, google, tokens, codes, users, onSignIn, log)`, after teams because `onSignIn` is `func(u) { teamStore.RefreshProfile(u.ID, u.Name, u.AvatarURL) }`. It reads `auth.oauth_state_ttl` and `SecureCookies()` from `cfg` itself.
   9. `teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas and the bosses, applies any boss attacks that fell due while the backend was down, and arms every started team's attack timer. `Rules` gets `MaxPatternPoints`, `Health` (`game.health`), `WriteTimeout` and `Epoch`. It needs the atlas (`Atlas` interface), the bosses (`Bosses` interface) and `teamStore` (`Teams` interface, including `All`), so it runs after steps 6 and 7.
@@ -331,7 +332,7 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     "already_completed": false,
     "damage": 107,
     "dealt": 107,
-    "boss": 1,
+    "boss": 3,
     "defeated_boss": false
   },
   "stack": [
@@ -340,8 +341,8 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
     {"waypoint_id": "1004", "user_id": "3f2a6c1e-8b4d-4e9a-a1c2-5d6e7f8a9b02", "scanned_at": "2026-10-17T12:09:40Z", "wrong": true}
   ],
   "poisoned": true,
-  "bosses_defeated": 0,
-  "boss": {"serial": 1, "damage": 107, "phase_started_at": "2026-10-17T12:00:00Z", "attacks": 2, "next_attack_at": "2026-10-17T12:15:00Z"},
+  "bosses_defeated": 2,
+  "boss": {"serial": 3, "damage": 107, "phase_started_at": "2026-10-17T12:00:00Z", "attacks": 2, "next_attack_at": "2026-10-17T12:30:00Z"},
   "damage_multiplier": 1,
   "health": 8,
   "knocked_out": false,
@@ -427,7 +428,7 @@ Every event below goes to **every open stream** of each listed user. "Members" m
 | teamstate write fails to persist (`reconcile`) | `team_state: resync`, reloaded from Postgres (nothing if the reload fails too) | members |
 | Any rejection (`4xx`) or `500` before persisting | nothing (except a catch-up attack applied before the rejection, which is its own change) | |
 
-**The one thing published because time passed is a boss attack.** Every boss attacks every `attack_interval_s` of a team's phase; teamstate arms a timer per started team and publishes `boss_attacked` (or `knocked_out`) itself, with nobody acting (AGENTS.md §9: the server owns time). Health is derived from the phase and the clock, so the attack writes nothing to Postgres. Several attacks applied at once (a late timer, or attacks that fell due while the backend was down, applied at `Load` and seen in the `snapshot`) are one event. Everything else follows a request (or a start, or a reconcile).
+**The one thing published because time passed is a boss attack.** Every boss attacks every **10 min** (`game.boss_attack.interval`) of a team's phase, for its `game.boss_attack.damage`; teamstate arms a timer per started team and publishes `boss_attacked` (or `knocked_out`) itself, with nobody acting (AGENTS.md §9: the server owns time). Health is derived from the phase and the clock, so the attack writes nothing to Postgres. Several attacks applied at once (a late timer, or attacks that fell due while the backend was down, applied at `Load` and seen in the `snapshot`) are one event. Everything else follows a request (or a start, or a reconcile).
 
 The HTTP response to a write carries the same JSON as its event's `message` (`ScanResult.state` for a scan), with the same `version`, but on a different connection: a client may see either first, and keeps the one with the higher version (equal: the same state).
 
@@ -733,7 +734,7 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a square at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack and the square completed |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
 | `TestSimWrongScanReachesEveryone` | `tests/simulation_test.go` | after `1001`, one player scans `1004` (in no square with it) while a teammate scans `1002`: the first gets `wrong_scan`, the other either `200` (it landed first) or `409 selection_poisoned`; every phone sees `poisoned`; the leader's reselect clears it on every phone |
-| `TestSim100Teams` | `tests/simulation_test.go` | **100 teams** of every size from 1 to `teams.size` (team *i* has 1 + (*i* / 7) mod 6 players) at once, ~350 phones each on its own delays (0–30 ms each way) and stream; 6 rounds per team by one of 7 strategies: `steady` (members take turns), `solo` (one member scans everything), `sloppy` (a wrong scan of `1012`, then `409 selection_poisoned`, then a reselect and cast), `racer` (two members scan the same point at once: one `200`, one `409 waypoint_already_scanned`), `retrier` (every scan resent: `409 waypoint_already_scanned`, `409 no_shape_selected` after the completing one), `quitter` (gives up every other attempt: `DELETE …/selection`), `shrinking` (an admin removes a member over HTTP half way; their scan is `404 not_in_team`). Bosses never attack (`attack_interval_s` set to 10 years). Every select and clear is made by the team's leader (player 0, never the one removed). Every request's status and code is checked; at the end each team's `cast_count` equals its casts, every phone's newest-by-version state has the team's `version` and `cast_count`, and every removed player got `no_team`. ~7 s with the race detector |
+| `TestSim100Teams` | `tests/simulation_test.go` | **100 teams** of every size from 1 to `teams.size` (team *i* has 1 + (*i* / 7) mod 6 players) at once, ~350 phones each on its own delays (0–30 ms each way) and stream; 6 rounds per team by one of 7 strategies: `steady` (members take turns), `solo` (one member scans everything), `sloppy` (a wrong scan of `1012`, then `409 selection_poisoned`, then a reselect and cast), `racer` (two members scan the same point at once: one `200`, one `409 waypoint_already_scanned`), `retrier` (every scan resent: `409 waypoint_already_scanned`, `409 no_shape_selected` after the completing one), `quitter` (gives up every other attempt: `DELETE …/selection`), `shrinking` (an admin removes a member over HTTP half way; their scan is `404 not_in_team`). Bosses never attack (`game.boss_attack.interval` set to 10 years in the test's `e.cfg`). Every select and clear is made by the team's leader (player 0, never the one removed). Every request's status and code is checked; at the end each team's `cast_count` equals its casts, every phone's newest-by-version state has the team's `version` and `cast_count`, and every removed player got `no_team`. ~7 s with the race detector |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
 | `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
 | `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello:connected`, its `server_time` within a second of now, then `no_team:snapshot` |

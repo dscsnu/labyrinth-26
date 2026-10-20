@@ -1,6 +1,6 @@
 # bosses
 
-The sequence of bosses every team fights, in serial order: each boss's name, image asset, description, HP, and how often and how hard it attacks. Loaded from Postgres once at startup, validated against `config.toml`, held in memory, and never changed while the backend runs. A **read-only use case** with one route, `GET /api/game/bosses`. A team's progress through the bosses (which boss, how much damage, the multiplier) and its health under their attacks are per-team state and belong to `teamstate` (see its README, "Bosses" and "Boss attacks and health").
+The sequence of bosses every team fights, in serial order: each boss's name, image asset, description and HP from Postgres, and how often and how hard it attacks from `config.toml` (`[game.boss_attack]`). Loaded once at startup, validated, held in memory, and never changed while the backend runs. A **read-only use case** with one route, `GET /api/game/bosses`. A team's progress through the bosses (which boss, how much damage, the multiplier) and its health under their attacks are per-team state and belong to `teamstate` (see its README, "Bosses" and "Boss attacks and health").
 
 Every number below that comes from `config.toml` is shown with its current value and its key, e.g. **6** (`game.bosses`). Change the file, not the code.
 
@@ -26,10 +26,10 @@ Every number below that comes from `config.toml` is shown with its current value
 ## Concepts
 | Term | Meaning |
 |---|---|
-| **Boss** | One opponent: `serial`, `name`, `asset`, `description`, `hp`, `attack_interval_s`, `attack_damage`. Static content in the `boss` table. |
+| **Boss** | One opponent: `serial`, `name`, `asset`, `description`, `hp` (static content in the `boss` table), plus `attack_interval_s` and `attack_damage` (from `config.toml`, filled in by `New`). |
 | **Serial** | A boss's place in the sequence, from 1. Every team fights serial 1 first, then 2, and so on. Serials are **dense**: exactly 1…**6** (`game.bosses`). |
 | **HP** | The damage a team must deal to defeat the boss. Always > 0. |
-| **Attack** | Every `attack_interval_s` seconds of a team's **phase** against the boss, it takes `attack_damage` off the team's health. Interval > 0; damage ≥ 0 (0: it attacks harmlessly). Applied by `teamstate`. |
+| **Attack** | Every **10 min** (`game.boss_attack.interval`, the same for every boss) of a team's **phase** against the boss, it takes its damage off the team's health: **its serial number** for now (`[game.boss_attack.damage]`, by serial: boss 1 does 1, … boss 6 does 6). Damage ≥ 0 (0: it attacks harmlessly). Applied by `teamstate`. |
 | **Phase** | The span a team spends on one boss: from its start (boss 1) or the cast that defeated the previous boss, or an admin's revive, until the boss is defeated. The attack clock counts from the phase's start. |
 | **Health** | Per team, starts at **10** (`game.health`); boss attacks lower it; at 0 the team is **knocked out**. Owned by `teamstate`. |
 | **Asset** | A key the frontend resolves to the boss's image, e.g. `bosses/1.png` (served from `frontend/static/`). Not a URL. |
@@ -40,13 +40,15 @@ Every number below that comes from `config.toml` is shown with its current value
 
 ## The flow
 1. **Content is loaded.** `go run . seed` (the 2025 dev seed) writes 6 placeholder bosses; real content would be a migration or a seed of its own. The backend is stopped while content changes.
-2. **Startup.** `server.Build` calls `bosses.Load` right after `atlas.Load`, with `Rules{Count: game.bosses}`. It reads the table in serial order and runs `New`'s checks. Any bad content stops the backend.
+2. **Startup.** `server.Build` calls `bosses.Load` right after `atlas.Load`, with `Rules{Count: game.bosses, AttackInterval: game.boss_attack.interval, AttackDamage: game.boss_attack.damage}` (`BossDamage()` turns the config's string keys into serials). It reads the table in serial order, runs `New`'s checks and fills each boss's attack from the rules. Any bad content or rule stops the backend.
 3. **teamstate loads** with the `*Bosses` as its `Bosses` interface, and refuses a team whose stored progress has more bosses defeated than exist.
 4. **Clients fetch the list once.** `GET /api/game/bosses` returns all bosses in serial order. Each team's `team_state` carries only its progress (`boss: {serial, damage, phase_started_at, attacks, next_attack_at}`, `bosses_defeated`, `damage_multiplier`, `health`, `knocked_out`); the client joins the two by serial.
 5. **Every cast** (a completed pattern) damages the team's current boss: see [Damage rules](#damage-rules).
 6. **The boss attacks back** on a clock: see [Attack rules](#attack-rules).
 
 **Why a separate use case and not part of `atlas`.** The atlas is the map (waypoints, shapes, patterns, spells). Bosses are a different kind of content with their own table, route and config key; keeping them apart keeps each package small, and teamstate reads each through its own interface (AGENTS.md §4).
+
+**Why attacks are in `config.toml`, not the table.** They're game tuning, not content: one interval for every boss, and a damage per boss that's easy to change and review in one file (AGENTS.md §10). Migration `0011` dropped the table's attack columns. The API still shows each boss's attack, so clients don't read config.
 
 **Why the progress isn't here.** Per-team gameplay results go in `team_state` (AGENTS.md §17), so a cast changes the state and its boss progress in one write, under one lock, published as one event.
 
@@ -55,7 +57,7 @@ Every number below that comes from `config.toml` is shown with its current value
 The package comment.
 
 ### `read.go`: types and lookups
-- **`Boss`**: one boss, with JSON tags (it's also the API's shape): `serial`, `name`, `asset`, `description`, `hp`, `attack_interval_s`, `attack_damage`.
+- **`Boss`**: one boss, with JSON tags (it's also the API's shape): `serial`, `name`, `asset`, `description`, `hp`, `attack_interval_s`, `attack_damage`. The last two aren't stored: `New` fills them from `Rules`.
 - **`AttackInterval()`**: `AttackIntervalS` as a `time.Duration` (seconds), for teamstate's attack clock.
 - **`Bosses`**: the in-memory sequence (`list []Boss`).
 - **`Count()`**: how many bosses: `game.bosses`, or 0 if none are stored.
@@ -63,12 +65,12 @@ The package comment.
 - **`All()`**: every boss in serial order, for the route. Returns the store's own slice; callers must not modify it.
 
 ### `store.go`: layout, `Rules`, `Load`, validation
-- **`Rules{Count}`**: `game.bosses`.
+- **`Rules{Count, AttackInterval, AttackDamage}`**: `game.bosses`, `game.boss_attack.interval` (a `time.Duration`) and `game.boss_attack.damage` (a `map[int]int` by serial).
 - **`Load(ctx, pg, log, rules)`**: `selectBosses`, then `New`. Wraps errors as `load bosses: …` (query) or `invalid bosses: …` (content). Logs a warning when the table is empty, then `loaded bosses` with the count.
-- **`New(list, rules)`**: validates a list already in serial order and builds the `Bosses`. Used by `Load` and directly by tests. Checks are in [Rules and cases](#loading-at-startup).
+- **`New(list, rules)`**: validates a list already in serial order, fills each boss's `AttackIntervalS` (the interval in whole seconds) and `AttackDamage` (its serial's entry) from `rules`, and builds the `Bosses`. Used by `Load` and directly by tests. Checks are in [Rules and cases](#loading-at-startup).
 
 ### `db.go`: SQL (reads only)
-- **`selectBosses`**: `SELECT serial, name, asset, description, hp, attack_interval_s, attack_damage FROM boss ORDER BY serial`. Returns an empty (non-nil) slice for an empty table.
+- **`selectBosses`**: `SELECT serial, name, asset, description, hp FROM boss ORDER BY serial`. Returns an empty (non-nil) slice for an empty table.
 
 ### `api.go`: the route
 - **`NewAPI(b)`**, **`Routes(mux, authed)`**: registers `GET /api/game/bosses` behind the auth middleware.
@@ -88,15 +90,15 @@ Boss (80 bytes, plus its strings' bytes)
   Asset           string
   Description     string
   HP              int
-  AttackIntervalS int   seconds between attacks
-  AttackDamage    int   health each attack takes
+  AttackIntervalS int   seconds between attacks (from Rules, not the table)
+  AttackDamage    int   health each attack takes (from Rules, not the table)
 ```
 - **Why a slice and no map.** Serials are dense (exactly 1…`game.bosses`, checked by `New`), so the serial itself is the key: boss `n` is `list[n-1]`. A lookup is one slice index, O(1), with no hashing, no map overhead and no possible miss. A team's progress is an index too (`Defeated` = the index of the current boss), so teamstate never converts.
 - **Size:** 6 bosses × 80 bytes, plus about 550 bytes of strings in the seed: about 1 KB, once for the whole process.
 - Built once by `New`; never modified, so no locks.
 
 ## Data model: Postgres
-Migrations `0009_bosses.sql` (the table) and `0010_boss_attacks.sql` (the attack columns).
+Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack columns) and `0011_boss_attacks_in_config.sql` (dropped them: attacks are in `config.toml`).
 
 **`boss`** (read here):
 
@@ -107,25 +109,22 @@ Migrations `0009_bosses.sql` (the table) and `0010_boss_attacks.sql` (the attack
 | `asset` | `TEXT NOT NULL` | `CHECK (asset <> '')` | An image key |
 | `description` | `TEXT NOT NULL` | | May be empty |
 | `hp` | `INTEGER NOT NULL` | `CHECK (hp > 0)` | A boss can be defeated, and isn't defeated before it's hit |
-| `attack_interval_s` | `INTEGER NOT NULL` (0010) | `CHECK (attack_interval_s > 0)` | A boss attacks on a clock; a zero interval would attack endlessly |
-| `attack_damage` | `INTEGER NOT NULL` (0010) | `CHECK (attack_damage >= 0)` | An attack never heals |
-
-0010 added the attack columns with defaults (300, 1) to fill existing rows, then dropped the defaults: a new boss must give both.
+0010 added `attack_interval_s` and `attack_damage` columns; **0011 dropped them**, moving attacks to `config.toml` (`[game.boss_attack]`). 0010's SQL comments still name the columns: an applied migration can't be edited (AGENTS.md §8).
 
 0009 also adds `team_boss` and three `team_cast` columns, and 0010 adds `team_boss.phase_health` and `phase_started_at`; those belong to teamstate: see its README.
 
-**Seed** `seeds/dev_2025_bosses.sql`, applied last by `SeedDev2025` (after `dev_2025.sql` and `dev_2025_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The 2025 theme's evil exes, the Katayanagi twins fought as one boss:
+**Seed** `seeds/dev_2025_bosses.sql`, applied last by `SeedDev2025` (after `dev_2025.sql` and `dev_2025_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The 2025 theme's evil exes, the Katayanagi twins fought as one boss. The attack columns come from `config.toml`, not the seed:
 
-| Serial | Name | Asset | HP | Attacks every | Attack damage |
-|---|---|---|---|---|---|
-| 1 | Matthew Patel | `bosses/1.png` | 25 | 300 s (5 min) | 1 |
-| 2 | Lucas Lee | `bosses/2.png` | 100 | 300 s (5 min) | 1 |
-| 3 | Todd Ingram | `bosses/3.png` | 250 | 270 s (4.5 min) | 1 |
-| 4 | Roxy Richter | `bosses/4.png` | 510 | 240 s (4 min) | 1 |
-| 5 | Ken & Kyle Katayanagi | `bosses/5.png` | 900 | 240 s (4 min) | 1 |
-| 6 | Gideon Graves | `bosses/6.png` | 1500 | 120 s (2 min) | 2 |
+| Serial | Name | Asset | HP | Attacks every (`game.boss_attack.interval`) | Attack damage (`game.boss_attack.damage`) | Full health lasts |
+|---|---|---|---|---|---|---|
+| 1 | Matthew Patel | `bosses/1.png` | 25 | 10 min | 1 | 100 min (10 attacks) |
+| 2 | Lucas Lee | `bosses/2.png` | 100 | 10 min | 2 | 50 min (5) |
+| 3 | Todd Ingram | `bosses/3.png` | 250 | 10 min | 3 | 40 min (4) |
+| 4 | Roxy Richter | `bosses/4.png` | 510 | 10 min | 4 | 30 min (3) |
+| 5 | Ken & Kyle Katayanagi | `bosses/5.png` | 900 | 10 min | 5 | 20 min (2) |
+| 6 | Gideon Graves | `bosses/6.png` | 1500 | 10 min | 6 | 20 min (2) |
 
-Seed casts deal 60–131 at multiplier 1, so boss 1 falls to one cast and Gideon takes 12 to 25. 3,285 HP in all. Attacks get faster and harder: at full health (**10**, `game.health`) a team stalled on boss 1 is knocked out after 50 minutes (10 attacks × 5 min), on Gideon after 10 minutes (5 attacks × 2 min). Defeating boss 5 also unlocks the big patterns (`game.unlock_after_bosses`, **5**: see teamstate's README).
+Seed casts deal 60–131 at multiplier 1, so boss 1 falls to one cast and Gideon takes 12 to 25. 3,285 HP in all. Each boss hits as hard as its serial: "full health lasts" is for a team at **10** (`game.health`) stalled on that boss; health carries over between bosses, so a team that reaches the twins or Gideon already hurt has less. Defeating boss 5 also unlocks the big patterns (`game.unlock_after_bosses`, **5**: see teamstate's README).
 
 ## Memory ↔ Postgres
 | Postgres | Memory |
@@ -152,16 +151,16 @@ Applied by `teamstate` (`deal` in `read.go`, called by `Scan` when a scan comple
 Applied by `teamstate` (`BossProgress.at`, `catchUp`, the attack timer). Health is **derived, never stored per attack**:
 
 1. A team's phase against its current boss starts at `PhaseStart` with `PhaseHealth`: boss 1 at the team's start (`team.started_at`) with full health (**10**, `game.health`); boss n+1 at the cast that defeated boss n, with the health then; or at an admin's revive, with full health.
-2. At any time `now`: **`attacks = min(floor((now − PhaseStart) / attack_interval_s), ceil(PhaseHealth / attack_damage))`** and **`health = max(0, PhaseHealth − attacks × attack_damage)`**. The k-th attack is at exactly `PhaseStart + k × attack_interval_s` (k = 1, 2, …). The cap is the knockout attack: the boss stops there, so a knocked-out team's `attacks` is the same live and after a restart (without the cap, `Load` recomputed it from all the elapsed intervals; the game-loop simulation found that). With `attack_damage` 0 there's no cap.
+2. At any time `now`, with `interval` = `game.boss_attack.interval` (**10 min**) and `damage` = the boss's `game.boss_attack.damage` entry: **`attacks = min(floor((now − PhaseStart) / interval), ceil(PhaseHealth / damage))`** and **`health = max(0, PhaseHealth − attacks × damage)`**. The k-th attack is at exactly `PhaseStart + k × interval` (k = 1, 2, …). The cap is the knockout attack: the boss stops there, so a knocked-out team's `attacks` is the same live and after a restart (without the cap, `Load` recomputed it from all the elapsed intervals; the game-loop simulation found that). With damage 0 there's no cap.
 3. **Health reaching 0 knocks the team out.** Selecting and scanning are refused (`409 knocked_out`), clearing a selection still works, and the boss stops attacking (no timer, `next_attack_at: null`).
 4. **An admin revives** a started team (`POST /api/admin/teams/{team_id}/revive`, any time, so it also heals): health back to 10, and a new phase of the same boss from now (its attacks so far no longer count).
 5. **After the last boss**, nothing attacks.
 6. Only phase boundaries are stored (`team_boss.phase_started_at`, `phase_health`: a defeat or a revive). Attacks themselves are memory-only: a restart recomputes them from the phase and the clock, including any that fell due while the backend was down.
-7. An `attack_damage` of 0 still counts attacks (and publishes them) but never lowers health.
+7. A damage of 0 still counts attacks (and publishes them) but never lowers health.
 
 ## Walkthroughs
 ### 1. Loading the seed
-`game.bosses` = 6. `selectBosses` returns 6 rows, serials 1…6. `New` checks count (6 = 6), then each row: serial = index+1, name, asset, HP > 0, attack interval > 0, attack damage ≥ 0. `list[0]` is Matthew Patel (25 HP). Log: `loaded bosses bosses=6`.
+`game.bosses` = 6. `selectBosses` returns 6 rows, serials 1…6. `New` checks count (6 = 6), then each row: serial = index+1, name, asset, HP > 0; then the rules: the interval is whole seconds and at least 1 s (600 s), the boss has a damage entry, ≥ 0. `list[0]` is Matthew Patel (25 HP, attacks every 600 s for 1). Log: `loaded bosses bosses=6`.
 
 ### 2. A team fights bosses 1–3 (square, damage 107, multiplier 1)
 | Cast | Before | Dealt | After | `last_cast` | Event type |
@@ -178,8 +177,8 @@ An admin (by SQL, for now) sets `team_boss.multiplier = 1.5`, then the backend r
 ### 4. Every boss defeated
 After the sixth defeat (Gideon): `bosses_defeated 6`, `boss null`. The next cast: pattern counted, `cast_count` up, `dealt 0`, `boss null`, `defeated_boss false`, type `spell_cast`.
 
-### 5. Boss attacks (seed, `game.health` 10)
-A team starts at 12:00:00. Boss 1 attacks every 300 s for 1: at 12:05:00 health is 9 (`boss.attacks` 1, `next_attack_at` 12:10:00); at 12:10:00, 8. A cast at 12:12:30 defeats boss 1: boss 2's phase starts at 12:12:30 with 8 health, its first attack at 12:17:30. If the team then stalls, boss 2 (300 s, 1) knocks it out 8 attacks later, at 12:52:30. An admin revives it at 13:00:00: health 10, boss 2's first attack of the new phase at 13:05:00.
+### 5. Boss attacks (`game.health` 10, interval 10 min, damage = serial)
+A team starts at 12:00:00. Boss 1 attacks every 10 min for 1: at 12:10:00 health is 9 (`boss.attacks` 1, `next_attack_at` 12:20:00); at 12:20:00, 8. A cast at 12:22:30 defeats boss 1: boss 2's phase starts at 12:22:30 with 8 health, its first attack at 12:32:30. If the team then stalls, boss 2 (2 a hit) knocks it out 4 attacks later, at 13:02:30 (8 − 4 × 2 = 0). An admin revives it at 13:10:00: health 10, boss 2's first attack of the new phase at 13:20:00.
 
 ### 6. A refused start
 `game.bosses` is lowered from 6 to 5 with 6 rows stored: `invalid bosses: 6 bosses stored; game.bosses is 5 (the boss table must be exactly serials 1-5)`, exit 1.
@@ -196,13 +195,14 @@ Not applicable: this use case never writes. Content changes through migrations a
 {
   "success": true,
   "payload": [
-    {"serial": 1, "name": "Matthew Patel", "asset": "bosses/1.png", "description": "The first evil ex. …", "hp": 25, "attack_interval_s": 300, "attack_damage": 1},
-    {"serial": 2, "name": "Lucas Lee", "asset": "bosses/2.png", "description": "…", "hp": 100, "attack_interval_s": 300, "attack_damage": 1}
+    {"serial": 1, "name": "Matthew Patel", "asset": "bosses/1.png", "description": "The first evil ex. …", "hp": 25, "attack_interval_s": 600, "attack_damage": 1},
+    {"serial": 2, "name": "Lucas Lee", "asset": "bosses/2.png", "description": "…", "hp": 100, "attack_interval_s": 600, "attack_damage": 2}
   ]
 }
 ```
 - The same for every signed-in user, static while the backend runs; fetch it once (`/play` loads it with the page).
 - `[]` before boss content is loaded.
+- `attack_interval_s` and `attack_damage` come from `config.toml` (`game.boss_attack.interval` in seconds, the boss's `game.boss_attack.damage` entry), not the table.
 - Errors: `401 missing_token`, `401 invalid_token` (auth middleware).
 - No live events: the list never changes while running. A team's progress arrives in `team_state`.
 
@@ -219,10 +219,11 @@ Not applicable: this use case never writes. Content changes through migrations a
 | 5 | Empty name | `invalid bosses: boss S has no name` |
 | 6 | Empty asset | `invalid bosses: boss S has no asset` |
 | 7 | HP ≤ 0 | `invalid bosses: boss S: hp must be positive, got H` |
-| 8 | `attack_interval_s` ≤ 0 | `invalid bosses: boss S: attack_interval_s must be positive, got N` |
-| 9 | `attack_damage` < 0 | `invalid bosses: boss S: attack_damage must not be negative, got N` |
+| 8 | `Rules.AttackInterval` under 1 s, or not whole seconds (only with bosses stored) | `invalid bosses: game.boss_attack.interval must be whole seconds, at least 1s; got D` |
+| 9 | No damage for the boss's serial in `Rules.AttackDamage` | `invalid bosses: boss S has no attack damage (game.boss_attack.damage)` |
+| 10 | That damage < 0 | `invalid bosses: boss S: attack damage must not be negative, got N` |
 
-Cases 5–9 are also enforced by Postgres CHECKs; `New` repeats them for fixtures built in tests. Duplicate serials can't be stored (primary key) but `New` would catch them as case 4.
+Cases 5–7 are also enforced by Postgres CHECKs, and 8–10 by config validation (below); `New` repeats them for fixtures built in tests. Duplicate serials can't be stored (primary key) but `New` would catch them as case 4.
 
 teamstate adds one more startup refusal: a `team_boss` row with `defeated` greater than `Count()` (`team_boss: N bosses defeated, but game.bosses is M`).
 
@@ -231,6 +232,11 @@ teamstate adds one more startup refusal: a `team_boss` row with `defeated` great
 |---|---|
 | `game.bosses` missing | `missing key game.bosses` |
 | `game.bosses = 0` | `game.bosses must be at least 1` |
+| `game.boss_attack.interval` missing | `missing key game.boss_attack.interval` (the missing-key check recurses into nested tables) |
+| `game.boss_attack.interval` ≤ 0 | `game.boss_attack.interval must be positive` |
+| A serial 1…`game.bosses` missing from `[game.boss_attack.damage]` | `game.boss_attack.damage has no entry for boss S` |
+| A key that isn't a serial 1…`game.bosses` (`7`, `boss`, `01`) | `game.boss_attack.damage.K is not a boss serial (1-M, game.bosses)` |
+| A damage < 0 | `game.boss_attack.damage.K must not be negative` |
 
 ### Lookups
 | Call | Result |
@@ -249,7 +255,7 @@ No races: the list is built before `Load` returns and never modified, so every g
 | Postgres down while serving | No effect: nothing here reads Postgres after `Load` |
 | Content edited while running | Not seen until restart |
 | A boss's HP lowered between restarts below a team's stored damage | Loads. The team's next cast reaches the HP and defeats it (the extra is lost) |
-| A boss's `attack_interval_s` or `attack_damage` changed between restarts | Applies **retroactively** to every team's current phase against it: health is recomputed from the phase start with the new values, so it can jump (down or up) at the restart |
+| `game.boss_attack.interval` or a boss's damage changed in `config.toml` between restarts | Applies **retroactively** to every team's current phase against it: health is recomputed from the phase start with the new values, so it can jump (down or up) at the restart |
 | `game.bosses` raised (with new rows) | Teams that had defeated every boss now have one more to fight (`boss` reappears) |
 | `game.bosses` lowered below a team's `defeated` | teamstate refuses to start; fix `team_boss` or the config |
 | Restart | The list is rebuilt exactly |
@@ -260,15 +266,17 @@ No races: the list is built before `Load` returns and never modified, so every g
 | **6** bosses | `config.toml` `game.bosses` (at least 1) | Edit, add or remove `boss` rows to match, restart |
 | Boss name 1–64 characters | `boss.name` CHECK | A migration |
 | HP an `INTEGER` | `boss.hp` | A migration (bigint) if HP ever passes 2^31 |
-| Attack interval in whole seconds, at most 2^31 − 1 (about 68 years) | `boss.attack_interval_s` | A migration |
+| Attacks every **10 min**, every boss | `config.toml` `game.boss_attack.interval` (positive, whole seconds) | Edit, restart; applies retroactively to every current phase |
+| Attack damage **= serial** (1…6) | `config.toml` `[game.boss_attack.damage]` (one entry per serial, ≥ 0) | Edit, restart; applies retroactively |
 | Starting health **10** | `config.toml` `game.health` (at least 1) | Edit, restart; stored phases keep their `phase_health` |
 
 ## Not decided yet
 - **What sets the multiplier.** Only stored and applied; no route or rule changes it. A power-up use case would update `team_boss.multiplier` and teamstate's memory together (a teamstate write, AGENTS.md §6).
 - **Overkill carry-over.** Lost by design for now; carrying it to the next boss is a one-line change in `deal`.
 - **Winning.** Defeating every boss doesn't change the team's status (`FINISHED` is still unset) or rank teams; a leaderboard would read `bosses_defeated` and the last `defeated_boss` cast's time.
-- **Content changes mid-event.** A changed attack interval or damage applies retroactively to every current phase after a restart (health is derived). If that's ever unwanted, the phase would have to store the boss's interval and damage too.
+- **Config changes mid-event.** A changed `game.boss_attack.interval` or damage applies retroactively to every current phase after a restart (health is derived). If that's ever unwanted, the phase would have to store the boss's interval and damage too.
 - **What knocked out costs beyond the wait.** Nothing else yet: progress, patterns and casts are kept; only an admin's revive lets the team play again.
+- **Per-boss intervals.** One interval for every boss for now; a per-boss one would be another nested table like `[game.boss_attack.damage]`.
 - **Per-team boss order.** The 2025 rules gave each team a random order of the first six bosses. Everyone fights in serial order now.
 - **Images.** No files exist in `frontend/static/bosses/` yet; `/play` hides a missing image.
 
@@ -277,7 +285,7 @@ No races: the list is built before `Load` returns and never modified, so every g
 
 | Test | Covers |
 |---|---|
-| `TestNew` | a valid three-boss list: `Count`, `At`, `All`, `AttackInterval`, attack damage; an empty list loads with `Count` 0; each refusal by its message: too few, too many, zero attack interval, negative attack damage, a gap, starting at 0, no name, no asset, zero HP, negative HP, a duplicate serial |
-| `TestLoad` | an empty table loads (`Count` 0); the 2025 seed with `game.bosses`: every boss in serial order with name, asset, positive HP, a positive attack interval and non-negative attack damage, HP rising; one fewer in config is refused. Skips unless `game.bosses` is the seed's **6** (`seedBosses`) |
+| `TestNew` | a valid three-boss list with `threeRules` (every 5 min; damage 1, 0, 5): `Count`, `At`, `All`, `AttackInterval`, attack damage filled from the rules; an empty list loads with `Count` 0; each rules refusal by its message: zero interval, part of a second, no damage for a boss, negative damage; each content refusal: too few, too many, a gap, starting at 0, no name, no asset, zero HP, negative HP, a duplicate serial |
+| `TestLoad` | with `seedRules` (config.toml's `[game.boss_attack]`): an empty table loads (`Count` 0); the 2025 seed with `game.bosses`: every boss in serial order with name, asset, positive HP, a positive attack interval and non-negative attack damage, HP rising; one fewer in config is refused. Skips unless `game.bosses` is the seed's **6** (`seedBosses`) |
 
 Boss damage and attacks are tested in teamstate (`tests/boss_test.go`, `tests/attack_test.go`) and over HTTP in `internal/server/tests` (`TestGameBosses`, `TestAdminRevive`).

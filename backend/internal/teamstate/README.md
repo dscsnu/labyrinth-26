@@ -49,7 +49,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Dealt** | What a cast does to the current boss: `round(pattern damage × Multiplier)`. Reaching the boss's HP defeats it; the excess is lost. 0 once every boss is defeated. See [Bosses](#bosses). |
 | **Multiplier** | Per team, default **1** (`team_boss.multiplier`). Nothing changes it yet. |
 | **Phase** | The span a team spends on its current boss. It starts at `PhaseStart` with `PhaseHealth`: boss 1 at the team's start (`team.started_at`) with full health, boss n+1 at the cast that defeated boss n with the health then, or an admin's revive with full health. Stored in `team_boss.phase_started_at`, `phase_health` (`NULL`: the team's start, full health). |
-| **Attack** | Every `attack_interval_s` of the phase, the current boss takes its `attack_damage` off the team's health. The k-th is at exactly `PhaseStart + k × interval`. See [Boss attacks and health](#boss-attacks-and-health). |
+| **Attack** | Every **10 min** (`game.boss_attack.interval`) of the phase, the current boss takes its damage (`game.boss_attack.damage`, by serial: its serial number for now) off the team's health. The k-th is at exactly `PhaseStart + k × interval`. See [Boss attacks and health](#boss-attacks-and-health). |
 | **Health** | Per team, **10** (`game.health`) at the start. **Derived, never stored per attack:** `Attacks = min(floor((now − PhaseStart) / interval), ceil(PhaseHealth / attack_damage))`, `Health = max(0, PhaseHealth − Attacks × attack_damage)`. `health` in JSON. |
 | **Knocked out** | Health 0 (`BossProgress.KnockedOut()`, `knocked_out` in JSON): selecting and scanning are refused (`409 knocked_out`), clearing still works, and attacks stop, until an admin revives the team (`POST /api/admin/teams/{team_id}/revive`). |
 | **Catch-up** | `catchUp`: applies any attack that has fallen due, as its own change. The attack timer calls it, and so does every write before validating, so an attack is never lost to a late timer. |
@@ -74,7 +74,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 3. **Complete (cast).** The moment the stack is **exactly** one of the selected shape's patterns, the pattern and its shape are marked complete, the cast is appended to the cast log (`State.Casts`, `team_cast`) and becomes `last_cast`, its damage (× the team's multiplier) goes to the current **boss** (a defeat moves the team to the next; see [Bosses](#bosses)), and **the stack and the selection are purged**. The team selects again for its next attempt.
 4. **Restart.** After a wrong scan, the leader reselects (the same shape or another): the stack, wrong scan included, is purged and the team scans again.
 5. **Give up.** The leader's `DELETE /api/teams/me/state/selection` clears the selection and the stack.
-6. **The boss attacks** every `attack_interval_s` of the phase, with nobody acting: the server lowers health and publishes `boss_attacked` (`knocked_out` when health reaches 0). Defeating the boss starts the next boss's clock. A knocked-out team can't select or scan until an admin revives it. See [Boss attacks and health](#boss-attacks-and-health).
+6. **The boss attacks** every **10 min** (`game.boss_attack.interval`) of the phase, for its `game.boss_attack.damage`, with nobody acting: the server lowers health and publishes `boss_attacked` (`knocked_out` when health reaches 0). Defeating the boss starts the next boss's clock. A knocked-out team can't select or scan until an admin revives it. See [Boss attacks and health](#boss-attacks-and-health).
 
 **"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is correct if it's in *any* pattern of the shape. Each later scan must keep the stack inside at least one pattern of the shape that contains everything already scanned. A scan that doesn't is wrong.
 
@@ -292,7 +292,7 @@ Per team, written through:
 
 Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_cast` is written only inside `insertCompletingScan`'s transaction, so a cast is logged, and its damage counted, exactly when its scan and its `team_pattern` row are; `team_boss` is written there too, and by a revive.
 
-**Migration `0010`'s SQL comment states the attack formula without the knockout cap** (`attacks = floor((now − phase_started_at) / attack_interval_s)`). The code and this README are right: attacks stop at the knockout attack, `ceil(phase_health / attack_damage)` (see "Boss attacks and health"). An applied migration can't be edited (AGENTS.md §8: its checksum is recorded); a later migration can correct the comment in the database with `COMMENT ON` if it's ever worth one.
+**Migration `0010`'s SQL comment states the attack formula without the knockout cap, and with the boss's `attack_interval_s` / `attack_damage` columns**, which migration `0011` dropped: the interval and damage now come from `config.toml` (`[game.boss_attack]`), through `bosses.Rules`. The code and this README are right: attacks stop at the knockout attack, `ceil(phase_health / attack_damage)` (see "Boss attacks and health"). An applied migration can't be edited (AGENTS.md §8: its checksum is recorded); a later migration can correct the comment in the database with `COMMENT ON` if it's ever worth one.
 
 **The stack isn't a table.** It's derived: the `team_scan` rows with `id > after_scan_id` (at most **7**, `game.max_pattern_points` + 1, which is the query's `LIMIT`). Selecting moves `after_scan_id` to the latest scan (purge); completing or clearing deletes the selection (no selection, no stack). Scans never leave an attempt any other way, so the rows after `after_scan_id` are exactly the stack.
 
@@ -306,7 +306,7 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 | every `team_cast` row, `ORDER BY team_id, id` | `State.Casts`, oldest first (with `dealt`, `boss_serial` as 0 for `NULL`, `defeated_boss`); `last_cast` is its last element |
 | `team_boss` | `State.Boss` (`Defeated`, `Damage`, `Multiplier`, `PhaseHealth`, `PhaseStart`); no row → boss 1, 0, multiplier 1, full health from the team's `started_at` |
 | `team.started_at` (through `Teams.ByID`) | `PhaseStart` when `phase_started_at` is `NULL` or there's no row |
-| (none: derived from the phase, the boss's `attack_interval_s` / `attack_damage` and the clock) | `BossProgress.Attacks`, `Health`: recomputed by `at(now)` at `Load`, so attacks that fell due while the backend was down are applied at once |
+| (none: derived from the phase, `game.boss_attack.interval`, the boss's `game.boss_attack.damage` and the clock) | `BossProgress.Attacks`, `Health`: recomputed by `at(now)` at `Load`, so attacks that fell due while the backend was down are applied at once |
 | (none: memory-only) | `entry.stopAttack` (the pending timer): re-armed by `Load` for every started team |
 | `boss` | Not here: the bosses use case, loaded by `bosses.Load` before this `Load` ([`internal/bosses/README.md`](../bosses/README.md)) |
 | newest **7** (`game.max_pattern_points` + 1) `team_scan` with `id > after_scan_id`, by `id` | `State.Stack` (pushed oldest first, with the `wrong` flag, so `poisoned` comes back too) |
@@ -358,7 +358,7 @@ Every team fights the same **6** (`game.bosses`) bosses in serial order. The bos
 **What the client shows** (`/play`): the current boss from `GET /api/game/bosses` by `boss.serial` (image, name, description), an HP bar of `hp − boss.damage` of `hp`, the multiplier when it isn't 1, "Every boss defeated!" when `boss` is `null`; a `boss_defeated` event shows "<name> defeated!" on every phone; the cast log shows each cast's `dealt` and the boss it hit.
 
 ## Boss attacks and health
-Every team has health, **10** (`game.health`) at the start. Its current boss attacks it every `attack_interval_s` seconds of the phase, for `attack_damage` (`boss` table; seed: boss 1 every 300 s for 1 … boss 6, Gideon, every 120 s for 2). This is the game's one change caused by time passing, so the server applies and publishes it with nobody acting (AGENTS.md §9: the server owns time).
+Every team has health, **10** (`game.health`) at the start. Its current boss attacks it every **10 min** of the phase (`game.boss_attack.interval`, the same for every boss), for its damage (`[game.boss_attack.damage]` by serial: boss 1 does 1 … boss 6, Gideon, does 6, for now). Both come from `config.toml` through `bosses.Rules`, filled into each `bosses.Boss` (`AttackInterval()`, `AttackDamage`). At full health a team stalled on boss 1 lasts 100 min (10 attacks); on the twins or Gideon, 20 min (2 attacks); health carries over between bosses. This is the game's one change caused by time passing, so the server applies and publishes it with nobody acting (AGENTS.md §9: the server owns time).
 
 **Health is derived, never stored per attack.** The phase is what's stored (`team_boss.phase_started_at`, `phase_health`), and at any time `now`:
 
@@ -389,7 +389,7 @@ So an attack writes nothing: it's a memory-only change that `Load` reproduces ex
 
 **Revive** (`POST /api/admin/teams/{team_id}/revive`, admin only): health back to 10 and a new phase of the same boss from now (its earlier attacks no longer count); `revived` to every member; the timer re-armed. Allowed at any time, so it also heals a team that isn't knocked out.
 
-**Content changes apply retroactively.** Health is recomputed from the phase start, so a boss's `attack_interval_s` or `attack_damage` changed between restarts changes every current phase against it (see [Not decided yet](#not-decided-yet)).
+**Config changes apply retroactively.** Health is recomputed from the phase start, so `game.boss_attack.interval` or a boss's damage changed in `config.toml` between restarts changes every current phase against it (see [Not decided yet](#not-decided-yet)).
 
 **What the client shows** (`/play`): a health bar of `health` of `Game.health`; the current boss's interval and damage, and a countdown to `boss.next_attack_at` on the server's clock (`hello`, `ServerClock`); when `knocked_out`, a red banner and the type buttons and scan form disabled; on `boss_attacked`, `knocked_out` and `revived`, a message on every phone. The client only displays: the server applies attacks.
 
@@ -455,25 +455,25 @@ With `team_boss.multiplier = 1.5` instead, each cast deals 161: the same two def
 
 After the sixth boss (Gideon) falls, `boss` is `null`, `bosses_defeated` 6, and further casts have `dealt 0`, `boss null`, type `spell_cast`. The fifth defeat (the Katayanagi twins) is also the unlock: from that `boss_defeated` event on, `unlocked_points` is 6 and `locked_shapes` is `[]`.
 
-### 8. Boss attacks, a knockout and a revive (seed: boss 1 every 300 s for 1, boss 2 every 300 s for 1; `game.health` 10)
+### 8. Boss attacks, a knockout and a revive (`game.boss_attack`: every 10 min, boss 1 for 1, boss 2 for 2; `game.health` 10)
 The team started at 12:00:00. Times are absolute.
 
 | Time | What happens | `health` | `boss` after | `team_boss` after | Event |
 |---|---|---|---|---|---|
-| 12:00:00 | start (`PublishTeam`); timer armed for 12:05:00 | 10 | `{serial 1, attacks 0, phase_started_at 12:00:00, next_attack_at 12:05:00}` | no row | `game_started` |
-| 12:04:59.999999 | (nothing due) | 10 | unchanged | no row | none |
-| 12:05:00 | the timer: `catchUp` finds 1 attack | 9 | `{…, attacks 1, next_attack_at 12:10:00}` | no row (attacks aren't written) | `boss_attacked` |
-| 12:10:00 | the timer | 8 | `{…, attacks 2, next_attack_at 12:15:00}` | no row | `boss_attacked` |
-| 12:12:30 | D's scan casts and defeats boss 1 | 8 | `{serial 2, damage 0, attacks 0, phase_started_at 12:12:30, next_attack_at 12:17:30}`; timer re-armed | `(1, 0, 1, phase_health 8, phase_started_at 12:12:30)` | `boss_defeated` |
-| 12:17:30 … 12:47:30 | the timer, every 300 s: 7 attacks | 7 … 1 | `attacks` 1 … 7 | unchanged | `boss_attacked` × 7 |
-| 12:52:30 | the 8th attack | **0** | `{…, attacks 8, next_attack_at null}`; no timer | unchanged | **`knocked_out`** |
-| 12:53:00 | F selects `square` | 0 | unchanged | unchanged | `409 knocked_out`, none |
-| 12:53:05 | F clears the selection (allowed while knocked out) | 0 | unchanged | unchanged | `200`, a no-op here (the cast had cleared the selection) |
-| 13:00:00 | admin revives | **10** | `{serial 2, attacks 0, phase_started_at 13:00:00, next_attack_at 13:05:00}`; timer re-armed | `(1, 0, 1, phase_health 10, phase_started_at 13:00:00)` | `revived` |
+| 12:00:00 | start (`PublishTeam`); timer armed for 12:10:00 | 10 | `{serial 1, attacks 0, phase_started_at 12:00:00, next_attack_at 12:10:00}` | no row | `game_started` |
+| 12:09:59.999999 | (nothing due) | 10 | unchanged | no row | none |
+| 12:10:00 | the timer: `catchUp` finds 1 attack | 9 | `{…, attacks 1, next_attack_at 12:20:00}` | no row (attacks aren't written) | `boss_attacked` |
+| 12:20:00 | the timer | 8 | `{…, attacks 2, next_attack_at 12:30:00}` | no row | `boss_attacked` |
+| 12:22:30 | D's scan casts and defeats boss 1 | 8 | `{serial 2, damage 0, attacks 0, phase_started_at 12:22:30, next_attack_at 12:32:30}`; timer re-armed | `(1, 0, 1, phase_health 8, phase_started_at 12:22:30)` | `boss_defeated` |
+| 12:32:30 … 12:52:30 | the timer, every 10 min, 2 a hit: 3 attacks | 6, 4, 2 | `attacks` 1 … 3 | unchanged | `boss_attacked` × 3 |
+| 13:02:30 | the 4th attack | **0** | `{…, attacks 4, next_attack_at null}`; no timer | unchanged | **`knocked_out`** |
+| 13:03:00 | F selects `square` | 0 | unchanged | unchanged | `409 knocked_out`, none |
+| 13:03:05 | F clears the selection (allowed while knocked out) | 0 | unchanged | unchanged | `200`, a no-op here (the cast had cleared the selection) |
+| 13:10:00 | admin revives | **10** | `{serial 2, attacks 0, phase_started_at 13:10:00, next_attack_at 13:20:00}`; timer re-armed | `(1, 0, 1, phase_health 10, phase_started_at 13:10:00)` | `revived` |
 
-**A restart at 12:20:00** (between the 12:17:30 attack and the next) reloads `phase_health 8, phase_started_at 12:12:30` from `team_boss`, computes `attacks = floor(450 s / 300 s) = 1`, `health = 8 − 1 = 7`, the same as before, and arms the timer for 12:22:30. **A backend down from 12:20:00 to 12:31:00** reloads with `attacks = floor(1110 / 300) = 3`, `health 5`: the two attacks it missed are applied at load, and clients see them in their `snapshot`.
+**A restart at 12:35:00** (between the 12:32:30 attack and the next) reloads `phase_health 8, phase_started_at 12:22:30` from `team_boss`, computes `attacks = floor(750 s / 600 s) = 1`, `health = 8 − 1 × 2 = 6`, the same as before, and arms the timer for 12:42:30. **A backend down from 12:35:00 to 12:55:00** reloads with `attacks = floor(1950 / 600) = 3`, `health 2`: the two attacks it missed are applied at load, and clients see them in their `snapshot`.
 
-**A late timer.** If the 12:05:00 timer hasn't run when a scan arrives at 12:05:00.2, the scan's `catchUp` applies the attack first (`boss_attacked`), then the scan (`scan_added`): two events, in that order. The timer then finds nothing due and re-arms for 12:10:00.
+**A late timer.** If the 12:10:00 timer hasn't run when a scan arrives at 12:10:00.2, the scan's `catchUp` applies the attack first (`boss_attacked`), then the scan (`scan_added`): two events, in that order. The timer then finds nothing due and re-arms for 12:20:00.
 
 ## The write-through
 Every write in `write.go` (`Select`, `ClearSelection`, `Scan`, `Revive`) runs these steps, marked in the code (`PublishTeam` is not a write, and `catchUp` is a memory-only change; see the table):
@@ -521,15 +521,15 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "patterns": [["1003", "1004", "1005", "1006"]],
   "shapes": ["square"],
   "selection": {"shape": "square", "selected_by": "6f1c…", "selected_at": "2026-10-17T12:00:00Z"},
-  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 107, "dealt": 107, "boss": 1, "defeated_boss": false},
+  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 107, "dealt": 107, "boss": 3, "defeated_boss": false},
   "stack": [
     {"waypoint_id": "1001", "user_id": "9a2b…", "scanned_at": "2026-10-17T12:00:01Z", "wrong": false},
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:02Z", "wrong": false},
     {"waypoint_id": "1003", "user_id": "e5f6…", "scanned_at": "2026-10-17T12:00:03Z", "wrong": true}
   ],
   "poisoned": true,
-  "bosses_defeated": 0,
-  "boss": {"serial": 1, "damage": 107, "phase_started_at": "2026-10-17T11:55:00Z", "attacks": 1, "next_attack_at": "2026-10-17T12:05:00Z"},
+  "bosses_defeated": 2,
+  "boss": {"serial": 3, "damage": 107, "phase_started_at": "2026-10-17T11:45:00Z", "attacks": 1, "next_attack_at": "2026-10-17T12:05:00Z"},
   "damage_multiplier": 1,
   "health": 9,
   "knocked_out": false,
@@ -752,11 +752,11 @@ Checked in this order:
 |---|---|
 | Before the first interval of the phase | No attack; `next_attack_at` = phase start + interval |
 | Exactly at phase start + k × interval | The k-th attack is due (`floor` includes the boundary) |
-| One attack due | `health` − `attack_damage`, `attacks` + 1, `boss_attacked`; nothing written |
+| One attack due | `health` − the boss's damage, `attacks` + 1, `boss_attacked`; nothing written |
 | Several due at once (late timer, a jump, downtime) | All applied as one change: one `boss_attacked` (or `knocked_out`) |
 | Health reaches 0 | `health: 0`, `knocked_out: true`, `next_attack_at: null`, `knocked_out` event; no timer. `attacks` stays at the knockout attack, `ceil(PhaseHealth / attack_damage)`, however much time passes, and the same after a restart |
 | Health would go below 0 | Floors at 0 |
-| `attack_damage` 0 | Attacks counted and published; health unchanged |
+| A boss's damage 0 (`game.boss_attack.damage`) | Attacks counted and published; health unchanged |
 | Knocked out | Nothing attacks; no timer |
 | Every boss defeated | Nothing attacks; no timer; `boss: null` |
 | No bosses loaded | Nothing attacks |
@@ -809,7 +809,7 @@ Checked in this order:
 | Memory and Postgres disagree (rows edited by hand) | The next write that notices (e.g. `deleteSelection` finding no row) fails, reconciles, and members get the corrected state |
 | Postgres unreachable | Reads keep working from memory (the cast log included); writes fail |
 | Backend restarts | Progress, selections, stacks (with their `wrong` flags, so `poisoned` too), the cast log and `last_cast`, the boss progress, multiplier and phase reload exactly. Health is recomputed from the phase and the clock: **attacks that fell due while the backend was down are applied at load**, as if it had stayed up (a team can come back knocked out). Timers are re-armed |
-| A boss's `attack_interval_s` / `attack_damage` changed between restarts | Applies retroactively to every current phase against that boss: health jumps to what the new values give from the phase start |
+| `game.boss_attack.interval` or a boss's damage changed in `config.toml` between restarts | Applies retroactively to every current phase against that boss: health jumps to what the new values give from the phase start |
 | `game.health` changed between restarts | A stored `phase_health` keeps its value; a `NULL` one (a team still in its first phase, never revived) uses the new value, from the team's start |
 | `config.toml` changes between restarts | A larger `game.max_pattern_points` loads the same stacks. A smaller one refuses content with bigger patterns (`atlas.Load`); a stored stack longer than the new capacity loads only its newest scans. Don't change it mid-game |
 | `game.bosses` or boss HP changed between restarts | See [`internal/bosses/README.md`](../bosses/README.md), "Failure and recovery". A team that had defeated more bosses than the new count refuses the start |
@@ -824,7 +824,8 @@ Checked in this order:
 | Big patterns (**5**+ points, `game.locked_pattern_points`) locked until **5** bosses are defeated (`game.unlock_after_bosses`) | `config.toml` | Edit and restart. `locked_pattern_points` = `max_pattern_points` + 1 locks nothing; `unlock_after_bosses` = 0 unlocks from the start. A restart re-derives each team's unlock from `bosses_defeated`, so nothing is stored |
 | Cast log length | none | Unbounded; 80 bytes per cast in memory, and a cast copies the team's log once |
 | Starting health **10** | `config.toml` `game.health` (at least 1) | Edit and restart |
-| Attack interval and damage | the `boss` table (`attack_interval_s` > 0, `attack_damage` ≥ 0) | Edit with the backend stopped, restart; applies retroactively (above) |
+| Attack interval **10 min** | `config.toml` `game.boss_attack.interval` (positive; whole seconds, checked by `bosses.New`) | Edit, restart; applies retroactively (above) |
+| Attack damage, by boss (**= serial**, 1…6) | `config.toml` `[game.boss_attack.damage]` (exactly serials 1…`game.bosses`, each ≥ 0) | Edit, restart; applies retroactively |
 | One pending timer per started team | `time.AfterFunc` | ~100 bytes and no goroutine while waiting; 1,666 teams at 10,000 players is negligible |
 | 64 waypoints, 64 shapes, 2048 patterns | the atlas's set types (`atlas.MaxWaypoints`, `atlas.MaxShapes`, `atlas.MaxPatterns`) | See [`internal/atlas/README.md`](../atlas/README.md), "Limits and how to change them". `State` holds one of each set, so a wider set makes every snapshot bigger |
 
@@ -846,7 +847,7 @@ Checked in this order:
   |---|---|
   | `TestStack` | `NewStack(3)` has `Cap` 4 (a pattern's points plus one wrong scan); bottom-to-top order; a wrong scan on top keeps its flag; `Push` leaves the original alone; a push onto a full stack panics |
 
-- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load` and `bosses.Load`, config.toml's rules including `game.health`, a fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` records a timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, earliest first (never from inside `AfterFunc`, since the store calls it holding the team's lock); `pending()` counts live timers. Every helper (`scanAt`, `selectAt`) sets the clock first, so stored times are predictable. Times are written with `tick` (seconds). The fixture pins the team's `started_at` to `start` (and reloads teams), so boss 1's attacks fall at exactly `start` + k × interval. **Bosses don't attack unless a test asks** (`fixtureOptions.attacks`): otherwise every seed boss's `attack_interval_s` is set to `neverAttack` (10 years; it fits the `INTEGER` column), so tests that move the clock by minutes see no attacks. The tests use up to 6 members (`minTestTeam`), and the seed's 6 bosses (`seedBosses`); with a smaller `teams.size`, or another `game.bosses`, in `config.toml` they **skip** rather than fail:
+- `tests/store_test.go` (real Postgres, schema `teamstate_test`, the 2025 seed loaded through `atlas.Load` and `bosses.Load`, config.toml's rules including `game.health`, a fake clock). The fake `clock` implements `teamstate.Clock`: `Now` returns the fake time; `AfterFunc` records a timer; `at(d)` sets the time to `start` + `d` and then runs every timer now due, earliest first (never from inside `AfterFunc`, since the store calls it holding the team's lock); `pending()` counts live timers. Every helper (`scanAt`, `selectAt`) sets the clock first, so stored times are predictable. Times are written with `tick` (seconds). The fixture pins the team's `started_at` to `start` (and reloads teams), so boss 1's attacks fall at exactly `start` + k × interval. **Bosses don't attack unless a test asks** (`fixtureOptions.attacks`): otherwise `bossRules(set, attacks)` builds the fixture's `bosses.Rules` from `config.toml` (`game.bosses`, `[game.boss_attack]`) with the interval set to `neverAttack` (10 years), so tests that move the clock by minutes see no attacks. `fixtureOptions.bossRules` adjusts those rules for one test (an interval or a boss's damage). The tests use up to 6 members (`minTestTeam`), and the seed's 6 bosses (`seedBosses`); with a smaller `teams.size`, or another `game.bosses`, in `config.toml` they **skip** rather than fail:
 
   | Test | Covers |
   |---|---|
@@ -892,7 +893,7 @@ Checked in this order:
   |---|---|
   | `TestBossAttacks` | walkthrough 8: at the start full health, `attacks` 0, `phase_started_at` = start, `next_attack_at` one interval on, one timer pending; nothing 1 µs before the first interval; exactly at it `boss_attacked`, health − damage, the next one interval later; defeating boss 1 starts boss 2's phase at the cast with the health then; boss 2's attacks one interval at a time, then `knocked_out` (health 0, `next_attack_at` null, no timer); no attacks after; `Select` and `Scan` get `ErrKnockedOut`, `ClearSelection` works; `Revive`: full health, `attacks` 0, phase from now, one timer, `revived`; selecting works again |
   | `TestAttacksAcrossRestart` | `Close` stops every timer; with the store closed the clock passes three attacks and memory doesn't change; a restart applies all three at load (health, `attacks`, `next_attack_at`); after a revive and one more attack, a restart reproduces the view exactly (JSON, version aside) |
-  | `TestWriteCatchesUpAttacks` | with the timers off (`Close`), a scan after the first attack publishes `boss_attacked` then `scan_added` and sees the lower health; after a knockout's worth of attacks a select is refused with `ErrKnockedOut` and publishes `knocked_out` |
+  | `TestWriteCatchesUpAttacks` | boss 1's damage set to 4 through the rules (`fixtureOptions.bossRules`); with the timers off (`Close`), a scan after the first attack publishes `boss_attacked` then `scan_added` and sees the lower health; after a knockout's worth of attacks a select is refused with `ErrKnockedOut` and publishes `knocked_out` |
   | `TestReviveErrors` | `Revive` of an unknown team → `ErrTeamNotFound`; of a lobby team → `ErrNotInGame` |
 
 - `tests/gameloop_test.go`: **the game-loop simulation**, its own fixture (`newLeague`, schema `teamstate_sim`): the 2025 seed with its boss attacks, **100** teams (`simTeams`) of every size from 1 to `teams.size`, all started at the fake clock's start, the teams store's `OnRosterChange` wired to `RosterChanged`, plus a 5-point **pentagon** and a 6-point **hexagon** (`simBigPatterns`, each its own shape: the seed has no big patterns). One pick in five is a big pattern (`randomPattern`), so every team tries them before and after its unlock: before, `lockedFor` expects `shape_locked` (or `knocked_out`, checked first). Every select and clear is made by the leader (the first active member: member 1 once an admin removed member 0). Team *i* plays strategy *i* mod 12 at size 1 + (*i* / 12) mod 6, so each strategy runs at several sizes:
@@ -914,8 +915,8 @@ Checked in this order:
 
   | Test | Covers |
   |---|---|
-  | `TestGameLoopSimulation` | **180 steps of 30 s** (90 min of game time). Each step moves the fake clock (firing every due attack), then all 100 teams act at once by strategy, every call's error checked. After each step every team's state is compared with **`model`**, an independent re-implementation of the rules: `bosses_defeated`, `boss` (serial, damage, `attacks`, `phase_started_at`, `next_attack_at`), `health`, `knocked_out`, `damage_multiplier`, `cast_count`, `unlocked_points` and whether the pentagon and hexagon are in `locked_shapes` (`model.unlocked`); and each cast's `dealt`, `boss`, `defeated_boss`, `already_completed`. At the end, every team's watcher (a member never removed, subscribed to the hub) must hold the team's state as its last `team_state`, version included (`converge`). Counters fail the test if any configuration never happened. Last run (race detector, ~5 s): 13 teams through every boss, 505 locked-shape refusals, 386 big patterns cast after the unlock, and every other counter above zero (run with `-v` for all of them). It found the knockout-cap bug ("Boss attacks and health") |
-  | `TestGameLoopRestart` | The same league, backend down part way: **45 steps**, then the store waits for every event (`converge`), is closed (no timers fire), the clock moves on by the downtime, and a new store loads in a new epoch; then **45 more steps**. Subtests per downtime: **0** (every view must survive exactly, JSON with version aside), **90 s** (shorter than every seed boss's attack interval), **15 min** (several attacks of every boss), **1 h** (must knock teams out while down). After the restart every team must equal its `model` at the new time, so the attacks that fell due while down are applied at load, knockouts included; each watcher gets the new store's `Snapshot`, as a reconnecting phone would, and every phone must converge at the end. Last run (race detector, ~16 s for all four): knocked out while down 0, 0, 32 and 88 |
+  | `TestGameLoopSimulation` | **180 steps of 30 s** (90 min of game time). Each step moves the fake clock (firing every due attack), then all 100 teams act at once by strategy, every call's error checked. After each step every team's state is compared with **`model`**, an independent re-implementation of the rules: `bosses_defeated`, `boss` (serial, damage, `attacks`, `phase_started_at`, `next_attack_at`), `health`, `knocked_out`, `damage_multiplier`, `cast_count`, `unlocked_points` and whether the pentagon and hexagon are in `locked_shapes` (`model.unlocked`); and each cast's `dealt`, `boss`, `defeated_boss`, `already_completed`. At the end, every team's watcher (a member never removed, subscribed to the hub) must hold the team's state as its last `team_state`, version included (`converge`). Counters fail the test if any configuration never happened. The league's bosses attack every **`simAttackInterval` (5 min)** with `config.toml`'s damages (shorter than the configured 10 min, so 90 minutes see many attacks and knockouts, yet the fastest teams still get through every boss). Last run (race detector, ~3 s): 2 teams through every boss, 131 knockouts, 48 revives, and every other counter above zero (run with `-v` for all of them). It found the knockout-cap bug ("Boss attacks and health") |
+  | `TestGameLoopRestart` | The same league, backend down part way: **45 steps**, then the store waits for every event (`converge`), is closed (no timers fire), the clock moves on by the downtime, and a new store loads in a new epoch; then **45 more steps**. Subtests per downtime: **0** (every view must survive exactly, JSON with version aside), **90 s** (shorter than the league's attack interval, `simAttackInterval`), **15 min** (several attacks of every boss), **1 h** (must knock teams out while down). After the restart every team must equal its `model` at the new time, so the attacks that fell due while down are applied at load, knockouts included; each watcher gets the new store's `Snapshot`, as a reconnecting phone would, and every phone must converge at the end. Last run (race detector, ~10 s for all four): knocked out while down 0, 16, 42 and 51 (90 s can knock out a team at its last health point with an attack due) |
   | `BenchmarkGameLoopCast` | casts per second with the 100 teams playing at once, boss attacks off: each goroutine owns a team and casts random patterns (a select plus every scan, each a Postgres write). **433,873 ns per cast** (`-benchtime 3s`, 16 CPUs, local Postgres 17), about 2,300 casts or 11,000 writes a second |
 
 - `tests/publish_bench_test.go`: **`BenchmarkTeamStatePublish`**, parallel `PublishTeam` calls across 1,666 `IN_GAME` teams (10,000 players at `teams.size` 6; an in-memory `Teams`, so no team rows), every member with an open subscription. It measures the lock, encoding once and queueing for each member: about **1.0 µs** a publish on a 10-core laptop, down from 4.4 µs before the sharded hub and roster cache (`internal/platform/README.md`, "Performance"). Measured before the cast log and `poisoned` were added to the `View`; a team with no casts encodes the same size plus `"poisoned":false`.

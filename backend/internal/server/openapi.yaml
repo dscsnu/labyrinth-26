@@ -957,9 +957,17 @@ components:
         attack_interval_s:
           type: integer
           minimum: 1
-          description: How often it attacks, in seconds of a team's phase against it.
-          example: 300
-        attack_damage: { type: integer, minimum: 0, description: What each attack takes off the team's health., example: 1 }
+          description: >-
+            How often it attacks, in seconds of a team's phase against it. From config.toml
+            (game.boss_attack.interval, the same for every boss), not the boss table.
+          example: 600
+        attack_damage:
+          type: integer
+          minimum: 0
+          description: >-
+            What each attack takes off the team's health. From config.toml (game.boss_attack.damage, by serial;
+            for now each boss does its serial number), not the boss table.
+          example: 1
     StackScan:
       type: object
       required: [waypoint_id, user_id, scanned_at, wrong]

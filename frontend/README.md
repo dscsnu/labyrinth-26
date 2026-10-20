@@ -6,7 +6,7 @@ Where a started team plays. `src/routes/play/+page.server.ts` loads, on the serv
 - `GET /api/game/shapes`: the selectable types (the backend calls them shapes), with each one's pattern count, point sizes and damage range, plus `health` (every team's starting health, **10**, `game.health`) and `max_pattern_points`. There's no time limit on an attempt.
 - `GET /api/teams/me/state`: the team's selection, stack and progress. A `404` (not in a team) redirects to `/team`; no session redirects to `/`.
 - `GET /api/teams/me/casts`: the team's cast log, newest first.
-- `GET /api/game/bosses`: every boss in serial order (name, asset, description, HP, `attack_interval_s`, `attack_damage`); static, so loaded once.
+- `GET /api/game/bosses`: every boss in serial order (name, asset, description, HP, and `attack_interval_s`, `attack_damage` from the backend's `config.toml` `[game.boss_attack]`); static, so loaded once.
 
 `src/routes/play/+page.svelte` then:
 0. **Health.** "Health: " and a `<progress>` bar of `team_state.health` out of `game.health`, "n/10". When `knocked_out` is true, a red banner: "**Knocked out.** Your team can't select or scan until an organiser revives it", and the type buttons and the scan form are disabled (the backend refuses them with `409 knocked_out` anyway).
