@@ -1,6 +1,7 @@
 <script lang="ts">
   import MapView, { ZOOM_LEVELS } from "#lib/components/MapView.svelte";
   import SpellBook from "#lib/components/SpellBook.svelte";
+  import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
   import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
   import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
@@ -237,18 +238,20 @@
     id.slice(0, 8);
 </script>
 
-<!-- Top bar: full width, the top 25% of the screen. A row for the back
-     button, then the current boss's image, name and health, from ts, so it
-     moves on every teammate's team_state. -->
+<!-- Top bar: full width, the top 25% of the screen, on the Scott Pilgrim
+     menu's diamond backdrop (like /team) with a black edge above the map. A
+     row for the back button, then the current boss's image, name and health,
+     from ts, so it moves on every teammate's team_state. -->
 <div
-  class="fixed inset-x-0 top-0 flex h-[25dvh] flex-col gap-2 bg-brown px-4 py-3 font-pixel text-[16px] leading-[24px] text-parchment"
+  class="fixed inset-x-0 top-0 isolate flex h-[25dvh] flex-col gap-2 border-b-4 border-black px-4 py-3 font-pixel text-[16px] leading-[24px] text-white"
 >
+  <DiamondBackdrop class="absolute inset-0 -z-10" />
   <!-- The top row: back to the team page (left), the team's health (right). -->
   <div class="flex shrink-0 items-center justify-between gap-4">
     <a
       href="/team"
       aria-label="Back to team"
-      class="pixel-box bg-ink px-2 py-1 text-parchment active:translate-y-[2px] active:pixel-box-pressed"
+      class="pixel-box bg-ink/80 px-2 py-1 text-white hover:bg-pink active:translate-y-[2px] active:bg-pink active:pixel-box-pressed"
     >
       &lt;
     </a>
@@ -256,7 +259,7 @@
       <!-- No visible label: the face says whose health it is. -->
       <span class="sr-only">Team health</span>
       <!-- A step below the face beside it (32px), so it doesn't crowd the bar. -->
-      <span class="text-[18px] leading-[32px]">{teamHealth ?? "x10"}</span>
+      <span class="text-[18px] leading-[32px] text-outline">{teamHealth ?? "x10"}</span>
       <img
         src={scottFace}
         alt=""
@@ -284,8 +287,12 @@
           class="h-full w-auto shrink-0 object-contain"
         />
       {/key}
+      <!-- The name in the menu's logo style (cyan, outlined), the health
+           bar filled with its highlight pink. -->
       <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
-        <p class="truncate uppercase">{boss.name}</p>
+        <p class="truncate py-1 font-display text-[32px] leading-[1] text-cyan uppercase heading-outline">
+          {boss.name}
+        </p>
         <div
           role="progressbar"
           aria-label="{boss.name}'s health"
@@ -295,16 +302,16 @@
           class="pixel-box mx-1 h-4 bg-ink"
         >
           <div
-            class="h-full bg-danger transition-[width] duration-300"
+            class="h-full bg-pink transition-[width] duration-300"
             style:width="{(hp / boss.hp) * 100}%"
           ></div>
         </div>
-        <p class="text-[8px] leading-[16px]">{hp} / {boss.hp} HP</p>
+        <p class="text-[8px] leading-[16px] text-outline">{hp} / {boss.hp} HP</p>
       </div>
     {:else if bosses.length > 0}
-      <p class="uppercase">Every boss defeated!</p>
+      <p class="uppercase text-outline">Every boss defeated!</p>
     {:else}
-      <p class="uppercase">No bosses loaded.</p>
+      <p class="uppercase text-outline">No bosses loaded.</p>
     {/if}
   </div>
 </div>
