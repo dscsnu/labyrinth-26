@@ -399,8 +399,8 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	if !ok || damage <= 0 {
 		t.Fatalf("expected positive damage in last_cast, got %v", lastCast["damage"])
 	}
-	if int(damage) != 65 {
-		t.Fatalf("expected damage 65 for pattern 1, got %v", damage)
+	if int(damage) != 60 {
+		t.Fatalf("expected damage 60 for pattern 1, got %v", damage)
 	}
 }
 

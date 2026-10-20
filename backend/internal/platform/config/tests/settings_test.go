@@ -35,9 +35,17 @@ interval = "10m"
 rotate = "5s"
 tolerance = "5s"
 [spell]
-per_point = 15
-per_100m = 2
 walkability = 1.5
+per_100m = 0.8
+[spell.base]
+1 = 15
+2 = 18
+3 = 52
+4 = 179
+5 = 376
+6 = 1174
+[spell.bonus]
+concave_quad = 75
 [auth]
 token_ttl = "12h"
 login_code_ttl = "2m"
@@ -88,7 +96,7 @@ func TestLoadSettings(t *testing.T) {
 	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 ||
 		s.Game.BossAttack.Interval.Duration != 10*time.Minute || s.Game.BossAttack.BossDamage()[6] != 6 || len(s.Game.BossAttack.Damage) != 6 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
-		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
+		s.Spell.Walkability != 1.5 || s.Spell.Per100m != 0.8 || s.Spell.Bonus.ConcaveQuad != 75 || s.Spell.BaseDamage()[4] != 179 || len(s.Spell.Base) != 6 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
 		t.Fatalf("decoded %+v", s)
 	}
@@ -102,7 +110,7 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"unknown key":                         {"size = 6", "size = 6\nsizee = 7", "unknown key"},
 		"missing value":                       {"heartbeat = \"25s\"\n", "", "live.heartbeat"},
 		"bad duration":                        {`heartbeat = "25s"`, `heartbeat = "a while"`, "heartbeat"},
-		"missing per_100m (zero is valid)":    {"per_100m = 2\n", "", "missing key spell.per_100m"},
+		"missing per_100m (zero is valid)":    {"per_100m = 0.8\n", "", "missing key spell.per_100m"},
 		"state ttl under a second":            {`oauth_state_ttl = "10m"`, `oauth_state_ttl = "500ms"`, "oauth_state_ttl"},
 		"read timeout under header timeout":   {`read_timeout = "30s"`, `read_timeout = "1s"`, "read_timeout"},
 		"zero body limit":                     {"max_body_bytes = 1048576", "max_body_bytes = 0", "max_body_bytes"},
@@ -123,9 +131,13 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"no health":                           {"health = 10", "health = 0", "game.health must be at least 1"},
 		"zero qr rotate":                      {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
 		"zero qr tolerance":                   {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
-		"zero per_point":                      {"per_point = 15", "per_point = 0", "spell.per_point must be positive"},
-		"negative per_100m":                   {"per_100m = 2", "per_100m = -1", "spell.per_100m must not be negative"},
+		"negative per_100m":                   {"per_100m = 0.8", "per_100m = -1", "spell.per_100m must not be negative"},
 		"walkability under 1.0":               {"walkability = 1.5", "walkability = 0.5", "spell.walkability must be at least 1.0"},
+		"no base damage for size":             {"6 = 1174\n", "", "spell.base has no entry for size 6"},
+		"base damage for size that isn't":     {"6 = 1174\n", "6 = 1174\n7 = 2000\n", "spell.base.7 is not a valid pattern size (1-6, game.max_pattern_points)"},
+		"base damage key not a size":          {"6 = 1174\n", "6 = 1174\nsize = 100\n", "spell.base.size is not a valid pattern size"},
+		"zero base damage":                    {"2 = 18", "2 = 0", "spell.base.2 must be positive"},
+		"negative concave_quad bonus":         {"concave_quad = 75", "concave_quad = -1", "spell.bonus.concave_quad must not be negative"},
 		"zero code attempts":                  {"code_attempts = 10", "code_attempts = 0", "teams.code_attempts must be at least 1"},
 		"zero token ttl":                      {`token_ttl = "12h"`, `token_ttl = "0s"`, "auth.token_ttl must be positive"},
 		"zero login code ttl":                 {`login_code_ttl = "2m"`, `login_code_ttl = "0s"`, "auth.login_code_ttl must be positive"},

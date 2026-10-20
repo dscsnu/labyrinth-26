@@ -176,10 +176,30 @@ func permute(arr []int, k int, fn func([]int)) {
 	}
 }
 
-// Damage computes the integer spell damage dealt by a pattern with k waypoints,
-// straight-line tour length tourM, and coefficients perPoint, per100m, walkability.
-// Formula: round(perPoint * k + per100m * (walkability * tourM) / 100).
-func Damage(k int, tourM float64, perPoint, per100m, walkability float64) int {
+// Damage computes the integer spell damage dealt by a pattern with base coordination
+// damage baseDmg, difficulty bonus bonusDmg, straight-line tour length tourM, and
+// distance coefficients per100m, walkability.
+// Formula: round(float64(baseDmg + bonusDmg) + per100m * (walkability * tourM) / 100).
+func Damage(baseDmg, bonusDmg int, tourM, per100m, walkability float64) int {
 	walkM := tourM * walkability
-	return int(math.Round(perPoint*float64(k) + per100m*(walkM/100.0)))
+	return int(math.Round(float64(baseDmg+bonusDmg) + per100m*(walkM/100.0)))
+}
+
+// CalculateDamage computes the integer spell damage for waypoints pts given the base
+// coordination table baseMap, concave quadrilateral bonus concaveQuadBonus, and
+// distance coefficients per100m, walkability.
+// A 6-point pattern (k=6) has a fixed value of baseMap[6] (1200) no more no less,
+// without distance addition.
+func CalculateDamage(pts []Point, baseMap map[int]int, concaveQuadBonus int, per100m, walkability float64) int {
+	k := len(pts)
+	base := baseMap[k]
+	if k == 6 {
+		return base
+	}
+	tourM := TourM(pts)
+	bonus := 0
+	if k == 4 && len(ConvexHull(pts)) == 3 {
+		bonus = concaveQuadBonus
+	}
+	return Damage(base, bonus, tourM, per100m, walkability)
 }

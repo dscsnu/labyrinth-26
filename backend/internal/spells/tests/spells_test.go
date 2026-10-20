@@ -14,7 +14,8 @@ import (
 // synthetic coordinates without needing a database connection.
 func TestPureMathGeometry(t *testing.T) {
 	set := configtest.Settings(t)
-	perPoint := set.Spell.PerPoint
+	baseMap := set.Spell.BaseDamage()
+	bonus := set.Spell.Bonus.ConcaveQuad
 	per100m := set.Spell.Per100m
 	walk := set.Spell.Walkability
 
@@ -24,8 +25,8 @@ func TestPureMathGeometry(t *testing.T) {
 		if tour != 0 {
 			t.Fatalf("expected 0 tour for 1 point, got %f", tour)
 		}
-		dmg := spells.Damage(1, tour, perPoint, per100m, walk)
-		expected := int(math.Round(perPoint))
+		dmg := spells.Damage(baseMap[1], 0, tour, per100m, walk)
+		expected := baseMap[1]
 		if dmg != expected {
 			t.Fatalf("expected 1-point damage %d, got %d", expected, dmg)
 		}
@@ -38,7 +39,7 @@ func TestPureMathGeometry(t *testing.T) {
 		if math.Abs(tour-expectedTour) > 1e-6 {
 			t.Fatalf("expected tour %f, got %f", expectedTour, tour)
 		}
-		dmg := spells.Damage(2, tour, perPoint, per100m, walk)
+		dmg := spells.Damage(baseMap[2], 0, tour, per100m, walk)
 		if dmg <= 0 {
 			t.Fatalf("expected positive damage, got %d", dmg)
 		}
@@ -77,18 +78,37 @@ func TestPureMathGeometry(t *testing.T) {
 		}
 	})
 
-	t.Run("doubling per_point changes damage by formula", func(t *testing.T) {
+	t.Run("concave quad bonus awarded", func(t *testing.T) {
+		convexQuad := []spells.Point{
+			{X: 0, Y: 0},
+			{X: 200, Y: 0},
+			{X: 200, Y: 200},
+			{X: 0, Y: 200},
+		}
+		concaveQuad := []spells.Point{
+			{X: 0, Y: 0},
+			{X: 200, Y: 0},
+			{X: 200, Y: 200},
+			{X: 50, Y: 50}, // interior point gives hull size 3
+		}
+		dmgConvex := spells.CalculateDamage(convexQuad, baseMap, bonus, per100m, walk)
+		dmgConcave := spells.CalculateDamage(concaveQuad, baseMap, bonus, per100m, walk)
+		if dmgConcave <= dmgConvex {
+			t.Fatalf("expected concave quad damage (%d) > convex quad (%d)", dmgConcave, dmgConvex)
+		}
+	})
+
+	t.Run("distance scaling changes damage by formula", func(t *testing.T) {
 		pts := []spells.Point{
 			{X: 0, Y: 0},
 			{X: 150, Y: 50},
 			{X: 80, Y: 200},
 		}
-		k := len(pts)
 		tour := spells.TourM(pts)
-		dmg1 := spells.Damage(k, tour, perPoint, per100m, walk)
-		dmg2 := spells.Damage(k, tour, perPoint*2.0, per100m, walk)
+		dmg1 := spells.Damage(baseMap[3], 0, tour, per100m, walk)
+		dmg2 := spells.Damage(baseMap[3], 0, tour, per100m*2.0, walk)
 		diff := dmg2 - dmg1
-		expectedDiff := int(math.Round(perPoint * float64(k)))
+		expectedDiff := int(math.Round(per100m * (tour * walk / 100.0)))
 		if math.Abs(float64(diff-expectedDiff)) > 1.0 {
 			t.Fatalf("expected damage difference %d, got %d", expectedDiff, diff)
 		}
@@ -107,9 +127,9 @@ func TestPureMathGeometry(t *testing.T) {
 		if tour <= 0 {
 			t.Fatalf("expected positive tour for hexagon, got %f", tour)
 		}
-		dmg := spells.Damage(6, tour, perPoint, per100m, walk)
-		if dmg <= 0 {
-			t.Fatalf("expected positive damage for hexagon, got %d", dmg)
+		dmg := spells.CalculateDamage(hex, baseMap, bonus, per100m, walk)
+		if dmg < 1100 || dmg > 1300 {
+			t.Fatalf("expected damage ~1200 for hexagon, got %d", dmg)
 		}
 		hull := spells.ConvexHull(hex)
 		if len(hull) != 6 {
@@ -198,8 +218,7 @@ func TestSeedPatternGeometryProperties(t *testing.T) {
 		}
 
 		// Verify formula property on this pattern
-		tour := spells.TourM(pts)
-		recomputed := spells.Damage(len(pts), tour, set.Spell.PerPoint, set.Spell.Per100m, set.Spell.Walkability)
+		recomputed := spells.CalculateDamage(pts, set.Spell.BaseDamage(), set.Spell.Bonus.ConcaveQuad, set.Spell.Per100m, set.Spell.Walkability)
 		if recomputed != dmg {
 			t.Errorf("pattern %d: recomputed damage %d != stored damage %d", pid, recomputed, dmg)
 		}
@@ -273,8 +292,7 @@ func TestPatternDamageDrift(t *testing.T) {
 			pts[i] = projected[wid]
 		}
 
-		tour := spells.TourM(pts)
-		computed := spells.Damage(len(pts), tour, set.Spell.PerPoint, set.Spell.Per100m, set.Spell.Walkability)
+		computed := spells.CalculateDamage(pts, set.Spell.BaseDamage(), set.Spell.Bonus.ConcaveQuad, set.Spell.Per100m, set.Spell.Walkability)
 		if computed != storedDamage {
 			drifted = append(drifted, patternDrift{id: pid, stored: storedDamage, computed: computed})
 		}

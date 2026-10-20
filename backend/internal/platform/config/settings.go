@@ -47,12 +47,32 @@ type Settings struct {
 
 // SpellSettings is config.toml's [spell] table.
 type SpellSettings struct {
-	// PerPoint is damage per waypoint in the pattern (one per member involved).
-	PerPoint float64 `toml:"per_point"`
-	// Per100m is damage per 100 m of estimated walking distance.
-	Per100m float64 `toml:"per_100m"`
 	// Walkability scales straight-line distance to estimated walking distance.
 	Walkability float64 `toml:"walkability"`
+	// Per100m is damage per 100 m of estimated walking distance.
+	Per100m float64 `toml:"per_100m"`
+	// Base is base coordination damage by pattern point count ([spell.base]).
+	Base map[string]int `toml:"base"`
+	// Bonus holds bonus damage for difficult geometries ([spell.bonus]).
+	Bonus SpellBonusSettings `toml:"bonus"`
+}
+
+// SpellBonusSettings is config.toml's [spell.bonus] table.
+type SpellBonusSettings struct {
+	// ConcaveQuad is bonus damage awarded to 4-point patterns whose convex hull has size 3.
+	ConcaveQuad int `toml:"concave_quad"`
+}
+
+// BaseDamage returns Base keyed by point count as an int. validate has checked
+// every key is a size from 1 to game.max_pattern_points.
+func (s SpellSettings) BaseDamage() map[int]int {
+	out := make(map[int]int, len(s.Base))
+	for k, v := range s.Base {
+		var pts int
+		fmt.Sscanf(k, "%d", &pts)
+		out[pts] = v
+	}
+	return out
 }
 
 // TeamSettings is config.toml's [teams] table.
@@ -263,9 +283,19 @@ func (s Settings) validate() []error {
 	}
 	check(s.QR.Rotate.Duration > 0, "qr.rotate must be positive")
 	check(s.QR.Tolerance.Duration > 0, "qr.tolerance must be positive")
-	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")
-	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
 	check(s.Spell.Walkability >= 1.0, "spell.walkability must be at least 1.0")
+	check(s.Spell.Per100m >= 0, "spell.per_100m must not be negative")
+	for pts := 1; pts <= s.Game.MaxPatternPoints; pts++ {
+		check(hasKey(s.Spell.Base, fmt.Sprint(pts)), "spell.base has no entry for size %d", pts)
+	}
+	for k, v := range s.Spell.Base {
+		var pts int
+		_, err := fmt.Sscanf(k, "%d", &pts)
+		check(err == nil && fmt.Sprint(pts) == k && pts >= 1 && pts <= s.Game.MaxPatternPoints,
+			"spell.base.%s is not a valid pattern size (1-%d, game.max_pattern_points)", k, s.Game.MaxPatternPoints)
+		check(v > 0, "spell.base.%s must be positive", k)
+	}
+	check(s.Spell.Bonus.ConcaveQuad >= 0, "spell.bonus.concave_quad must not be negative")
 	check(s.Auth.TokenTTL.Duration > 0, "auth.token_ttl must be positive")
 	check(s.Auth.LoginCodeTTL.Duration > 0, "auth.login_code_ttl must be positive")
 	check(s.Auth.OAuthStateTTL.Duration >= time.Second, "auth.oauth_state_ttl must be at least 1s")

@@ -4,7 +4,7 @@ The `spells` package owns the mathematical modeling for spell damage in **Labyri
 
 Damage values are **precomputed offline** and stored in the database (`pattern.damage`), loaded once into memory at startup (`atlas.Load`), and read as a plain field during gameplay. The game server **never imports** this package.
 
-Tunables appear with their `config.toml` key: **15** (`spell.per_point`), **2** (`spell.per_100m`), and **1.5** (`spell.walkability`).
+Tunables appear with their `config.toml` key: **1.5** (`spell.walkability`), **0.8** (`spell.per_100m`), `spell.base` (**1: 15, 2: 18, 3: 52, 4: 179, 5: 376, 6: 1200**), and **75** (`spell.bonus.concave_quad`).
 
 ---
 
@@ -19,28 +19,30 @@ Tunables appear with their `config.toml` key: **15** (`spell.per_point`), **2** 
 | `TourM` ($P_{\text{tour}}$) | Shortest closed Euclidean loop connecting all waypoints in the pattern (0 for 1 point, out-and-back for 2 points, Traveling Salesperson closed loop for $\ge 3$ points). |
 | `WalkM` ($P_{\text{adj}}$) | Realistic campus walking distance in metres: $P_{\text{tour}} \times \text{walkability}$ (`spell.walkability`). |
 | `Damage` | Integer score dealt by casting the spell. Stored in `pattern.damage`. |
-| `Generator` | The offline CLI tool `cmd/spells` that reads coordinates and patterns from Postgres and writes `seeds/dev_2025_spells.sql`. |
+| `Generator` | The offline CLI tool `cmd/spells` that reads coordinates and patterns and writes `seeds/dev_2025_spells.sql`. |
 | `Drift Test` | The automated test in `internal/spells/tests/` that verifies stored damage in Postgres matches recomputed damage from current coordinates and config. |
 
 ---
 
 ## 2. The Damage Formula
 
-For any pattern $\sigma$ with $k$ waypoints and shortest closed tour $P_{\text{tour}}$ (in metres):
+For any pattern $\sigma$ with $k$ waypoints, shortest closed tour $P_{\text{tour}}$ (in metres), and concavity:
 
-$$D(\sigma) = \operatorname{round}\left(a \cdot k + b \cdot \frac{\alpha \cdot P_{\text{tour}}}{100}\right)$$
+$$D(\sigma) = \operatorname{round}\left(\text{Base}(k) + \text{Bonus}(\text{concave}) + b \cdot \frac{\alpha \cdot P_{\text{tour}}}{100}\right)$$
 
 ### Calibrated Parameters
 
 | Parameter | Config Key | Default | Purpose |
 |---|---|:---:|---|
-| $a$ | `spell.per_point` | **15** | Base coordination damage per player involved. Guarantees larger shapes always deal more base damage than smaller ones. |
-| $b$ | `spell.per_100m` | **2** | Distance damage per 100 metres of walking. Rewards teams for physical coverage across campus. |
+| $\text{Base}(k)$ | `spell.base` | **18, 52, 179, 376, 1200** | Base coordination damage by pattern size $k \in [2, 6]$ (and 15 for $k=1$). Sets tier power. Note: $k=6$ deals a fixed value of 1200 (no more, no less), with no distance scaling. |
+| $\text{Bonus}$ | `spell.bonus.concave_quad` | **75** | Difficulty bonus awarded to concave quadrilaterals (4 points whose convex hull has 3 vertices). |
+| $b$ | `spell.per_100m` | **0.8** | Distance damage per 100 metres of walking. Rewards teams for physical coverage across campus. |
 | $\alpha$ | `spell.walkability` | **1.5** | Campus detour index ($\frac{\text{Walking Distance}}{\text{Euclidean Distance}}$). Real footpaths require walking $\approx 1.5\times$ straight-line distance due to buildings and terrain. |
 
 ### Anti-Exploit Design
-1. **Distance Exploitation Prevention:** If damage scaled only with distance, two runners could sprint back and forth between two distant buildings repeatedly ($1010 \leftrightarrow 1002$), ignoring team coordination. The $a \cdot k$ term ensures multi-player shapes are strictly more rewarding.
+1. **Distance Exploitation Prevention:** If damage scaled only with distance, two runners could sprint back and forth between two distant buildings repeatedly ($1010 \leftrightarrow 1002$), ignoring team coordination. The $\text{Base}(k)$ term ensures multi-player shapes are strictly more rewarding.
 2. **Corner Camping Prevention:** If damage scaled only with player count $k$, teams would cluster in a single building or lawn, scanning 4 or 5 points 10 metres apart. The $b \cdot \frac{\alpha \cdot P_{\text{tour}}}{100}$ term demands real campus coverage to maximize damage.
+3. **Concavity Reward:** Concave quadrilaterals require positioning a team member deep in an interior building surrounded by hull vertices; the $+75$ bonus recognizes this coordination challenge.
 
 ---
 
@@ -59,7 +61,7 @@ where:
 - $Y$ is metres north of the campus barycenter.
 
 ### B. Shortest Closed Tour ($P_{\text{tour}}$)
-- **$k = 1$:** Tour is 0 m (single waypoint; damage is $15 \times 1 = 15$).
+- **$k = 1$:** Tour is 0 m (single waypoint; damage is $\text{Base}(1) = 15$).
 - **$k = 2$:** Out and back: $2 \times \operatorname{Distance}(p_1, p_2)$.
 - **$k \in [3, 6]$:** The shortest closed loop visiting every point once and returning to the start. Since $k \le 6$, all $(k-1)!$ cyclic orderings are evaluated (at most $5! = 120$ permutations).
 
@@ -77,7 +79,7 @@ Pattern `87` in `dev_2025.sql` is a `square` composed of four waypoints:
 - `1008` Cluster 1 (C1): `(28.52440905859402, 77.57308311017349)` $\to X = -117.838\text{ m}, Y = -130.304\text{ m}$
 
 ### Steps:
-1. **$k = 4$ waypoints** $\implies \text{Base Coordination} = 15 \times 4 = 60$.
+1. **$k = 4$ waypoints**, convex $\implies \text{Base} = 179$, $\text{Bonus} = 0$.
 2. **Shortest closed tour loop:** $1001 \to 1002 \to 1007 \to 1008 \to 1001$:
    - $1001 \to 1002 = 148.01\text{ m}$
    - $1002 \to 1007 = 618.91\text{ m}$
@@ -87,11 +89,11 @@ Pattern `87` in `dev_2025.sql` is a `square` composed of four waypoints:
 3. **Adjusted walking distance:**
    - $P_{\text{adj}} = 1.5 \times 1,557.96 = \mathbf{2,336.93\text{ m}}$.
 4. **Damage calculation:**
-   - $\text{Damage} = \operatorname{round}\left(60 + 2 \times \frac{2,336.93}{100}\right) = \operatorname{round}(60 + 46.738) = \operatorname{round}(106.738) = \mathbf{107}$.
+   - $\text{Damage} = \operatorname{round}\left(179 + 0 + 0.8 \times \frac{2,336.93}{100}\right) = \operatorname{round}(179 + 18.695) = \mathbf{198}$.
 
 Stored in Postgres as:
 ```sql
-UPDATE pattern SET damage = 107 WHERE id = 87;
+UPDATE pattern SET damage = 198 WHERE id = 87;
 ```
 
 ---
@@ -100,13 +102,14 @@ UPDATE pattern SET damage = 107 WHERE id = 87;
 
 Across all 1,474 possible subsets of the 11 campus checkpoints ($\sum_{k=2}^{6} \binom{11}{k} = 1,474$):
 
-| $k$ | Shape Classification | Total Combinations | Convex | Concave | Typical Damage Range |
-|:---:|---|:---:|:---:|:---:|:---:|
-| **2** | Line Segment | 55 | 55 | 0 | 39 – 91 |
-| **3** | Triangle | 165 | 165 | 0 | 60 – 113 |
-| **4** | Quadrilateral | 330 | 262 | 68 | 84 – 131 |
-| **5** | Pentagon | 462 | 235 | 227 | 108 – 148 |
-| **6** | Hexagon | 462 | 123 | 339 | **132 – 165** |
+| $k$ | Shape Classification | Total Combinations | Convex | Concave | Actual Damage Range | Target Range |
+|:---:|---|:---:|:---:|:---:|:---:|:---:|
+| **2** | Line Segment | 55 | 55 | 0 | 22 – 43 (median 28) | $30 \pm 5$ |
+| **3** | Triangle | 165 | 165 | 0 | 58 – 79 (median 69) | $70 \pm 15$ |
+| **4** | Convex Quad | 262 | 262 | 0 | 189 – 208 (median 201) | $200 \pm 25$ |
+| **4** | Concave Quad | 68 | 0 | 68 | 265 – 281 (median 275) | $275 \pm 30$ |
+| **5** | Pentagon | 462 | 235 | 227 | 389 – 405 (median 400) | $400 \pm 40$ |
+| **6** | Hexagon | 462 | 123 | 339 | 1200 (fixed) | 1200 |
 
 *(Note: The 2025 dev seed implements 359 hand-reviewed patterns across sizes 3–4).*
 

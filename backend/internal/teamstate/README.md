@@ -345,7 +345,7 @@ Every team fights the same **6** (`game.bosses`) bosses in serial order. The bos
 
 **What a cast does** (`deal`, called by `Scan` on `pattern_completed`):
 1. If every boss is defeated (`Defeated` = `Count()`, or no bosses are loaded): nothing. The cast still counts (pattern, shape, cast log) with `dealt 0`, `boss null`.
-2. Otherwise `dealt = math.Round(pattern damage × Multiplier)` (halves away from zero: 107 × 1.5 = 160.5 → 161), added to `Damage`.
+2. Otherwise `dealt = math.Round(pattern damage × Multiplier)` (halves away from zero: 198 × 1.5 = 297), added to `Damage`.
 3. If `Damage` reaches the current boss's HP (≥): `Defeated` + 1, `Damage` = 0. **The excess is lost**, never carried to the next boss, so one cast defeats at most one boss. The event type is `boss_defeated`. The next boss's **phase starts at the cast**, with the health the team has then: its attack clock starts from zero.
 4. The cast records `dealt`, `boss` (the serial hit) and `defeated_boss`; the progress is upserted into `team_boss` in the cast's transaction.
 
@@ -436,22 +436,22 @@ F selects `square`. D scans `1001`, `1002`, `1007`, `1008` in turn: `scan_added`
 | Time | Request | `last_cast` after | `GET /api/teams/me/casts` | `patterns` | `team_cast` rows | `team_pattern` rows |
 |---|---|---|---|---|---|---|
 | (start) | | `null` | `[]` | `[]` | 0 | 0 |
-| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":107,"dealt":107,"boss":1,"defeated_boss":true}` (107 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
+| 00:12 | A completes square `1001 1002 1007 1008` (walkthrough 1) | `{"pattern":["1001","1002","1007","1008"],"shape":"square","cast_by":A,"cast_at":"…12:00:12Z","already_completed":false,"damage":198,"dealt":198,"boss":1,"defeated_boss":true}` (198 ≥ boss 1's 25 HP) | `[that cast]` | `[[1001,1002,1007,1008]]` | 1 | 1 |
 | 01:00 | F selects `triangle` | **unchanged** (a selection doesn't clear it) | unchanged | unchanged | 1 | 1 |
 | 02:00 | F selects `square` again | unchanged | unchanged | unchanged | 1 | 1 |
-| 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true,"dealt":107,"boss":2,"defeated_boss":true}` (107 ≥ boss 2's 100 HP) | `[02:04 cast (already_completed: true), 00:12 cast]` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
+| 02:01–02:04 | A, B, C, D scan the same square; D's scan completes it | `{…,"cast_by":D,"cast_at":"…12:02:04Z","already_completed":true,"dealt":198,"boss":2,"defeated_boss":true}` (198 ≥ boss 2's 100 HP) | `[02:04 cast (already_completed: true), 00:12 cast]` | unchanged (counted once) | 2 | 1 (`ON CONFLICT DO NOTHING`) |
 | (restart) | | the 02:04 cast | the same two, same order | unchanged | 2 | 1 |
 
 `ScanResult.already_completed` and `last_cast.already_completed` agree for the scan that cast.
 
-### 7. Casts through the first bosses (seed HP 25, 100, 250; square damage 107; multiplier 1)
+### 7. Casts through the first bosses (seed HP 25, 100, 250; square damage 198; multiplier 1)
 | Cast | `boss` before | `dealt` | `boss` after | `bosses_defeated` | `team_boss` after (defeated, damage, multiplier) | Event type |
 |---|---|---|---|---|---|---|
-| 00:12 | `{serial 1, damage 0}` | 107 | `{serial 2, damage 0}` (107 − 25 = 82 lost) | 1 | `(1, 0, 1)` (row inserted) | `boss_defeated` |
-| 02:04 | `{serial 2, damage 0}` | 107 | `{serial 3, damage 0}` (7 lost) | 2 | `(2, 0, 1)` | `boss_defeated` |
-| 04:00 | `{serial 3, damage 0}` | 107 | `{serial 3, damage 107}` | 2 | `(2, 107, 1)` | `spell_cast` |
+| 00:12 | `{serial 1, damage 0}` | 198 | `{serial 2, damage 0}` (198 − 25 = 173 lost) | 1 | `(1, 0, 1)` (row inserted) | `boss_defeated` |
+| 02:04 | `{serial 2, damage 0}` | 198 | `{serial 3, damage 0}` (98 lost) | 2 | `(2, 0, 1)` | `boss_defeated` |
+| 04:00 | `{serial 3, damage 0}` | 198 | `{serial 3, damage 198}` | 2 | `(2, 198, 1)` | `spell_cast` |
 
-With `team_boss.multiplier = 1.5` instead, each cast deals 161: the same two defeats, then boss 3 at 161.
+With `team_boss.multiplier = 1.5` instead, each cast deals 297: the same two defeats, then boss 3 at 297.
 
 After the sixth boss (Gideon) falls, `boss` is `null`, `bosses_defeated` 6, and further casts have `dealt 0`, `boss null`, type `spell_cast`. The fifth defeat (the Katayanagi twins) is also the unlock: from that `boss_defeated` event on, `unlocked_points` is 6 and `locked_shapes` is `[]`.
 
@@ -521,7 +521,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "patterns": [["1003", "1004", "1005", "1006"]],
   "shapes": ["square"],
   "selection": {"shape": "square", "selected_by": "6f1c…", "selected_at": "2026-10-17T12:00:00Z"},
-  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 107, "dealt": 107, "boss": 3, "defeated_boss": false},
+  "last_cast": {"pattern": ["1003", "1004", "1005", "1006"], "shape": "square", "cast_by": "9a2b…", "cast_at": "2026-10-17T11:58:40Z", "already_completed": false, "damage": 198, "dealt": 198, "boss": 3, "defeated_boss": false},
   "stack": [
     {"waypoint_id": "1001", "user_id": "9a2b…", "scanned_at": "2026-10-17T12:00:01Z", "wrong": false},
     {"waypoint_id": "1002", "user_id": "c3d4…", "scanned_at": "2026-10-17T12:00:02Z", "wrong": false},
@@ -529,7 +529,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   ],
   "poisoned": true,
   "bosses_defeated": 2,
-  "boss": {"serial": 3, "damage": 107, "phase_started_at": "2026-10-17T11:45:00Z", "attacks": 1, "next_attack_at": "2026-10-17T12:05:00Z"},
+  "boss": {"serial": 3, "damage": 198, "phase_started_at": "2026-10-17T11:45:00Z", "attacks": 1, "next_attack_at": "2026-10-17T12:05:00Z"},
   "damage_multiplier": 1,
   "health": 9,
   "knocked_out": false,
@@ -552,8 +552,8 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 **Cast log** (`GET /api/teams/me/casts`), after walkthrough 6:
 ```json
 [
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 107, "dealt": 107, "boss": 2, "defeated_boss": true},
-  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 107, "dealt": 107, "boss": 1, "defeated_boss": true}
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<D>", "cast_at": "2026-10-17T12:02:04Z", "already_completed": true, "damage": 198, "dealt": 198, "boss": 2, "defeated_boss": true},
+  {"pattern": ["1001", "1002", "1007", "1008"], "shape": "square", "cast_by": "<A>", "cast_at": "2026-10-17T12:00:12Z", "already_completed": false, "damage": 198, "dealt": 198, "boss": 1, "defeated_boss": true}
 ]
 ```
 - Newest first; `[]` before the first cast, or for a team in the lobby.
