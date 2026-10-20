@@ -873,7 +873,7 @@ components:
               required: [serial, damage, phase_started_at, attacks, next_attack_at]
               properties:
                 serial: { type: integer, minimum: 1, example: 2 }
-                damage: { type: integer, minimum: 0, example: 198 }
+                damage: { type: integer, minimum: 0, example: 205 }
                 phase_started_at:
                   type: string
                   format: date-time
@@ -934,7 +934,7 @@ components:
         cast_by: { type: string, format: uuid, description: The member whose scan completed the pattern. }
         cast_at: { type: string, format: date-time, description: When (the completing scan's time). }
         already_completed: { type: boolean, description: The team had cast this pattern before, so its progress didn't grow. }
-        damage: { type: integer, description: "What the cast spell deals: the pattern's damage.", example: 198 }
+        damage: { type: integer, description: "What the cast spell deals: the pattern's damage.", example: 205 }
         dealt:
           type: integer
           minimum: 0
@@ -942,7 +942,7 @@ components:
             The damage it dealt to a boss: `damage` × the team's multiplier at the time, rounded. 0 if every boss
             was already defeated (or for casts from before bosses existed). A cast that defeats a boss loses the
             rest: it never carries to the next boss.
-          example: 198
+          example: 205
         boss: { type: ["integer", "null"], description: The serial of the boss it hit, or null if none., example: 1 }
         defeated_boss: { type: boolean, description: This cast defeated that boss. }
     Boss:

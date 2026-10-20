@@ -19,6 +19,7 @@ Tunables appear with their `config.toml` key: **1.5** (`spell.walkability`), **0
 | `TourM` ($P_{\text{tour}}$) | Shortest closed Euclidean loop connecting all waypoints in the pattern (0 for 1 point, out-and-back for 2 points, Traveling Salesperson closed loop for $\ge 3$ points). |
 | `WalkM` ($P_{\text{adj}}$) | Realistic campus walking distance in metres: $P_{\text{tour}} \times \text{walkability}$ (`spell.walkability`). |
 | `Damage` | Integer score dealt by casting the spell. Stored in `pattern.damage`. |
+| `DamageRules` | The formula's coefficients, built from `config.toml` (`spell.base`, `spell.bonus.concave_quad`, `spell.per_100m`, `spell.walkability`, and `game.max_pattern_points` as `MaxPoints`). `DamageRules.Damage(pts)` returns a pattern's damage, or an error for a size outside 1–`MaxPoints` or one with no `spell.base` entry (never a silent 0). |
 | `Generator` | The offline CLI tool `cmd/spells` that reads coordinates and patterns and writes `seeds/dev_2025_spells.sql`. |
 | `Drift Test` | The automated test in `internal/spells/tests/` that verifies stored damage in Postgres matches recomputed damage from current coordinates and config. |
 
@@ -79,7 +80,7 @@ Pattern `87` in `dev_2025.sql` is a `square` composed of four waypoints:
 - `1008` Cluster 1 (C1): `(28.52440905859402, 77.57308311017349)` $\to X = -117.838\text{ m}, Y = -130.304\text{ m}$
 
 ### Steps:
-1. **$k = 4$ waypoints**, convex $\implies \text{Base} = 179$, $\text{Bonus} = 0$.
+1. **$k = 4$ waypoints**, convex $\implies \text{Base} = 186$, $\text{Bonus} = 0$.
 2. **Shortest closed tour loop:** $1001 \to 1002 \to 1007 \to 1008 \to 1001$:
    - $1001 \to 1002 = 148.01\text{ m}$
    - $1002 \to 1007 = 618.91\text{ m}$
@@ -89,11 +90,11 @@ Pattern `87` in `dev_2025.sql` is a `square` composed of four waypoints:
 3. **Adjusted walking distance:**
    - $P_{\text{adj}} = 1.5 \times 1,557.96 = \mathbf{2,336.93\text{ m}}$.
 4. **Damage calculation:**
-   - $\text{Damage} = \operatorname{round}\left(179 + 0 + 0.8 \times \frac{2,336.93}{100}\right) = \operatorname{round}(179 + 18.695) = \mathbf{198}$.
+   - $\text{Damage} = \operatorname{round}\left(186 + 0 + 0.8 \times \frac{2,336.93}{100}\right) = \operatorname{round}(204.695) = \mathbf{205}$.
 
 Stored in Postgres as:
 ```sql
-UPDATE pattern SET damage = 198 WHERE id = 87;
+UPDATE pattern SET damage = 205 WHERE id = 87;
 ```
 
 ---
@@ -104,11 +105,11 @@ Across all 1,474 possible subsets of the 11 campus checkpoints ($\sum_{k=2}^{6} 
 
 | $k$ | Shape Classification | Total Combinations | Convex | Concave | Actual Damage Range | Target Range |
 |:---:|---|:---:|:---:|:---:|:---:|:---:|
-| **2** | Line Segment | 55 | 55 | 0 | 22 – 43 (median 28) | $30 \pm 5$ |
-| **3** | Triangle | 165 | 165 | 0 | 58 – 79 (median 69) | $70 \pm 15$ |
-| **4** | Convex Quad | 262 | 262 | 0 | 189 – 208 (median 201) | $200 \pm 25$ |
-| **4** | Concave Quad | 68 | 0 | 68 | 265 – 281 (median 275) | $275 \pm 30$ |
-| **5** | Pentagon | 462 | 235 | 227 | 389 – 405 (median 400) | $400 \pm 40$ |
+| **2** | Line Segment | 55 | 55 | 0 | 26 – 47 (median 32) | $30 \pm 5$ |
+| **3** | Triangle | 165 | 165 | 0 | 64 – 85 (median 75) | $70 \pm 15$ |
+| **4** | Convex Quad | 262 | 262 | 0 | 196 – 215 (median 208) | $200 \pm 25$ |
+| **4** | Concave Quad | 68 | 0 | 68 | 272 – 288 (median 282) | $275 \pm 30$ |
+| **5** | Pentagon | 462 | 235 | 227 | 397 – 413 (median 408) | $400 \pm 40$ |
 | **6** | Hexagon | 462 | 123 | 339 | 1200 (fixed) | 1200 |
 
 *(Note: The 2025 dev seed implements 359 hand-reviewed patterns across sizes 3–4).*
@@ -134,9 +135,9 @@ go run . seed              # applies it to the database
 Commit the regenerated seed file: the drift test compares it against a fresh computation.
 
 ### What it does:
-1. Connects to `DATABASE_URL`.
-2. Reads every waypoint (`id`, `latitude`, `longitude`) and pattern from Postgres.
-3. Computes the damage for every pattern using `internal/spells`.
+1. Reads every waypoint (`id`, `latitude`, `longitude`) and pattern from Postgres at `DATABASE_URL`. Without `DATABASE_URL`, it parses them from `seeds/dev_2025.sql` instead (and logs that it did); both give the same patterns for the committed seed.
+2. Builds one `DamageRules` from `config.toml`.
+3. Computes every pattern's damage with `DamageRules.Damage`; a pattern it can't score stops the run with its ID, writing nothing.
 4. Overwrites `backend/internal/platform/postgres/seeds/dev_2025_spells.sql` with deterministic `UPDATE pattern SET damage = ... WHERE id = ...;` statements.
 5. `SeedDev2025` applies this file right after `dev_2025.sql`, ensuring fresh databases have damage populated.
 
@@ -151,3 +152,20 @@ The test `TestPatternDamageDrift` in `internal/spells/tests/spells_test.go`:
 4. Compares computed damage to the stored `pattern.damage` column.
 
 **If any coordinate or config value changes without re-running `go run ./cmd/spells`, the drift test fails immediately in CI.**
+
+## 8. The Damage Lookup Check
+
+`damage_lookup.json` (repository root) is the source of truth for 2026 damage: every combination of 2 to 6 of the 10 2026 checkpoints, with its tour, hull and damage. Nothing reads it at runtime; the game reads `pattern.damage`. `TestDamageLookupMatchesConfig` keeps it and `config.toml` in step:
+1. Its `damage_coefficients` must equal `config.toml`'s `[spell]` values.
+2. Every combination, recomputed from the JSON's own checkpoint coordinates with `DamageRules`, must have the JSON's damage (837 of 837 today).
+
+Retuning means changing both together: edit `[spell]` and regenerate the JSON (or the reverse), then re-run `go run ./cmd/spells` for the seed.
+
+## 9. Tests
+
+| Test | Covers |
+|---|---|
+| `TestPureMathGeometry` | No database: a 1-point pattern deals `spell.base.1`; a 2-point tour is out and back; a 100 m square's tour; the convex hull drops an interior point; a concave quad gets exactly `spell.bonus.concave_quad` more; doubling `spell.per_100m` adds the formula's distance term; the biggest size (`game.max_pattern_points`) deals `spell.base` flat; an empty pattern, one past `MaxPoints`, and a size missing from `spell.base` are errors |
+| `TestSeedPatternGeometryProperties` | The 2025 seed: 359 patterns, positive damage, hull no bigger than the pattern, square 87's tour within 1 m of 1,557.96 m, every stored damage equal to `DamageRules.Damage` |
+| `TestPatternDamageDrift` | Every stored `pattern.damage` equals a fresh computation from the seed's coordinates and `config.toml`; lists each drifted pattern and says to re-run `go run ./cmd/spells` |
+| `TestDamageLookupMatchesConfig` | `damage_lookup.json`'s coefficients equal `[spell]`, and all 837 of its combinations recompute to its damage |

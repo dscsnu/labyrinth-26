@@ -137,9 +137,9 @@ Nothing is written at runtime, so a restart rebuilds the list exactly from the s
 Applied by `teamstate` (`deal` in `read.go`, called by `Scan` when a scan completes a pattern). Stated here because they define what a boss is for.
 
 1. A team fights the boss at index `Defeated` (serial `Defeated+1`), starting at boss 1 with 0 damage and multiplier 1.
-2. Each cast deals **`round(pattern damage × multiplier)`** (`math.Round`: halves round away from zero, e.g. 198 × 1.5 = 297).
+2. Each cast deals **`round(pattern damage × multiplier)`** (`math.Round`: halves round away from zero, e.g. 205 × 1.5 = 307.5 → **308**).
 3. Damage adds to the current boss's total. When the total reaches the boss's **HP** (≥), the boss is defeated: `Defeated` goes up by one and the total resets to 0.
-4. **Overkill is lost.** A cast never carries damage over to the next boss: a cast of 198 on a boss with 7 HP left defeats it, and the next boss starts at 0.
+4. **Overkill is lost.** A cast never carries damage over to the next boss: a cast of 205 on a boss with 7 HP left defeats it, and the next boss starts at 0.
 5. **One cast defeats at most one boss**, by rule 4.
 6. **After the last boss**, `Defeated` = `game.bosses`: `boss` is `null` in `team_state`, and casts still count toward patterns, shapes and the cast log but deal **0** and hit no boss (`dealt: 0`, `boss: null`).
 7. **The multiplier** is per team, stored in `team_boss.multiplier`, default 1. **Nothing sets it yet**: it's there for a future power-up. Casts never change it.
@@ -162,17 +162,17 @@ Applied by `teamstate` (`BossProgress.at`, `catchUp`, the attack timer). Health 
 ### 1. Loading the seed
 `game.bosses` = 6. `selectBosses` returns 6 rows, serials 1…6. `New` checks count (6 = 6), then each row: serial = index+1, name, asset, HP > 0; then the rules: the interval is whole seconds and at least 1 s (600 s), the boss has a damage entry, ≥ 0. `list[0]` is Matthew Patel (25 HP, attacks every 600 s for 1). Log: `loaded bosses bosses=6`.
 
-### 2. A team fights bosses 1–3 (square, damage 198, multiplier 1)
+### 2. A team fights bosses 1–3 (square, damage 205, multiplier 1)
 | Cast | Before | Dealt | After | `last_cast` | Event type |
 |---|---|---|---|---|---|
-| 1 | boss 1, 0/25 | 198 | 198 ≥ 25: boss 2, 0/100, `bosses_defeated 1` | `dealt 198, boss 1, defeated_boss true` | `boss_defeated` |
-| 2 | boss 2, 0/100 | 198 | 198 ≥ 100: boss 3, 0/250, `bosses_defeated 2` | `dealt 198, boss 2, defeated_boss true` | `boss_defeated` |
-| 3 | boss 3, 0/250 | 198 | boss 3, 198/250 | `dealt 198, boss 3, defeated_boss false` | `spell_cast` |
+| 1 | boss 1, 0/25 | 205 | 205 ≥ 25: boss 2, 0/100, `bosses_defeated 1` | `dealt 205, boss 1, defeated_boss true` | `boss_defeated` |
+| 2 | boss 2, 0/100 | 205 | 205 ≥ 100: boss 3, 0/250, `bosses_defeated 2` | `dealt 205, boss 2, defeated_boss true` | `boss_defeated` |
+| 3 | boss 3, 0/250 | 205 | boss 3, 205/250 | `dealt 205, boss 3, defeated_boss false` | `spell_cast` |
 
-The 173 points past boss 1's 25 HP, and the 98 past boss 2's 100, are lost (rule 4). `team_boss` after cast 3: `defeated 2, damage 198, multiplier 1`.
+The 180 points past boss 1's 25 HP, and the 105 past boss 2's 100, are lost (rule 4). `team_boss` after cast 3: `defeated 2, damage 205, multiplier 1`.
 
 ### 3. Multiplier 1.5
-An admin (by SQL, for now) sets `team_boss.multiplier = 1.5`, then the backend restarts. The square now deals `round(198 × 1.5)` = **297**; `last_cast.damage` is still 198, `last_cast.dealt` is 297. The cast's upsert writes `defeated` and `damage` only, so the multiplier stays 1.5.
+An admin (by SQL, for now) sets `team_boss.multiplier = 1.5`, then the backend restarts. The square now deals `round(205 × 1.5)` = `round(307.5)` = **308**; `last_cast.damage` is still 205, `last_cast.dealt` is 308. The cast's upsert writes `defeated` and `damage` only, so the multiplier stays 1.5.
 
 ### 4. Every boss defeated
 After the sixth defeat (Gideon): `bosses_defeated 6`, `boss null`. The next cast: pattern counted, `cast_count` up, `dealt 0`, `boss null`, `defeated_boss false`, type `spell_cast`.

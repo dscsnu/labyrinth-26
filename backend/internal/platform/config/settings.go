@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,15 +66,7 @@ type SpellBonusSettings struct {
 
 // BaseDamage returns Base keyed by point count as an int. validate has checked
 // every key is a size from 1 to game.max_pattern_points.
-func (s SpellSettings) BaseDamage() map[int]int {
-	out := make(map[int]int, len(s.Base))
-	for k, v := range s.Base {
-		var pts int
-		fmt.Sscanf(k, "%d", &pts)
-		out[pts] = v
-	}
-	return out
-}
+func (s SpellSettings) BaseDamage() map[int]int { return intKeys(s.Base) }
 
 // TeamSettings is config.toml's [teams] table.
 type TeamSettings struct {
@@ -117,14 +110,27 @@ type BossAttackSettings struct {
 
 // BossDamage returns Damage keyed by serial as an int. validate has checked
 // every key is a serial from 1 to game.bosses.
-func (b BossAttackSettings) BossDamage() map[int]int {
-	out := make(map[int]int, len(b.Damage))
-	for k, v := range b.Damage {
-		var serial int
-		fmt.Sscanf(k, "%d", &serial)
-		out[serial] = v
+func (b BossAttackSettings) BossDamage() map[int]int { return intKeys(b.Damage) }
+
+// intKeys returns m with its keys as ints. TOML table keys are strings, so
+// tables keyed by a number ([game.boss_attack.damage], [spell.base]) decode as
+// map[string]int; validate has checked every key with intKey, so none is
+// skipped here in practice.
+func intKeys(m map[string]int) map[int]int {
+	out := make(map[int]int, len(m))
+	for k, v := range m {
+		if n, ok := intKey(k); ok {
+			out[n] = v
+		}
 	}
 	return out
+}
+
+// intKey parses k as a plain decimal int, as it would be written: "6", not
+// "+6", "06" or "6x". ok is false otherwise.
+func intKey(k string) (int, bool) {
+	n, err := strconv.Atoi(k)
+	return n, err == nil && strconv.Itoa(n) == k
 }
 
 // QRSettings is config.toml's [qr] table.
@@ -275,9 +281,8 @@ func (s Settings) validate() []error {
 		check(hasKey(s.Game.BossAttack.Damage, fmt.Sprint(serial)), "game.boss_attack.damage has no entry for boss %d", serial)
 	}
 	for k, v := range s.Game.BossAttack.Damage {
-		var serial int
-		_, err := fmt.Sscanf(k, "%d", &serial)
-		check(err == nil && fmt.Sprint(serial) == k && serial >= 1 && serial <= s.Game.Bosses,
+		serial, ok := intKey(k)
+		check(ok && serial >= 1 && serial <= s.Game.Bosses,
 			"game.boss_attack.damage.%s is not a boss serial (1-%d, game.bosses)", k, s.Game.Bosses)
 		check(v >= 0, "game.boss_attack.damage.%s must not be negative", k)
 	}
@@ -289,9 +294,8 @@ func (s Settings) validate() []error {
 		check(hasKey(s.Spell.Base, fmt.Sprint(pts)), "spell.base has no entry for size %d", pts)
 	}
 	for k, v := range s.Spell.Base {
-		var pts int
-		_, err := fmt.Sscanf(k, "%d", &pts)
-		check(err == nil && fmt.Sprint(pts) == k && pts >= 1 && pts <= s.Game.MaxPatternPoints,
+		pts, ok := intKey(k)
+		check(ok && pts >= 1 && pts <= s.Game.MaxPatternPoints,
 			"spell.base.%s is not a valid pattern size (1-%d, game.max_pattern_points)", k, s.Game.MaxPatternPoints)
 		check(v > 0, "spell.base.%s must be positive", k)
 	}
