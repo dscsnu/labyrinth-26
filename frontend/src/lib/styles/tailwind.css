@@ -19,6 +19,11 @@
     --color-gold-light: #e0c068;
     --color-gold-dark: #7a5f22;
     --color-parchment: #f1e3b8;
+    /* /play's top bar, behind the boss. */
+    --color-brown: #5c3a21;
+    /* The spell book's page: off-white paper with faint ruled lines. */
+    --color-paper: #fbf8ef;
+    --color-paper-line: #e4ddc9;
     --color-go: #5fb04a;
     --color-danger: #c0453a;
 

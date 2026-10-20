@@ -1,0 +1,167 @@
+<script lang="ts">
+    import type { Cast, GameShape } from "#lib/types/Game.type.ts";
+    import { untrack } from "svelte";
+    import { fade, fly } from "svelte/transition";
+
+    // The spell book: a sheet of paper that slides up over 90% of the screen.
+    // Each shape is a page: its rules (points, damage range, how many
+    // patterns), then the patterns the team has discovered, from the cast
+    // log, so it fills in live as anyone on the team casts. The arrows at the
+    // bottom turn the pages; close is between them.
+    let {
+        open = $bindable(false),
+        shapes,
+        casts,
+        selected = null,
+    }: {
+        open?: boolean;
+        shapes: GameShape[];
+        casts: Cast[];
+        selected?: string | null;
+    } = $props();
+
+    // Each shape's discovered patterns, first cast first: the waypoints, the
+    // spell's damage and how many times the team has cast it.
+    let discovered = $derived.by(() => {
+        const byShape = new Map<string, Map<string, { pattern: string[]; damage: number; times: number }>>();
+        for (const c of [...casts].reverse()) {
+            const patterns = byShape.get(c.shape) ?? new Map();
+            byShape.set(c.shape, patterns);
+            const key = c.pattern.join("-");
+            const known = patterns.get(key);
+            if (known) known.times++;
+            else patterns.set(key, { pattern: c.pattern, damage: c.damage, times: 1 });
+        }
+        return new Map([...byShape].map(([shape, patterns]) => [shape, [...patterns.values()]]));
+    });
+
+    // The page shown (an index into shapes), and which way the last turn
+    // went, so the new page slides in from that side.
+    let page = $state(0);
+    let dir = $state(1);
+    let shape = $derived(shapes[Math.min(page, shapes.length - 1)]);
+    let known = $derived(shape ? (discovered.get(shape.id) ?? []) : []);
+
+    // Opening the book turns to the team's selected shape, if it has one;
+    // otherwise to the page it was left on. Only on opening: a teammate
+    // selecting while it's open doesn't turn the reader's page.
+    $effect(() => {
+        if (!open) return;
+        const i = untrack(() => shapes.findIndex((s) => s.id === selected));
+        if (i >= 0) page = i;
+    });
+
+    const turn = (by: number) => {
+        const next = page + by;
+        if (next < 0 || next >= shapes.length) return;
+        dir = by;
+        page = next;
+    };
+    const close = () => (open = false);
+
+    const keydown = (e: KeyboardEvent) => {
+        if (!open) return;
+        if (e.key === "Escape") close();
+        else if (e.key === "ArrowLeft") turn(-1);
+        else if (e.key === "ArrowRight") turn(1);
+    };
+
+    const navButton =
+        "pixel-box bg-ink px-3 py-2 text-paper uppercase active:pixel-box-pressed disabled:pointer-events-none disabled:opacity-30";
+</script>
+
+<svelte:window onkeydown={keydown} />
+
+{#if open}
+    <!-- Dims the map; a tap outside the page closes the book. -->
+    <button
+        type="button"
+        aria-label="Close spell book"
+        tabindex="-1"
+        class="fixed inset-0 z-20 bg-ink/60"
+        onclick={close}
+        transition:fade={{ duration: 150 }}
+    ></button>
+
+    <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="spellbook-title"
+        class="fixed inset-x-0 bottom-0 z-30 flex h-[90dvh] flex-col overflow-hidden bg-paper font-pixel text-[16px] leading-[24px] text-ink shadow-[0_-4px_0_0_var(--color-ink)]"
+        transition:fly={{ y: "100%", duration: 250, opacity: 1 }}
+    >
+        <header class="flex items-center justify-between border-b-4 border-ink px-4 py-3">
+            <h2 id="spellbook-title" class="uppercase">Spell book</h2>
+            {#if shapes.length > 0}
+                <span class="text-[8px] leading-[16px]">{page + 1} / {shapes.length}</span>
+            {/if}
+        </header>
+
+        <!-- The page, ruled like notebook paper, one rule per 24px line.
+             Keyed by page so each turn slides the new one in. -->
+        <div
+            class="relative flex-1 overflow-y-auto overscroll-contain bg-[repeating-linear-gradient(transparent_0_23px,var(--color-paper-line)_23px_24px)] px-4 pt-4 pb-8"
+        >
+            {#if shape}
+                {#key page}
+                    <section in:fly={{ x: dir * 48, duration: 200 }}>
+                        <!-- The title, centred across the page. -->
+                        <h3 class="flex flex-wrap items-center justify-center gap-2 text-center text-[24px] leading-[32px] uppercase">
+                            {shape.name}
+                            {#if shape.id === selected}
+                                <span class="bg-gold px-2 text-[8px] leading-[16px]">Selected</span>
+                            {/if}
+                        </h3>
+                        <!-- Where the spell's shape will be drawn: a square half
+                             the paper's width, centred. A placeholder for now. -->
+                        <div
+                            class="mx-auto mt-4 flex aspect-square w-1/2 items-center justify-center border-4 border-dashed border-ink/30 p-2 text-center text-[8px] leading-[16px] opacity-60"
+                        >
+                            After backend frontend integration, I will add the spell shapes
+                        </div>
+                        <dl class="mt-4 grid grid-cols-[auto_1fr] gap-x-4 text-[8px] leading-[24px] uppercase">
+                            <dt class="opacity-60">Points</dt>
+                            <dd>{shape.points.join(" or ")}</dd>
+                            <dt class="opacity-60">Damage range</dt>
+                            <dd>{shape.damage.min === shape.damage.max ? shape.damage.min : `${shape.damage.min} to ${shape.damage.max}`}</dd>
+                            <dt class="opacity-60">Found</dt>
+                            <dd>{known.length} / {shape.patterns} patterns</dd>
+                        </dl>
+                        <h4 class="mt-6 text-[8px] leading-[24px] uppercase opacity-60">Discovered</h4>
+                        {#if known.length > 0}
+                            <ul class="text-[8px] leading-[24px]">
+                                {#each known as p (p.pattern.join("-"))}
+                                    <li class="flex justify-between gap-4">
+                                        <span>{p.pattern.join(" › ")}</span>
+                                        <span class="shrink-0">{p.damage} dmg{p.times > 1 ? ` ×${p.times}` : ""}</span>
+                                    </li>
+                                {/each}
+                            </ul>
+                        {:else}
+                            <p class="text-[8px] leading-[24px]">None yet. Cast one to write it here.</p>
+                        {/if}
+                    </section>
+                {/key}
+            {:else}
+                <p class="text-[8px] leading-[16px] uppercase">No spells loaded.</p>
+            {/if}
+        </div>
+
+        <!-- Previous page (left), close (middle), next page (right). -->
+        <footer class="grid grid-cols-3 items-center border-t-4 border-ink px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <button type="button" aria-label="Previous page" disabled={page <= 0} onclick={() => turn(-1)} class="{navButton} justify-self-start">
+                &lt;
+            </button>
+            <button type="button" onclick={close} class="{navButton} justify-self-center text-[8px] leading-[16px]">Close</button>
+            <button
+                type="button"
+                aria-label="Next page"
+                disabled={page >= shapes.length - 1}
+                onclick={() => turn(1)}
+                class="{navButton} justify-self-end"
+            >
+                &gt;
+            </button>
+        </footer>
+    </div>
+{/if}
