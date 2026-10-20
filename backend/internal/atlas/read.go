@@ -39,8 +39,8 @@ type Pattern struct {
 	Spell Spell
 }
 
-// Spell is what a completed pattern casts: the team's reward for it (the
-// "powerup"). Read once at startup from pattern.damage and
+// Spell is what a completed pattern casts: the team's reward for it. Read
+// once at startup from pattern.damage and
 // pattern.spell_class_id, so reading it during a scan is a plain field
 // access.
 type Spell struct {

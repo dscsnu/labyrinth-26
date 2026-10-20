@@ -58,7 +58,8 @@ Before you finish any change, run the checklist in [§14](#14-before-calling-a-c
 | shape | `Pattern` | one valid set of 4-digit waypoint IDs of a type |
 | point | `Waypoint` | a QR location, 4-digit ID |
 | buffer | `Stack` | a team's accepted scans toward the selected type |
-| spell, powerup (the `feat/damage-lookup` PR) | `Spell` | what completing a pattern casts: the team's reward, one per pattern |
+| spell | `Spell` | what completing a pattern casts: the team's reward, one per pattern |
+| powerup | (not built yet) | a temporary effect a team gets for a limited period of time. Not a spell |
 | class | `SpellClass` | a group of patterns by waypoint count: every 4-point pattern is `class_4`, whatever its shape (`pattern.spell_class_id`) |
 
 ## 2. Architecture at a glance

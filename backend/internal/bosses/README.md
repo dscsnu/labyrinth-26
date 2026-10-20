@@ -36,7 +36,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Bosses count** | `game.bosses`, **6**: how many bosses every team fights. The table must hold exactly that many, or none at all. |
 | **Progress** | A team's place in the sequence: bosses defeated, damage dealt to the current one, and its damage multiplier. Owned by `teamstate` (`State.Boss`, table `team_boss`), not here. |
 | **Dealt** | What one cast does to the current boss: the pattern's damage × the team's multiplier, rounded. Computed by `teamstate`. |
-| **Multiplier** | Per team, default **1**. Nothing changes it yet; it's stored so a future power-up can. |
+| **Multiplier** | Per team, default **1**. Nothing changes it yet; it's stored so a future powerup (a temporary effect) can. |
 
 ## The flow
 1. **Content is loaded.** `go run . seed` (`seeds/2026_bosses.sql`, the last of the 2026 seeds) writes 6 bosses, still with placeholder 2025-theme names; real content would be a migration or a seed of its own. The backend is stopped while content changes.
@@ -142,7 +142,7 @@ Applied by `teamstate` (`deal` in `read.go`, called by `Scan` when a scan comple
 4. **Overkill is lost.** A cast never carries damage over to the next boss: a cast of 274 on a boss with 7 HP left defeats it, and the next boss starts at 0.
 5. **One cast defeats at most one boss**, by rule 4.
 6. **After the last boss**, `Defeated` = `game.bosses`: `boss` is `null` in `team_state`, and casts still count toward patterns, shapes and the cast log but deal **0** and hit no boss (`dealt: 0`, `boss: null`).
-7. **The multiplier** is per team, stored in `team_boss.multiplier`, default 1. **Nothing sets it yet**: it's there for a future power-up. Casts never change it.
+7. **The multiplier** is per team, stored in `team_boss.multiplier`, default 1. **Nothing sets it yet**: it's there for a future powerup. Casts never change it.
 8. Every cast records what it did: `dealt`, the boss's serial (`boss`), and `defeated_boss`.
 9. A team's `team_state` event for a cast that defeats a boss has type **`boss_defeated`** instead of `spell_cast`.
 10. **A defeat starts the next boss's phase** at the cast's time, with the health the team has then: the next boss's attack clock starts from zero.
@@ -275,7 +275,7 @@ No races: the list is built before `Load` returns and never modified, so every g
 | Starting health **10** | `config.toml` `game.health` (at least 1) | Edit, restart; stored phases keep their `phase_health` |
 
 ## Not decided yet
-- **What sets the multiplier.** Only stored and applied; no route or rule changes it. A power-up use case would update `team_boss.multiplier` and teamstate's memory together (a teamstate write, AGENTS.md §6).
+- **What sets the multiplier.** Only stored and applied; no route or rule changes it. A powerup use case would update `team_boss.multiplier` and teamstate's memory together (a teamstate write, AGENTS.md §6).
 - **Overkill carry-over.** Lost by design for now; carrying it to the next boss is a one-line change in `deal`.
 - **Winning.** Defeating every boss doesn't change the team's status (`FINISHED` is still unset) or rank teams; a leaderboard would read `bosses_defeated` and the last `defeated_boss` cast's time.
 - **Config changes mid-event.** A changed `game.boss_attack.interval` or damage applies retroactively to every current phase after a restart (health is derived). If that's ever unwanted, the phase would have to store the boss's interval and damage too.

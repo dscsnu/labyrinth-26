@@ -388,7 +388,7 @@ Every team fights the same **6** (`game.bosses`) bosses in serial order. The bos
 
 **Defeating boss 5 unlocks the big patterns** (`game.unlock_after_bosses`, **5**): `unlocked_points` goes from 4 to 6 and `locked_shapes` empties in the same `boss_defeated` event.
 
-**The multiplier** is stored per team (`team_boss.multiplier`) and applied to every cast, but **nothing sets it yet**: it's 1 for every team unless changed in Postgres with the backend stopped. A future power-up would change it as a teamstate write.
+**The multiplier** is stored per team (`team_boss.multiplier`) and applied to every cast, but **nothing sets it yet**: it's 1 for every team unless changed in Postgres with the backend stopped. A future powerup would change it as a teamstate write.
 
 **What the client shows** (`/play`): the current boss from `GET /api/game/bosses` by `boss.serial` (image, name, description), an HP bar of `hp − boss.damage` of `hp`, the multiplier when it isn't 1, "Every boss defeated!" when `boss` is `null`; a `boss_defeated` event shows "<name> defeated!" on every phone; the cast log shows each cast's `dealt` and the boss it hit.
 
