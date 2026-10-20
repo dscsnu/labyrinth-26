@@ -16,9 +16,11 @@ type Boss struct {
 	// HP is the damage a team must deal to defeat it.
 	HP int `json:"hp"`
 	// AttackIntervalS is how often it attacks, in seconds: every
-	// AttackIntervalS of a team's phase against it.
+	// AttackIntervalS of a team's phase against it. From config.toml
+	// (game.boss_attack.interval, the same for every boss), not the table.
 	AttackIntervalS int `json:"attack_interval_s"`
-	// AttackDamage is what each attack takes off the team's health.
+	// AttackDamage is what each attack takes off the team's health. From
+	// config.toml (game.boss_attack.damage, by serial), not the table.
 	AttackDamage int `json:"attack_damage"`
 }
 

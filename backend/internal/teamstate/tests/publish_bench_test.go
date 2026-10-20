@@ -75,7 +75,7 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 	}
 
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: set.Game.MaxPatternPoints}))
-	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: set.Game.Bosses}))
+	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bossRules(set, true)))
 	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, teamstate.Rules{
 		MaxPatternPoints:    set.Game.MaxPatternPoints,
 		Health:              set.Game.Health,

@@ -357,11 +357,10 @@ func TestSim100Teams(t *testing.T) {
 	}
 	// 1012 is in no pattern: wrong for every shape. Bosses never attack:
 	// this is about requests and streams, not time.
-	if _, err := e.db.Pool().Exec(ctx, `
-		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);
-		UPDATE boss SET attack_interval_s = 315360000;`); err != nil {
+	if _, err := e.db.Pool().Exec(ctx, "INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
 	}
+	e.cfg.Settings.Game.BossAttack.Interval.Duration = 10 * 365 * 24 * time.Hour // never, for this test
 	e = e.restart()
 	admin := e.newAdmin("sim-admin")
 

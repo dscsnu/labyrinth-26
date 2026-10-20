@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding"
 	"errors"
 	"fmt"
 	"os"
@@ -79,6 +80,31 @@ type GameSettings struct {
 	// UnlockAfterBosses is how many bosses a team must defeat to unlock
 	// patterns of LockedPatternPoints or more waypoints.
 	UnlockAfterBosses int `toml:"unlock_after_bosses"`
+	// BossAttack is how bosses attack ([game.boss_attack]).
+	BossAttack BossAttackSettings `toml:"boss_attack"`
+}
+
+// BossAttackSettings is [game.boss_attack]: every boss attacks a team every
+// Interval of the team's fight against it, for its Damage.
+type BossAttackSettings struct {
+	// Interval is the time between a boss's attacks, the same for every
+	// boss.
+	Interval Duration `toml:"interval"`
+	// Damage is each boss's attack damage by serial ([game.boss_attack.damage]:
+	// "1" = 1, …): exactly the serials 1 to game.bosses.
+	Damage map[string]int `toml:"damage"`
+}
+
+// BossDamage returns Damage keyed by serial as an int. validate has checked
+// every key is a serial from 1 to game.bosses.
+func (b BossAttackSettings) BossDamage() map[int]int {
+	out := make(map[int]int, len(b.Damage))
+	for k, v := range b.Damage {
+		var serial int
+		fmt.Sscanf(k, "%d", &serial)
+		out[serial] = v
+	}
+	return out
 }
 
 // QRSettings is config.toml's [qr] table.
@@ -176,20 +202,32 @@ func LoadSettings(path string) (Settings, error) {
 	return s, nil
 }
 
-// settingKeys lists every key Settings expects, as [table, key] from the
-// toml tags, so a missing key is an error even when zero would be valid
-// (e.g. spell.per_100m).
+// settingKeys lists every key Settings expects, as its path of toml tags
+// ([table, key], or deeper for a nested table such as
+// [game, boss_attack, interval]), so a missing key is an error even when
+// zero would be valid. A struct field is a nested table, unless it decodes
+// from text itself (Duration); a map is one key holding a table of its own.
 func settingKeys() [][]string {
 	var keys [][]string
-	top := reflect.TypeOf(Settings{})
-	for i := range top.NumField() {
-		table := top.Field(i)
-		for j := range table.Type.NumField() {
-			keys = append(keys, []string{table.Tag.Get("toml"), table.Type.Field(j).Tag.Get("toml")})
+	var walk func(t reflect.Type, path []string)
+	walk = func(t reflect.Type, path []string) {
+		for i := range t.NumField() {
+			f := t.Field(i)
+			key := append(append([]string{}, path...), f.Tag.Get("toml"))
+			if f.Type.Kind() == reflect.Struct && !reflect.PointerTo(f.Type).Implements(textUnmarshaler) {
+				walk(f.Type, key)
+				continue
+			}
+			keys = append(keys, key)
 		}
 	}
+	walk(reflect.TypeOf(Settings{}), nil)
 	return keys
 }
+
+// textUnmarshaler is encoding.TextUnmarshaler's type: a struct that
+// implements it (Duration) is a value, not a nested table.
+var textUnmarshaler = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
 // validate returns every out-of-range value, including missing ones (which
 // decode as zero).
@@ -212,6 +250,17 @@ func (s Settings) validate() []error {
 		"game.locked_pattern_points must be 1-%d (game.max_pattern_points + 1 locks nothing)", s.Game.MaxPatternPoints+1)
 	check(s.Game.UnlockAfterBosses >= 0 && s.Game.UnlockAfterBosses <= s.Game.Bosses,
 		"game.unlock_after_bosses must be 0-%d (game.bosses)", s.Game.Bosses)
+	check(s.Game.BossAttack.Interval.Duration > 0, "game.boss_attack.interval must be positive")
+	for serial := 1; serial <= s.Game.Bosses; serial++ {
+		check(hasKey(s.Game.BossAttack.Damage, fmt.Sprint(serial)), "game.boss_attack.damage has no entry for boss %d", serial)
+	}
+	for k, v := range s.Game.BossAttack.Damage {
+		var serial int
+		_, err := fmt.Sscanf(k, "%d", &serial)
+		check(err == nil && fmt.Sprint(serial) == k && serial >= 1 && serial <= s.Game.Bosses,
+			"game.boss_attack.damage.%s is not a boss serial (1-%d, game.bosses)", k, s.Game.Bosses)
+		check(v >= 0, "game.boss_attack.damage.%s must not be negative", k)
+	}
 	check(s.QR.Rotate.Duration > 0, "qr.rotate must be positive")
 	check(s.QR.Tolerance.Duration > 0, "qr.tolerance must be positive")
 	check(s.Spell.PerPoint > 0, "spell.per_point must be positive")
@@ -243,4 +292,10 @@ func SettingsPath() string {
 		return p
 	}
 	return "config.toml"
+}
+
+// hasKey reports whether m has key k.
+func hasKey(m map[string]int, k string) bool {
+	_, ok := m[k]
+	return ok
 }

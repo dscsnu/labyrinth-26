@@ -38,9 +38,15 @@ import (
 const (
 	// simTeams is how many teams play at once.
 	simTeams = 100
-	// simStep is the game time between steps. Shorter than every seed boss's
-	// attack interval, so no step passes two attacks of one boss.
+	// simStep is the game time between steps. Shorter than
+	// simAttackInterval, so no step passes two attacks of one boss.
 	simStep = 30 * time.Second
+	// simAttackInterval is how often the league's bosses attack: shorter
+	// than config.toml's game.boss_attack.interval, so the simulation's 90
+	// minutes knock teams out (boss 1 alone needs 10 attacks at 1 damage:
+	// 50 min) and the restart test's downtimes span several attacks, yet
+	// long enough that the fastest teams get through every boss.
+	simAttackInterval = 5 * time.Minute
 	// simSteps is how long the game runs: 180 × 30 s = 90 min, long enough
 	// for an idle team to be knocked out by boss 1 (10 attacks × 5 min).
 	simSteps = 180
@@ -150,11 +156,6 @@ func newLeague(t testing.TB, attacks bool) *league {
 	if err := db.SeedDev2025(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !attacks {
-		if _, err := db.Pool().Exec(ctx, "UPDATE boss SET attack_interval_s = $1", int(neverAttack/time.Second)); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if _, err := db.Pool().Exec(ctx, simBigPatterns); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +210,13 @@ func newLeague(t testing.TB, attacks bool) *league {
 			l.big = append(l.big, p)
 		}
 	}
-	l.bosses = pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: set.Game.Bosses}))
+	// The league's bosses attack every simAttackInterval with config.toml's
+	// damages, so 90 minutes see many attacks of every boss.
+	br := bossRules(set, attacks)
+	if attacks {
+		br.AttackInterval = simAttackInterval
+	}
+	l.bosses = pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
 	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, l.hub, pgtest.Quiet, l.rules))
 	return l
 }
@@ -309,7 +316,7 @@ func TestGameLoopSimulation(t *testing.T) {
 // as many steps more. For each downtime:
 //
 //   - 0: the state must survive the restart exactly (JSON, version aside)
-//   - 90 s, shorter than every seed boss's attack interval
+//   - 90 s, shorter than the league's attack interval (simAttackInterval)
 //   - 15 min, several attacks of every boss
 //   - 60 min, long enough that teams are knocked out while it's down
 //

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"labyrinth/internal/platform/postgres"
 )
@@ -23,6 +24,12 @@ type Rules struct {
 	// Count is how many bosses every team fights (game.bosses); the content
 	// must be exactly serials 1…Count.
 	Count int
+	// AttackInterval is how often every boss attacks
+	// (game.boss_attack.interval).
+	AttackInterval time.Duration
+	// AttackDamage is each boss's attack damage by serial
+	// (game.boss_attack.damage); it must cover every stored boss.
+	AttackDamage map[int]int
 }
 
 // Load reads the boss table, validates it against rules, and builds the
@@ -46,8 +53,9 @@ func Load(ctx context.Context, pg *postgres.DB, log *slog.Logger, rules Rules) (
 }
 
 // New validates list (in serial order) against rules and builds the Bosses:
-// exactly serials 1…rules.Count, each with a name, an asset, positive HP, a
-// positive attack interval and a non-negative attack damage.
+// exactly serials 1…rules.Count, each with a name, an asset and positive
+// HP. Each boss's attack comes from rules: the interval (positive, whole
+// seconds) and its damage by serial (present, non-negative).
 // An empty list is allowed too, like an empty atlas, so a fresh database
 // boots before content is loaded: then Count is 0 and no cast hits a boss.
 // Load calls it with what Postgres holds; tests call it with a fixture.
@@ -67,11 +75,17 @@ func New(list []Boss, rules Rules) (*Bosses, error) {
 			return nil, fmt.Errorf("boss %d has no asset", boss.Serial)
 		case boss.HP <= 0:
 			return nil, fmt.Errorf("boss %d: hp must be positive, got %d", boss.Serial, boss.HP)
-		case boss.AttackIntervalS <= 0:
-			return nil, fmt.Errorf("boss %d: attack_interval_s must be positive, got %d", boss.Serial, boss.AttackIntervalS)
-		case boss.AttackDamage < 0:
-			return nil, fmt.Errorf("boss %d: attack_damage must not be negative, got %d", boss.Serial, boss.AttackDamage)
 		}
+		damage, ok := rules.AttackDamage[boss.Serial]
+		switch {
+		case rules.AttackInterval < time.Second || rules.AttackInterval%time.Second != 0:
+			return nil, fmt.Errorf("game.boss_attack.interval must be whole seconds, at least 1s; got %v", rules.AttackInterval)
+		case !ok:
+			return nil, fmt.Errorf("boss %d has no attack damage (game.boss_attack.damage)", boss.Serial)
+		case damage < 0:
+			return nil, fmt.Errorf("boss %d: attack damage must not be negative, got %d", boss.Serial, damage)
+		}
+		boss.AttackIntervalS, boss.AttackDamage = int(rules.AttackInterval/time.Second), damage
 		b.list[i] = boss
 	}
 	return b, nil

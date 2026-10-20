@@ -11,20 +11,27 @@ import (
 	"labyrinth/internal/platform/postgres/pgtest"
 )
 
+// threeRules are valid rules for three(): every boss attacks every 5 min,
+// for 1, 0 and 5.
+func threeRules() bosses.Rules {
+	return bosses.Rules{Count: 3, AttackInterval: 5 * time.Minute, AttackDamage: map[int]int{1: 1, 2: 0, 3: 5}}
+}
+
 // three returns a valid three-boss sequence.
 func three() []bosses.Boss {
 	return []bosses.Boss{
-		{Serial: 1, Name: "One", Asset: "bosses/1.png", Description: "first", HP: 100, AttackIntervalS: 300, AttackDamage: 1},
-		{Serial: 2, Name: "Two", Asset: "bosses/2.png", HP: 200, AttackIntervalS: 60, AttackDamage: 0},
-		{Serial: 3, Name: "Three", Asset: "bosses/3.png", HP: 300, AttackIntervalS: 1, AttackDamage: 5},
+		{Serial: 1, Name: "One", Asset: "bosses/1.png", Description: "first", HP: 100},
+		{Serial: 2, Name: "Two", Asset: "bosses/2.png", HP: 200},
+		{Serial: 3, Name: "Three", Asset: "bosses/3.png", HP: 300},
 	}
 }
 
 // TestNew checks New's validation: exactly serials 1…Count (or none at all),
-// each with a name, an asset, positive HP, a positive attack interval and a
-// non-negative attack damage; and lookups by index.
+// each with a name, an asset and positive HP; the attack rules (a whole-second
+// interval, a non-negative damage for every boss), filled into each Boss;
+// and lookups by index.
 func TestNew(t *testing.T) {
-	b, err := bosses.New(three(), bosses.Rules{Count: 3})
+	b, err := bosses.New(three(), threeRules())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +39,25 @@ func TestNew(t *testing.T) {
 		b.At(0).AttackInterval() != 5*time.Minute || b.At(2).AttackDamage != 5 {
 		t.Fatalf("bosses: %+v", b.All())
 	}
-	if empty, err := bosses.New(nil, bosses.Rules{Count: 3}); err != nil || empty.Count() != 0 {
+	if empty, err := bosses.New(nil, threeRules()); err != nil || empty.Count() != 0 {
 		t.Fatalf("an empty table should load with Count 0: %v", err)
+	}
+
+	// Attack rules: from config.toml, applied to every boss.
+	for name, c := range map[string]struct {
+		edit func(*bosses.Rules)
+		want string
+	}{
+		"zero interval":        {func(r *bosses.Rules) { r.AttackInterval = 0 }, "game.boss_attack.interval must be whole seconds, at least 1s"},
+		"part of a second":     {func(r *bosses.Rules) { r.AttackInterval = 1500 * time.Millisecond }, "must be whole seconds"},
+		"no damage for a boss": {func(r *bosses.Rules) { delete(r.AttackDamage, 2) }, "boss 2 has no attack damage"},
+		"negative damage":      {func(r *bosses.Rules) { r.AttackDamage[3] = -1 }, "boss 3: attack damage must not be negative"},
+	} {
+		rules := threeRules()
+		c.edit(&rules)
+		if _, err := bosses.New(three(), rules); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want %q", name, err, c.want)
+		}
 	}
 
 	cases := map[string]struct {
@@ -44,22 +68,27 @@ func TestNew(t *testing.T) {
 		"too many": {func(l []bosses.Boss) []bosses.Boss {
 			return append(l, bosses.Boss{Serial: 4, Name: "x", Asset: "a", HP: 1, AttackIntervalS: 1})
 		}, "4 bosses stored"},
-		"zero attack interval":   {func(l []bosses.Boss) []bosses.Boss { l[1].AttackIntervalS = 0; return l }, "boss 2: attack_interval_s must be positive"},
-		"negative attack damage": {func(l []bosses.Boss) []bosses.Boss { l[2].AttackDamage = -1; return l }, "boss 3: attack_damage must not be negative"},
-		"gap":                    {func(l []bosses.Boss) []bosses.Boss { l[2].Serial = 4; return l }, "boss serial 4 where 3 was expected"},
-		"starts at zero":         {func(l []bosses.Boss) []bosses.Boss { l[0].Serial = 0; return l }, "boss serial 0 where 1 was expected"},
-		"no name":                {func(l []bosses.Boss) []bosses.Boss { l[1].Name = ""; return l }, "boss 2 has no name"},
-		"no asset":               {func(l []bosses.Boss) []bosses.Boss { l[1].Asset = ""; return l }, "boss 2 has no asset"},
-		"zero hp":                {func(l []bosses.Boss) []bosses.Boss { l[0].HP = 0; return l }, "boss 1: hp must be positive"},
-		"negative hp":            {func(l []bosses.Boss) []bosses.Boss { l[2].HP = -5; return l }, "boss 3: hp must be positive"},
-		"duplicate serial":       {func(l []bosses.Boss) []bosses.Boss { l[1].Serial = 1; return l }, "boss serial 1 where 2 was expected"},
+		"gap":              {func(l []bosses.Boss) []bosses.Boss { l[2].Serial = 4; return l }, "boss serial 4 where 3 was expected"},
+		"starts at zero":   {func(l []bosses.Boss) []bosses.Boss { l[0].Serial = 0; return l }, "boss serial 0 where 1 was expected"},
+		"no name":          {func(l []bosses.Boss) []bosses.Boss { l[1].Name = ""; return l }, "boss 2 has no name"},
+		"no asset":         {func(l []bosses.Boss) []bosses.Boss { l[1].Asset = ""; return l }, "boss 2 has no asset"},
+		"zero hp":          {func(l []bosses.Boss) []bosses.Boss { l[0].HP = 0; return l }, "boss 1: hp must be positive"},
+		"negative hp":      {func(l []bosses.Boss) []bosses.Boss { l[2].HP = -5; return l }, "boss 3: hp must be positive"},
+		"duplicate serial": {func(l []bosses.Boss) []bosses.Boss { l[1].Serial = 1; return l }, "boss serial 1 where 2 was expected"},
 	}
 	for name, c := range cases {
-		_, err := bosses.New(c.edit(three()), bosses.Rules{Count: 3})
+		rules := threeRules()
+		_, err := bosses.New(c.edit(three()), rules)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: got %v, want %q", name, err, c.want)
 		}
 	}
+}
+
+// seedRules are config.toml's boss attack rules with count bosses.
+func seedRules(t *testing.T, count int) bosses.Rules {
+	set := configtest.Settings(t)
+	return bosses.Rules{Count: count, AttackInterval: set.Game.BossAttack.Interval.Duration, AttackDamage: set.Game.BossAttack.BossDamage()}
 }
 
 // seedBosses is how many bosses the 2025 dev seed has.
@@ -75,13 +104,13 @@ func TestLoad(t *testing.T) {
 	}
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "bosses_test"))
-	if b := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: 7})); b.Count() != 0 {
+	if b := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, seedRules(t, 7))); b.Count() != 0 {
 		t.Fatalf("before seeding: %d bosses", b.Count())
 	}
 	if err := db.SeedDev2025(ctx); err != nil {
 		t.Fatal(err)
 	}
-	b, err := bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: n})
+	b, err := bosses.Load(ctx, db, pgtest.Quiet, seedRules(t, n))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +122,7 @@ func TestLoad(t *testing.T) {
 			t.Fatalf("the seed's HP should rise: boss %d has %d after %d", boss.Serial, boss.HP, b.At(i-1).HP)
 		}
 	}
-	if _, err := bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: n - 1}); err == nil ||
+	if _, err := bosses.Load(ctx, db, pgtest.Quiet, seedRules(t, n-1)); err == nil ||
 		!strings.Contains(err.Error(), "game.bosses is") {
 		t.Fatalf("a stored count over game.bosses should be refused: %v", err)
 	}

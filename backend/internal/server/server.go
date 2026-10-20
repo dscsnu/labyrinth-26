@@ -61,7 +61,9 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		return nil, err
 	}
 	// So are the bosses every team fights.
-	theBosses, err := bosses.Load(ctx, db, log, bosses.Rules{Count: set.Game.Bosses})
+	theBosses, err := bosses.Load(ctx, db, log, bosses.Rules{
+		Count: set.Game.Bosses, AttackInterval: set.Game.BossAttack.Interval.Duration, AttackDamage: set.Game.BossAttack.BossDamage(),
+	})
 	if err != nil {
 		return nil, err
 	}

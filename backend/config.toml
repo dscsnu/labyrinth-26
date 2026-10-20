@@ -42,6 +42,23 @@ health = 10
 locked_pattern_points = 5
 unlock_after_bosses = 5
 
+[game.boss_attack]
+# While a team hasn't defeated a boss, the boss attacks it every interval,
+# counted from when the team started fighting it (or was last revived).
+# Allowed: more than 0.
+interval = "10m"
+
+[game.boss_attack.damage]
+# What each boss's attack takes off a team's health, by boss serial: exactly
+# the serials 1 to game.bosses. For now, each boss does its serial number.
+# Allowed: 0 or more.
+1 = 1
+2 = 2
+3 = 3
+4 = 4
+5 = 5
+6 = 6
+
 [qr]
 # How often a waypoint's rotating QR changes, and thus how often the /qr
 # display re-issues a token. Allowed: more than 0.

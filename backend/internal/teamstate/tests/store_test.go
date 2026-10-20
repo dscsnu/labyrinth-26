@@ -23,6 +23,7 @@ import (
 
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/bosses"
+	"labyrinth/internal/platform/config"
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
@@ -152,15 +153,27 @@ type fixtureOptions struct {
 	sql string
 	// rules adjusts the rules from config.toml.
 	rules func(*teamstate.Rules)
-	// attacks keeps the seed's boss attack intervals. Without it every boss
-	// attacks only after neverAttack, so tests that move the clock by
+	// attacks keeps config.toml's boss attack interval. Without it every
+	// boss attacks only after neverAttack, so tests that move the clock by
 	// minutes see no attacks.
 	attacks bool
+	// bossRules adjusts the boss rules (attack interval and damage).
+	bossRules func(*bosses.Rules)
 }
 
 // neverAttack is the attack interval every seed boss gets unless a fixture
 // asks for attacks: far beyond any test's clock.
-const neverAttack = 10 * 365 * 24 * time.Hour // fits attack_interval_s (INTEGER)
+const neverAttack = 10 * 365 * 24 * time.Hour
+
+// bossRules are config.toml's boss rules (game.bosses, game.boss_attack),
+// with the interval set to neverAttack unless attacks.
+func bossRules(set config.Settings, attacks bool) bosses.Rules {
+	r := bosses.Rules{Count: set.Game.Bosses, AttackInterval: set.Game.BossAttack.Interval.Duration, AttackDamage: set.Game.BossAttack.BossDamage()}
+	if !attacks {
+		r.AttackInterval = neverAttack
+	}
+	return r
+}
 
 // started seeds the dev content and returns one IN_GAME team of teams.size
 // players, adjusted by opts.
@@ -185,11 +198,6 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	db := pgtest.Open(t, dbURL)
 	if err := db.SeedDev2025(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if !o.attacks {
-		if _, err := db.Pool().Exec(ctx, "UPDATE boss SET attack_interval_s = $1", int(neverAttack/time.Second)); err != nil {
-			t.Fatal(err)
-		}
 	}
 	if o.sql != "" {
 		if _, err := db.Pool().Exec(ctx, o.sql); err != nil {
@@ -242,7 +250,11 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	clk := &clock{t: start}
 	rules.Clock = clk
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: rules.MaxPatternPoints}))
-	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bosses.Rules{Count: set.Game.Bosses}))
+	br := bossRules(set, o.attacks)
+	if o.bossRules != nil {
+		o.bossRules(&br)
+	}
+	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
 	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, hub, pgtest.Quiet, rules))
 	return &fixtureEnv{atlas: at, bosses: bs, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
 }

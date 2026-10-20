@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres/pgtest"
 	"labyrinth/internal/teamstate"
@@ -162,7 +163,7 @@ func TestAttacksAcrossRestart(t *testing.T) {
 // first attack is preceded by a boss_attacked event, and sees the lower
 // health; a select after a knockout-worth of attacks is refused.
 func TestWriteCatchesUpAttacks(t *testing.T) {
-	f := started(t, fixtureOptions{attacks: true, sql: "UPDATE boss SET attack_damage = 4 WHERE serial = 1"})
+	f := started(t, fixtureOptions{attacks: true, bossRules: func(r *bosses.Rules) { r.AttackDamage[1] = 4 }})
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
 	f.selectAt(t, 0, 0, "square")

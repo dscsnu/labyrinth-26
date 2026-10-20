@@ -22,6 +22,15 @@ bosses = 6
 health = 10
 locked_pattern_points = 5
 unlock_after_bosses = 5
+[game.boss_attack]
+interval = "10m"
+[game.boss_attack.damage]
+1 = 1
+2 = 2
+3 = 3
+4 = 4
+5 = 5
+6 = 6
 [qr]
 rotate = "5s"
 tolerance = "5s"
@@ -77,6 +86,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 ||
+		s.Game.BossAttack.Interval.Duration != 10*time.Minute || s.Game.BossAttack.BossDamage()[6] != 6 || len(s.Game.BossAttack.Damage) != 6 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.PerPoint != 15 || s.Spell.Per100m != 2 || s.Spell.Walkability != 1.5 ||
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second {
@@ -100,6 +110,12 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"name longer than the database":       {"name_max_length = 32", "name_max_length = 33", "name_max_length"},
 		"pattern bigger than the stack":       {"max_pattern_points = 6", "max_pattern_points = 16", "max_pattern_points"},
 		"no bosses":                           {"bosses = 6", "bosses = 0", "game.bosses must be at least 1"},
+		"missing attack interval":             {"interval = \"10m\"\n", "", "missing key game.boss_attack.interval"},
+		"zero attack interval":                {`interval = "10m"`, `interval = "0s"`, "game.boss_attack.interval must be positive"},
+		"no damage for a boss":                {"6 = 6\n", "", "game.boss_attack.damage has no entry for boss 6"},
+		"damage for a boss that isn't":        {"6 = 6\n", "6 = 6\n7 = 7\n", "game.boss_attack.damage.7 is not a boss serial (1-6, game.bosses)"},
+		"damage key not a serial":             {"6 = 6\n", "6 = 6\nboss = 1\n", "game.boss_attack.damage.boss is not a boss serial"},
+		"negative damage":                     {"3 = 3", "3 = -1", "game.boss_attack.damage.3 must not be negative"},
 		"locked size past the stack":          {"locked_pattern_points = 5", "locked_pattern_points = 8", "game.locked_pattern_points must be 1-7"},
 		"locked size zero":                    {"locked_pattern_points = 5", "locked_pattern_points = 0", "game.locked_pattern_points must be 1-7"},
 		"unlock after more bosses than exist": {"unlock_after_bosses = 5", "unlock_after_bosses = 7", "game.unlock_after_bosses must be 0-6"},
