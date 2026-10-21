@@ -391,7 +391,7 @@ func TestCallbackFailures(t *testing.T) {
 }
 
 // TestTokenAndAuthErrors checks expired and unknown login codes, the expired
-// code sweep, missing and bad tokens, /healthz, and wrong methods.
+// code sweep, missing and bad tokens, /health, and wrong methods.
 func TestTokenAndAuthErrors(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
@@ -428,8 +428,8 @@ func TestTokenAndAuthErrors(t *testing.T) {
 		t.Fatalf("garbage token: %d %v", status, body)
 	}
 
-	if res := e.get("/healthz"); res.StatusCode != http.StatusOK {
-		t.Fatalf("healthz: %d", res.StatusCode)
+	if res := e.get("/health"); res.StatusCode != http.StatusOK {
+		t.Fatalf("health: %d", res.StatusCode)
 	}
 	req, _ := http.NewRequest("POST", e.backend.URL+"/api/me", nil)
 	if res := e.do(req); res.StatusCode != http.StatusMethodNotAllowed {

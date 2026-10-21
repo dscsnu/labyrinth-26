@@ -210,7 +210,7 @@ func TestEventStreamAuthAndCleanup(t *testing.T) {
 	}
 
 	streams := func() float64 {
-		res := e.get("/healthz")
+		res := e.get("/health")
 		var body struct {
 			Payload struct {
 				Streams float64 `json:"streams"`

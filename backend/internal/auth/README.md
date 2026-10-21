@@ -581,7 +581,7 @@ There are no locks and no in-memory state. Everything concurrent is settled by P
 |---|---|
 | `TestFullLoginFlow` | login with PKCE S256, client ID and redirect URI; one `HttpOnly` cookie; callback → `/auth/callback?code&next=/team`; redemption payload; **code reuse → `400`**; `/api/me`; a role change seen by `/api/me` with the old token; second sign-in keeps ID and role, refreshes name |
 | `TestCallbackFailures` | subtests: `no state cookie` → `state_missing`; `state mismatch`; `tampered cookie` → `state_invalid`; `user cancelled` → `google_access_denied`; `bad code` → `google_exchange_failed`; `unverified email` → `email_unverified`; `domain not allowed` → `email_domain_not_allowed`; `open redirect in next` → `next=/` |
-| `TestTokenAndAuthErrors` | expired code and unknown code → `400 invalid_code`; empty code → `400 invalid_body`; `DeleteExpired` removes exactly the expired one; `/api/me` with no token → `401 missing_token`, with `not-a-jwt` → `401 invalid_token`; `/healthz`; `POST /api/me` → `405` |
+| `TestTokenAndAuthErrors` | expired code and unknown code → `400 invalid_code`; empty code → `400 invalid_body`; `DeleteExpired` removes exactly the expired one; `/api/me` with no token → `401 missing_token`, with `not-a-jwt` → `401 invalid_token`; `/health`; `POST /api/me` → `405` |
 | `TestSignInRefreshesTeamProfile` | Signing in again with a new name and no picture: the team's member shows the new name at once and keeps the old avatar |
 | `TestEmailInUse` | Another account already has the email: callback → `reason=email_in_use` |
 

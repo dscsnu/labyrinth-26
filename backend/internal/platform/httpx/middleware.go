@@ -42,7 +42,7 @@ func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter 
 // AccessLog logs one line per request when it finishes: method, the route
 // pattern that matched (or the path, for an unrouted one), status, bytes
 // and duration. A long-lived event stream is logged when it closes. Paths
-// in skip (e.g. /healthz, polled by monitors) aren't logged.
+// in skip (e.g. /health, polled by monitors) aren't logged.
 func AccessLog(log *slog.Logger, next http.Handler, skip ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, p := range skip {

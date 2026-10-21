@@ -21,6 +21,7 @@ import (
 	"labyrinth/internal/platform/identity"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
+	"labyrinth/internal/platform/stats"
 	"labyrinth/internal/qr"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
@@ -41,6 +42,10 @@ type App struct {
 
 	db     *postgres.DB
 	stream *live.Streamer
+
+	// startedAt is when Build finished; the health route reports the uptime
+	// since then.
+	startedAt time.Time
 }
 
 // Build loads in-memory state from Postgres and assembles the HTTP routes.
@@ -128,7 +133,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	})
 
 	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore,
-		Leaderboard: board, db: db,
+		Leaderboard: board, db: db, startedAt: time.Now(),
 		stream: &live.Streamer{
 			Heartbeat:    set.Live.Heartbeat.Duration,
 			WriteTimeout: set.Live.WriteTimeout.Duration,
@@ -137,7 +142,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		}}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", app.health)
+	mux.HandleFunc("GET /health", app.health)
 	mux.HandleFunc("GET /openapi.yaml", openAPI)
 	mux.HandleFunc("GET /docs", docs)
 	authAPI.Routes(mux)
@@ -172,10 +177,10 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(perUser(http.HandlerFunc(app.events))))
 
 	// Outermost first: the body limit, one access-log line per request (the
-	// monitor's /healthz polls aside), then panic recovery, so a recovered
+	// monitor's /health polls aside), then panic recovery, so a recovered
 	// panic is logged as the 500 it became.
 	app.Handler = http.MaxBytesHandler(
-		httpx.AccessLog(log, httpx.Recover(log, envelopeUnrouted(mux)), "/healthz"),
+		httpx.AccessLog(log, httpx.Recover(log, envelopeUnrouted(mux)), "/health"),
 		set.Server.MaxBodyBytes)
 	return app, nil
 }
@@ -228,14 +233,30 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// health handles GET /healthz: 200 if Postgres is reachable, with the number
-// of open streams.
+// health is the GET /health payload: how long the process has served, how
+// many event streams are open, and the runtime and process stats.
+type health struct {
+	// UptimeMS is how long ago Build finished, in milliseconds.
+	UptimeMS int64 `json:"uptime_ms"`
+	// Streams is the number of open event streams, across all users.
+	Streams int `json:"streams"`
+	// Snapshot's fields (go_version, goroutines, cpu, memory, …) are
+	// flattened into the same object.
+	stats.Snapshot
+}
+
+// health handles GET /health: 200 with the process's runtime and resource
+// stats if Postgres is reachable, 503 otherwise.
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	if err := a.db.Ping(r.Context()); err != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, "database unreachable")
 		return
 	}
-	httpx.OK(w, map[string]int{"streams": a.Hub.Count()})
+	httpx.OK(w, health{
+		UptimeMS: time.Since(a.startedAt).Milliseconds(),
+		Streams:  a.Hub.Count(),
+		Snapshot: stats.Collect(),
+	})
 }
 
 // events handles GET /api/events, the caller's one live stream. It starts

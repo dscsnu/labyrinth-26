@@ -21,7 +21,7 @@ import (
 
 // Backend process limits.
 const (
-	// healthTimeout is how long the backend may take to answer /healthz.
+	// healthTimeout is how long the backend may take to answer /health.
 	healthTimeout = 30 * time.Second
 	// stopTimeout is how long the backend may take to shut down before it's
 	// killed.
@@ -88,12 +88,12 @@ func buildBackend(dir string) (string, error) {
 }
 
 // startBackend runs bin against dbURL on port, logging to logPath, and waits
-// up to healthTimeout for /healthz.
+// up to healthTimeout for /health.
 func startBackend(bin, dir, dbURL, port, logPath string, env ...string) (*backend, error) {
 	// A backend left over from an interrupted run would answer the health
 	// check below in place of this one (which would exit: the database is
 	// locked to one instance), so refuse to start over it.
-	if res, err := http.Get("http://localhost:" + port + "/healthz"); err == nil {
+	if res, err := http.Get("http://localhost:" + port + "/health"); err == nil {
 		res.Body.Close()
 		return nil, fmt.Errorf("something is already serving on port %s (a backend left over from an interrupted run?); stop it or pass -port", port)
 	}
@@ -117,7 +117,7 @@ func startBackend(bin, dir, dbURL, port, logPath string, env ...string) (*backen
 
 	deadline := time.Now().Add(healthTimeout)
 	for time.Now().Before(deadline) {
-		if res, err := http.Get(b.url + "/healthz"); err == nil {
+		if res, err := http.Get(b.url + "/health"); err == nil {
 			res.Body.Close()
 			if res.StatusCode == http.StatusOK {
 				b.sampler = startSampler(cmd.Process.Pid)

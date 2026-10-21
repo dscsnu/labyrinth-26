@@ -13,7 +13,8 @@ Every number below that comes from `config.toml` is shown with its current value
 6. [live](#live)
 7. [postgres](#postgres)
 8. [postgres/pgtest](#postgrespgtest)
-9. [Not decided yet](#not-decided-yet)
+9. [stats](#stats)
+10. [Not decided yet](#not-decided-yet)
 
 ## Packages
 | Package | Files | What it does | Imported by |
@@ -25,6 +26,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | `live` | `event.go`, `hub.go`, `stream.go` | `Event`: one event, encoded once. `Hub`: fans events out to one user's streams or to all. `Streamer`: writes one stream as server-sent events. | `server`, `teams`, `teamstate` |
 | `postgres` | `database.go`, `migrate.go`, `instance_lock.go` | The pool, migrations, the single-instance lock, the dev seed, `ErrNotFound`. | `main`, every `db.go`, `server` |
 | `postgres/pgtest` | `pgtest.go` | A migrated, empty schema per test package. | tests |
+| `stats` | `doc.go`, `stats.go` | One process/runtime snapshot (`Collect`): Go heap, goroutines, CPU time and load average, read on demand for `GET /health`. | `server` |
 
 Dependency direction: `platform/config/configtest` → `platform/config`; `platform/postgres/pgtest` → `platform/postgres`. No platform package imports another otherwise.
 
@@ -179,12 +181,12 @@ Not tested: `Load()` and the environment variables, and the key functions. A mis
 | `ErrorCode(w, status, code, message)` | `status` | `{"success":false,"code":"…","message":"…"}` |
 | `JSON(w, status, body)` | `status` | `body` as is (used for `201` with a `Response`) |
 
-Success, from `GET /healthz`:
+Success, from `GET /health`:
 ```json
-{"success":true,"payload":{"streams":3}}
+{"success":true,"payload":{"uptime_ms":123456,"streams":3,"go_version":"go1.26.0","goroutines":42,"gomaxprocs":8,"num_cpu":8,"cpu":{"process_seconds":12.34,"load_average":{"1":0.5,"5":0.4,"15":0.3}},"memory":{"alloc":1234567,"total_alloc":9876543,"sys":20000000,"heap_alloc":1234567,"heap_objects":12345,"num_gc":5,"gc_pause_total_ns":123456,"rss":4567890}}}
 ```
 
-Error without a code (the frontend shows the message), from `GET /healthz`:
+Error without a code (the frontend shows the message), from `GET /health`:
 ```json
 {"success":false,"message":"database unreachable"}
 ```
@@ -245,7 +247,7 @@ Each caller maps any error to its own response: `400 invalid_body` in teams, tea
 | `TestLimiter` | 2/s, bursts of 3, fake clock: the burst passes, the 4th is refused with a 500 ms wait; another key is independent; one token back after 500 ms; idle buckets swept; a swept key starts full |
 | `TestLimiterMiddleware` | `429`, `rate_limited`, `Retry-After: 4` at one token per 4 s; `next` called once |
 | `TestRecover` | A panic → `500` envelope, logged with `stack=`; a panic after writing leaves the response alone; `ErrAbortHandler` is re-panicked |
-| `TestAccessLog` | The line has the mux pattern (`GET /api/things/{id}`), `status=409`, `bytes`; `/healthz` skipped; `ResponseController.Flush` works through it |
+| `TestAccessLog` | The line has the mux pattern (`GET /api/things/{id}`), `status=409`, `bytes`; `/health` skipped; `ResponseController.Flush` works through it |
 
 ## identity
 - **`Identity{UserID uuid.UUID, Email, Name, Role string}`**: who made the request, from their verified token. `Role` is as of sign-in, so a role change shows here only after the next sign-in (at most **12 h**, `auth.token_ttl`).
@@ -315,7 +317,7 @@ Streamer                                built once in server.Build, shared by ev
 - **`dropLocked(sub)`**: if `sub` is still in its user's set, deletes it (and the set, if now empty) and closes its channel. Otherwise a no-op. This check is what makes every close happen exactly once.
 - **`Send(userID, ev)`**: under the user's shard lock, for each of the user's subscriptions, a non-blocking send (`deliverLocked`). If the channel is full, `dropLocked`. Never blocks; a user with no streams costs one hash and one map lookup.
 - **`Broadcast(ev)`**: for each shard in turn, under that shard's lock, the same non-blocking send to every subscription. Never blocks, and never holds more than one shard: Sends to other shards carry on meanwhile.
-- **`Count()`**: total open subscriptions (for `/healthz`), summing each shard under its lock.
+- **`Count()`**: total open subscriptions (for `/health`), summing each shard under its lock.
 - **`Close()`**: per shard, sets `closed`, closes every channel, clears `subs`. Called through `srv.RegisterOnShutdown`.
 
 ### The slow-subscriber rule
@@ -429,7 +431,7 @@ The fan-out benchmark runs the 10,000 clients on the same machine as the server,
 - **`DB`** wraps one `*pgxpool.Pool`.
 - **`Connect(ctx, url)`**: `pgxpool.New`, then `Ping`. On ping failure, closes the pool and returns the error. Pool size and other pool settings use pgx's defaults, overridable through `DATABASE_URL` parameters (e.g. `pool_max_conns`).
 - **`Pool()`**: the pool, for use cases' `db.go` files.
-- **`Ping(ctx)`**: used by `/healthz`.
+- **`Ping(ctx)`**: used by `/health`.
 - **`Close()`**: closes the pool.
 - **`ErrNotFound`** (`"not found"`): the sentinel every `db.go` returns for a missing row, so use cases don't depend on `pgx.ErrNoRows`. Returned by `user`, `auth` (unknown or expired login code) and `teams`.
 - **`Seed2026(ctx)`**: runs the embedded seeds in order, one `Exec` each, wrapping an error with the file's name: **`seeds/2026.sql`** inserts the 10 checkpoints (`2001` G Block Junc … `2010` CnD Atrium, `damage_lookup.json`'s names and coordinates), 5 shapes (`line`, `triangle`, `quadrilateral`, `pentagon`, `hexagon`), spell classes `class_1`–`class_15`, and every combination of 2 to 6 checkpoints as a pattern (837, generated in SQL by a recursive CTE; stable IDs, by size then sorted waypoint IDs: `1` is `2001 2002`, `837` is `2005`…`2010`), each with the shape and class of its size. It **replaces** other content: it upserts its rows (`ON CONFLICT … DO UPDATE`), rebuilds `pattern_waypoint`, and deletes patterns, shapes and waypoints not in the file (the 2025 placeholders included). A guard refuses first, with `the database has team progress on other content; reset it (docker compose down -v) before seeding 2026`, when teams have scans, casts or selections and waypoints outside 2001–2010 exist, since that progress would point at deleted content. Then **`seeds/2026_spells.sql`** (each pattern's `damage`, generated by `cmd/spells`, equal to `damage_lookup.json`) and **`seeds/2026_bosses.sql`** (6 placeholder bosses, serials 1–6, HP 25, 100, 250, 510, 900, 1500, attacking every 300 s for 1 down to every 120 s for 2; it first deletes any boss past serial 6, which fails if a cast already hit one, then `ON CONFLICT (serial) DO UPDATE`, so re-seeding resets their name, asset, description, HP and attacks). Idempotent. Content is read at startup: run `go run . seed` while the backend is stopped, then start it. `seed` takes the instance lock first, so it refuses (`ErrAnotherInstance`) while a backend serves the same database. (2025's `SeedDev2025` loaded `dev_2025.sql`'s 11 waypoints and 359 drawn patterns, insert-only.)
@@ -562,6 +564,18 @@ Schemas in use:
 - Advisory locks are per database, not per schema. A real backend running on that database holds `7272027`, so `TestOnlyOneInstance` would fail; and tests migrating would wait on a real backend's migration.
 
 Use the throwaway container from AGENTS.md §14.
+
+## stats
+- **`Collect() Snapshot`** reads the process's figures on demand, for `GET /health`. It never samples in the background and holds no state.
+- **From the Go runtime** (stdlib, cross-platform): `GoVersion`, `Goroutines` (`runtime.NumGoroutine`), `GOMAXPROCS`, `NumCPU`, and the heap fields `Alloc`, `TotalAlloc`, `Sys`, `HeapAlloc`, `HeapObjects`, `NumGC`, `GCPauseTotal` (nanoseconds) from `runtime.ReadMemStats`.
+- **From `/proc`** (Linux only; zero otherwise, so the route still answers elsewhere): `RSS` (the resident set from `/proc/self/status`, kB → bytes), `CPU.ProcessSeconds` (user+system ticks from `/proc/self/stat`, divided by 100, `USER_HZ`), and `CPU.LoadAverage` (the host's 1/5/15-minute load from `/proc/loadavg`).
+- The `/proc` parsing mirrors `cmd/loadtest/backend.go`'s sampler, but reports one instant rather than a rolling window; the two don't share code.
+- **Why bytes and one instant, not a sample:** the health route is polled by monitors, so it must be cheap and side-effect free. A rolling CPU percentage would need a background goroutine and lifecycle, which the load test already does where it's wanted.
+
+### Tests (`stats/tests/`)
+| Test | Covers |
+|---|---|
+| `TestCollect` | `Collect` returns a populated, sane snapshot: non-empty `GoVersion`, ≥1 `Goroutines`/`GOMAXPROCS`/`NumCPU`, non-zero runtime memory; on Linux, non-zero `RSS`, non-negative `ProcessSeconds` and load averages |
 
 ## Not decided yet
 - **A lost instance lock is noticed only at the next check.** For up to one check interval, **5 s** (`storage.instance_lock_check`), plus the check's own timeout (another 5 s) after the lock's connection drops, a second backend could start while this one still serves. Lower the interval to narrow the window.

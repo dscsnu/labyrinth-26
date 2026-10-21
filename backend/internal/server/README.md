@@ -1,6 +1,6 @@
 # server
 
-Wires the use cases together, serves the routes that span several of them (`/healthz`, the live event stream, and the API docs at `/openapi.yaml` and `/docs`), and holds the end-to-end tests. It has no rules of its own. `main.go` (in `backend/`) runs it: startup, the background sweep, and shutdown are documented here too.
+Wires the use cases together, serves the routes that span several of them (`/health`, the live event stream, and the API docs at `/openapi.yaml` and `/docs`), and holds the end-to-end tests. It has no rules of its own. `main.go` (in `backend/`) runs it: startup, the background sweep, and shutdown are documented here too.
 
 Every number below that comes from `config.toml` is shown with its current value and its key, e.g. **25 s** (`live.heartbeat`). Change the file, not the code.
 
@@ -24,7 +24,7 @@ Every number below that comes from `config.toml` is shown with its current value
 ## Concepts
 | Term | Meaning |
 |---|---|
-| **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Atlas`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). `Atlas` is the `*atlas.Atlas` (static content); nothing reads `App.Atlas` today (`Build` passes the atlas to teamstate directly), it's there for `main`, tests and future use cases. Unexported: the `*postgres.DB` (for `/healthz`) and the heartbeat. |
+| **`App`** | What `Build` returns: the HTTP handler plus the pieces `main` and the tests need (`Hub`, `Atlas`, `Tokens`, `LoginCodes`, `Teams`, `TeamState`). `Atlas` is the `*atlas.Atlas` (static content); nothing reads `App.Atlas` today (`Build` passes the atlas to teamstate directly), it's there for `main`, tests and future use cases. Unexported: the `*postgres.DB` (for `/health`) and the heartbeat. |
 | **Build order** | Each use case is constructed after everything it reads. `atlas` and `bosses` are static content the game use cases read, so `atlas.Load` and `bosses.Load` run first. `teamstate` reads `atlas`, `bosses` and `teams`, and auth's sign-in hook calls `teams`, so `teams.Load` runs before both. |
 | **Authed route** | A route wrapped in auth's `RequireAuth` (passed to each use case as `authAPI.Authed`). It needs `Authorization: Bearer <jwt>` and puts the caller on the request via `platform/identity`. `GET /api/events` uses `RequireStreamAuth` instead, which also takes the token from the `labyrinth_token` cookie. |
 | **Stream** | One open `GET /api/events`: one `live.Subscription` in the hub, keyed by the caller's user ID. A client opens one, and it carries every scope. |
@@ -100,13 +100,13 @@ Every number below that comes from `config.toml` is shown with its current value
   9. `teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, hub, log, teamstate.Rules{…})`: reads every team's state, checking it against the atlas and the bosses, applies any boss attacks that fell due while the backend was down, and arms every started team's attack timer. `Rules` gets `MaxPatternPoints`, `Health` (`game.health`), `WriteTimeout` and `Epoch`. It needs the atlas (`Atlas` interface), the bosses (`Bosses` interface) and `teamStore` (`Teams` interface, including `All`), so it runs after steps 6 and 7. Its `Rules.OnFinished` is `func(id) { teamStore.Finish(ctx, id) }` (an error is logged): a cast that defeats the last boss marks the team `FINISHED`; teamstate calls it after releasing its own lock. `Load` itself calls it for a team found with every boss defeated but still `IN_GAME`.
      Then `leaderboard.New(stateStore, teamStore, hub, log, leaderboard.Rules{Size: leaderboard.size, PublishEvery: leaderboard.publish_every})`: derives the ranking from memory; `main` starts its loop (`go app.Leaderboard.Run(ctx)`).
   10. The `App` (with `Atlas: theAtlas`, `Leaderboard: board`, and a `live.Streamer` from `live.heartbeat`, `live.write_timeout`, `live.retry_min` and `live.retry_max`), then a `http.ServeMux` with, in this order:
-     - `GET /healthz` (no auth)
+     - `GET /health` (no auth)
      - `GET /openapi.yaml` and `GET /docs` (no auth; see [API docs](#api-docs-openapi))
      - `authAPI.Routes(mux)`: the three `/auth/…` routes (no auth)
      - `user`, `teams`, `teamstate`, `leaderboard`, `bosses`, `qr`: each `NewAPI(…).Routes(mux, authed)` (`atlas` has no routes), where `authed(h)` is `authAPI.RequireAuth(perUser(h))` and `perUser` is the `[ratelimit]` limiter (`httpx.NewLimiter(ratelimit.per_second, ratelimit.burst, ratelimit.idle)`) keyed by the signed-in user's ID
      - the admin routes: `adminOnly := func(h) { return authAPI.RequireAuth(perUser(userAPI.RequireAdmin(h))) }`, then `admin.NewAPI(admin.New(teamStore, stateStore, users, admin.Rules{UserSearchLimit: admin.user_search_limit}), log).Routes(mux, adminOnly)`: every `/api/admin/…` route, in the admin use case ([`internal/admin/README.md`](../admin/README.md))
      - `GET /api/events`, wrapped in `authAPI.RequireStreamAuth(perUser(…))` (Bearer or the `labyrinth_token` cookie; opening a stream takes a token like any request)
-  11. `App.Handler = http.MaxBytesHandler(httpx.AccessLog(log, httpx.Recover(log, envelopeUnrouted(mux)), "/healthz"), server.max_body_bytes)`.
+  11. `App.Handler = http.MaxBytesHandler(httpx.AccessLog(log, httpx.Recover(log, envelopeUnrouted(mux)), "/health"), server.max_body_bytes)`.
 - **`envelopeUnrouted(mux)`** wraps the mux. For each request it asks `mux.Handler(r)` for the matching pattern:
   - a pattern matched → `mux.ServeHTTP` as usual
   - no pattern → runs the mux's own fallback handler into a **`statusRecorder`** (records status and headers, discards the plain-text body), then:
@@ -114,7 +114,7 @@ Every number below that comes from `config.toml` is shown with its current value
     - `405` → copies the mux's `Allow` header, then `httpx.ErrorCode(405, "method_not_allowed", "method not allowed")`
     - anything else → handled by the mux as it would have been (not expected: the mux's redirects have a pattern and never reach this branch)
 - **`statusRecorder`**: `Header()`, `WriteHeader(status)` and `Write` (counts the bytes, sets `200` if no status yet) for the above.
-- **`health`** handles `GET /healthz`: `db.Ping`; on error `503` `database unreachable`; otherwise `200` with `{"streams": Hub.Count()}`.
+- **`health`** handles `GET /health`: `db.Ping`; on error `503` `database unreachable`; otherwise `200` with the uptime, the open stream count and the process's runtime and resource stats (see [API](#api)).
 - **`events`** handles `GET /api/events` and its alias: see [The event stream](#the-event-stream). It lives here because it carries events from every use case.
 - **`snapshot(userID)`** is the initial snapshots, in order: `hello`, the user's `team` or `no_team`, their team's `team_state` (if any), then the game-wide ones: today the `leaderboard` (`Leaderboard.Snapshot()`, type `snapshot`).
 - **`hello(now)`** is the `hello` event: `{"server_time": now}` in UTC. Clients measure their clock offset from it; it carries nothing else (game rules come from `GET /api/game/shapes`).
@@ -161,7 +161,7 @@ Outermost first:
 ```
 http.Server              ReadHeaderTimeout 10 s, ReadTimeout 30 s, IdleTimeout 2 m
 └ http.MaxBytesHandler    every body capped at 1,048,576 bytes (server.max_body_bytes)
-  └ httpx.AccessLog       one line per finished request (not /healthz)
+  └ httpx.AccessLog       one line per finished request (not /health)
     └ httpx.Recover       a panic → logged with its stack, 500 internal error
       └ envelopeUnrouted  unmatched → 404 not_found, wrong method → 405 method_not_allowed (JSON)
         └ http.ServeMux   Go 1.22 method patterns
@@ -170,7 +170,7 @@ http.Server              ReadHeaderTimeout 10 s, ReadTimeout 30 s, IdleTimeout 2
               └ handler   use case api.go, or health / events
 ```
 
-- **Body limit.** `MaxBytesHandler` replaces `r.Body` with an `http.MaxBytesReader`. Reading past the limit fails with `*http.MaxBytesError`. Every handler reads bodies with `httpx.DecodeJSON`, so an oversized body surfaces as a decode error: `400 invalid_body` in teams, teamstate and `POST /auth/token`. It applies to every route, including `/auth/…` and `/healthz`, but only matters where a body is read.
+- **Body limit.** `MaxBytesHandler` replaces `r.Body` with an `http.MaxBytesReader`. Reading past the limit fails with `*http.MaxBytesError`. Every handler reads bodies with `httpx.DecodeJSON`, so an oversized body surfaces as a decode error: `400 invalid_body` in teams, teamstate and `POST /auth/token`. It applies to every route, including `/auth/…` and `/health`, but only matters where a body is read.
 - **Read timeout.** A client has **30 s** (`server.read_timeout`) from accepting the connection to finish sending a request, body included, so a trickled body can't hold a connection open. Event streams clear it when they start.
 - **Routing before auth.** The mux matches first, so an unknown path is `404 not_found` and a wrong method is `405 method_not_allowed` (with `Allow`) even without a token, both in the JSON envelope:
   ```
@@ -182,9 +182,9 @@ http.Server              ReadHeaderTimeout 10 s, ReadTimeout 30 s, IdleTimeout 2
   - no header, a scheme other than `Bearer` (case-insensitive), or an empty token → `401 missing_token`, `WWW-Authenticate: Bearer`
   - a token that fails `VerifyAccess` (bad signature, expired, malformed) → `401 invalid_token`, `WWW-Authenticate: Bearer error="invalid_token"`
   - otherwise the handler runs with `identity.Identity{UserID, Email, Name, Role}` from the token's claims
-- **Access log.** `httpx.AccessLog` writes one `INFO` line `request` per request when it finishes: `route` (the mux pattern that matched, e.g. `POST /api/teams/me/state/scans`, so IDs in paths don't make every line unique; the method and path for an unrouted one), `status`, `bytes`, `ms`. An event stream is logged when it closes, with its whole duration. `/healthz` isn't logged (monitors poll it). Its recorder implements `Unwrap`, so `http.ResponseController` (the stream's `Flush` and write deadlines) reaches the real writer.
+- **Access log.** `httpx.AccessLog` writes one `INFO` line `request` per request when it finishes: `route` (the mux pattern that matched, e.g. `POST /api/teams/me/state/scans`, so IDs in paths don't make every line unique; the method and path for an unrouted one), `status`, `bytes`, `ms`. An event stream is logged when it closes, with its whole duration. `/health` isn't logged (monitors poll it). Its recorder implements `Unwrap`, so `http.ResponseController` (the stream's `Flush` and write deadlines) reaches the real writer.
 - **Panic recovery.** `httpx.Recover` catches a panic in any handler: it logs `panic serving request` at `ERROR` with the method, path, value and stack, and answers `500 {"success":false,"message":"internal error"}` if nothing was written yet (otherwise the response is left as it is; the client sees it cut short). `http.ErrAbortHandler` is re-panicked: net/http uses it to abort a response on purpose. It sits inside the access log, so the line shows the 500.
-- **Rate limit.** `perUser` runs after `RequireAuth`, so it's keyed by the signed-in user, not the IP (campus Wi-Fi puts thousands of phones behind a few addresses). Each user has a token bucket of **10** requests a second (`ratelimit.per_second`) in bursts of up to **40** (`ratelimit.burst`): every signed-in route counts, admin routes and opening `/api/events` included (a stream costs one token when it opens, nothing while it's open). Over it: `429 rate_limited` with `Retry-After` (whole seconds, at least 1), and the handler doesn't run. Unauthenticated routes (`/healthz`, `/auth/…`, docs) aren't limited: the Google round trip and the single-use login code bound `/auth`. Buckets idle for **10 min** (`ratelimit.idle`) are dropped; memory is one small bucket per active user.
+- **Rate limit.** `perUser` runs after `RequireAuth`, so it's keyed by the signed-in user, not the IP (campus Wi-Fi puts thousands of phones behind a few addresses). Each user has a token bucket of **10** requests a second (`ratelimit.per_second`) in bursts of up to **40** (`ratelimit.burst`): every signed-in route counts, admin routes and opening `/api/events` included (a stream costs one token when it opens, nothing while it's open). Over it: `429 rate_limited` with `Retry-After` (whole seconds, at least 1), and the handler doesn't run. Unauthenticated routes (`/health`, `/auth/…`, docs) aren't limited: the Google round trip and the single-use login code bound `/auth`. Buckets idle for **10 min** (`ratelimit.idle`) are dropped; memory is one small bucket per active user.
 - No CORS at this layer: the SvelteKit server calls the API itself, and the browser reaches only `/api/events`, on the frontend's origin through the proxy (see the backend README, "Deploying").
 
 ## The event stream
@@ -207,7 +207,7 @@ The complete reference for the live stream: what it carries, what triggers each 
    - `a.TeamState.Snapshot(userID)`: if the user is in a team, `team_state` of type `snapshot`, its message the same JSON as `GET /api/teams/me/state`. Skipped if not in a team (or on an encode error, logged). Sent for a `LOBBY` team too (an empty state).
    - Game-wide resources come last: the `leaderboard` (type `snapshot`).
 4. `a.stream.Serve(w, r, sub, initial)` (`live.Streamer`): clears the read deadline, writes a `retry:` line and the initial events in one flush, then every event from `sub`, plus `: ping` after **25 s** (`live.heartbeat`) with no event. Returns when the client disconnects, a write fails or takes over **10 s** (`live.write_timeout`), the subscription is dropped or the hub closes.
-5. The deferred `sub.Close()` removes the subscription; the `/healthz` count drops.
+5. The deferred `sub.Close()` removes the subscription; the `/health` count drops.
 
 **The stream follows the user.** Subscriptions are keyed by user ID, not team. Joining, leaving or a new team all arrive on the same stream (`TestTeamEventStream`). Each tab is its own subscription and gets every event.
 
@@ -544,7 +544,7 @@ events.addEventListener("no_team", () => { team = null; state = null; });
 ## API
 | Method | Path | Auth | Response |
 |---|---|---|---|
-| GET | `/healthz` | none | `200 {"success":true,"payload":{"streams":3}}`, or `503 {"success":false,"message":"database unreachable"}` |
+| GET | `/health` | none | `200 {"success":true,"payload":{"uptime_ms":…,"streams":n,"go_version":"…","goroutines":…,"gomaxprocs":…,"num_cpu":…,"cpu":{"process_seconds":…,"load_average":{"1":…,"5":…,"15":…}},"memory":{…}}}`, or `503 {"success":false,"message":"database unreachable"}` |
 | GET | `/api/events` | Bearer or `labyrinth_token` cookie | `200 text/event-stream` (see above) |
 | GET | `/openapi.yaml` | none | `200 application/yaml`: the OpenAPI 3.1 spec |
 | GET | `/docs` | none | `200 text/html`: Swagger UI over `/openapi.yaml` |
@@ -563,7 +563,7 @@ Routes registered here but owned by use cases (see their READMEs):
 | `qr` | `POST /api/qr/verify` | Bearer |
 | `qr` (staff) | `GET /api/qr/{waypoint_id}` | Bearer + `HELPER`/`ADMIN` in Postgres (`403 not_staff`) |
 
-`/healthz` is the only route that touches Postgres on every call. `streams` counts every open subscription (all users, all tabs).
+`/health` is the only route that touches Postgres on every call. `streams` counts every open subscription (all users, all tabs). The rest of its payload is this process's uptime and resource use (goroutines, heap memory, RSS, CPU time, load average), read on demand, not sampled.
 
 Any other path or method:
 
@@ -588,10 +588,10 @@ Any other path or method:
 | `teams.Load` or `teamstate.Load` fails (unreachable database, stored team state naming a waypoint, pattern or shape the atlas doesn't have, or a `team_boss` row with more bosses defeated than `game.bosses`) | `Build` returns the error; exit `1` |
 | Port in use | `ListenAndServe`'s error; exit `1` |
 
-### `/healthz`
+### `/health`
 | Case | Result |
 |---|---|
-| Postgres answers a ping | `200`, `{"streams": n}` |
+| Postgres answers a ping | `200`, `{"uptime_ms": …, "streams": n, "go_version": …, "goroutines": …, …, "cpu": {…}, "memory": {…}}` |
 | Postgres down | `503`, `database unreachable` |
 
 ### Event stream
@@ -606,7 +606,7 @@ Any other path or method:
 | Time passes with nobody acting | `: ping` after each idle `live.heartbeat`, `team_state: boss_attacked` / `knocked_out` each time the team's boss attacks, and `team_state: qr_cooldown_ended` each time some of its waypoints open again |
 | A rejected or no-op request | Nothing |
 | Several tabs | Each tab is its own subscription; each gets every event |
-| Client disconnects | `Serve` returns on the request context; subscription removed; `/healthz` count drops |
+| Client disconnects | `Serve` returns on the request context; subscription removed; `/health` count drops |
 | A queued event arrives while **16** (`live.subscriber_buffer`) are already unread | That stream is dropped: the buffered events are written, then the response ends. The browser's `EventSource` reconnects and gets fresh snapshots |
 | A write to the client fails, or takes over **10 s** (`live.write_timeout`) | `Serve` returns; subscription removed |
 | Server shuts down | `Hub.Close` closes every subscription; each `Serve` returns. `TeamState.Close` stops the team timers (attacks, QR cooldown ends) |
@@ -634,7 +634,7 @@ Any other path or method:
 ## Failure and recovery
 | Case | Result |
 |---|---|
-| Postgres down while serving | `/healthz` → `503`. Reads keep working from memory; writes fail and reconcile (see each use case). Streams stay open |
+| Postgres down while serving | `/health` → `503`. Reads keep working from memory; writes fail and reconcile (see each use case). Streams stay open |
 | A sweep fails | Logged as a warning; retried next interval |
 | Shutdown takes over **10 s** (`server.shutdown_timeout`) | `Shutdown` returns `context deadline exceeded`; exit `1`; deferred cleanup still runs |
 | Process killed without shutdown | The instance lock's session ends with the connection, so Postgres frees it; the next start succeeds. Memory is rebuilt from Postgres |
@@ -742,7 +742,8 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 |---|---|---|
 | `TestFullLoginFlow` | `tests/auth_test.go` | login → Google → callback → redeem → `/api/me`; code reuse is `400`; a role changed in SQL shows on `/api/me` without a new token; signing in again keeps the user ID and role and updates the name |
 | `TestCallbackFailures` | `tests/auth_test.go` | `ALLOWED_EMAIL_DOMAINS=snu.edu.in`. Subtests, each landing on `/auth/error?reason=`: `state_missing`, `state_mismatch`, `state_invalid` (tampered cookie), `google_access_denied`, `google_exchange_failed`, `email_unverified`, `email_domain_not_allowed`; and `next=//evil.com` becomes `/` |
-| `TestTokenAndAuthErrors` | `tests/auth_test.go` | expired and never-issued codes are `400 invalid_code`, an empty code `400 invalid_body`; `DeleteExpired` removes exactly the expired one; no token is `401 missing_token`, a garbage token `401 invalid_token`; `/healthz` is `200`; `POST /api/me` is `405` |
+| `TestTokenAndAuthErrors` | `tests/auth_test.go` | expired and never-issued codes are `400 invalid_code`, an empty code `400 invalid_body`; `DeleteExpired` removes exactly the expired one; no token is `401 missing_token`, a garbage token `401 invalid_token`; `/health` is `200`; `POST /api/me` is `405` |
+| `TestHealthStats` | `tests/health_test.go` | `GET /health` without a token is `200`, `success` true, `streams` 0, a non-empty `go_version`, ≥1 `goroutines` and `num_cpu`, non-zero `memory.alloc`; on Linux also non-zero `memory.rss` and non-negative `cpu.process_seconds` |
 | `TestSignInRefreshesTeamProfile` | `tests/auth_test.go` | a team creator signs in again with a new name and no picture: `GET /api/teams/me` shows the new name and the old avatar, with no restart |
 | `TestEmailInUse` | `tests/auth_test.go` | another account already has `player@snu.edu.in`: the callback lands on `reason=email_in_use` |
 | `TestStateAndAccessTokensNotInterchangeable` | `tests/auth_test.go` | the OAuth state cookie used as a bearer token is `401 invalid_token`; an access token used as the state cookie lands on `reason=state_invalid` |
@@ -768,14 +769,14 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestQRCooldownOverHTTP` | `tests/teamstate_test.go` | seed + `restart`, `config.toml`'s `game.qr_cooldown`; two started teams: A's quadrilateral puts 2001, 2002, 2007, 2008 in `qr_cooldowns`, each until `cast_at` + `game.qr_cooldown`, in the scan response and the stream's cast event; with the triangle selected, A scanning 2001 is `409 waypoint_on_cooldown` with no event, 2003 is `200`; B scans 2001 `200` (the cooldown is per team); after a `restart`, A's `qr_cooldowns` are the same and 2002 is still `409 waypoint_on_cooldown`. `TestSelectAndScanRoutes`, `TestCastLogRoute` and `TestSpellCooldownOverHTTP` set `game.qr_cooldown` to 0: their casts reuse waypoints |
 | `TestGameShapes` | `tests/teamstate_test.go` | seed + `restart`; `GET /api/game/shapes` without a token is `401 missing_token`; with one (a player in no team): 5 shapes, `quadrilateral` with 210 patterns and `points` `[4]`, every shape's damage range valid, `max_pattern_points` equal to `config.toml`'s, and no `scan_window_ms` |
 | `TestAdminRevive` | `tests/admin_test.go` | seed + `restart`; a started team has `health` = `game.health`, `knocked_out` false and a `next_attack_at`; a `team_boss` phase with 0 health, applied by a `restart`, knocks it out (`health` 0, `next_attack_at` null); select and scan `409 knocked_out`; the revive route: a player `403 not_admin`, `000000` `404 team_not_found`, a lobby team `409 not_in_game`; an admin's revive `200` with full health and `attacks` 0, a member's stream gets `team_state:revived`, and selecting works again |
-| `TestRateLimitOverHTTP` | `tests/admin_test.go` | `ratelimit` at 3 requests, one more a minute: a user's 4th request is `429 rate_limited`, and so is opening `/api/events` (with `Retry-After`); another user isn't affected; an admin route is limited too; `/healthz` never is |
+| `TestRateLimitOverHTTP` | `tests/admin_test.go` | `ratelimit` at 3 requests, one more a minute: a user's 4th request is `429 rate_limited`, and so is opening `/api/events` (with `Retry-After`); another user isn't affected; an admin route is limited too; `/health` never is |
 | `TestGameBosses` | `tests/teamstate_test.go` | `GET /api/game/bosses` without a token is `401 missing_token`; `[]` before content; after seed + `restart`, `game.bosses` bosses with serials 1… in order, each with name, asset and HP > 0; a started team's state shows `boss` serial 1 at 0, `bosses_defeated` 0, `damage_multiplier` 1; after a quadrilateral over HTTP, `last_cast` hit boss 1 with `dealt` = `damage`, and whether it defeated it follows boss 1's seeded HP (25: it does, so `boss` is serial 2 at 0 and `bosses_defeated` 1; with more HP, `boss.damage` = `dealt`) |
 | `TestSimTeamCompletesUnderLatency` | `tests/simulation_test.go` | four simulated players scan a quadrilateral at once, each with its own delays up to 150 ms each way: exactly one `pattern_completed`; every client ends with an empty stack and the quadrilateral completed |
 | `TestSimRaceSameWaypoint` | `tests/simulation_test.go` | two players scan the same waypoint at once: one `200`, one `409 waypoint_already_scanned`; every client converges on a one-scan stack |
 | `TestSimWrongScanReachesEveryone` | `tests/simulation_test.go` | after `2001`, one player scans `2099` (a test waypoint in no pattern: every 2026 checkpoint would fit) while a teammate scans `2002`: the first gets `wrong_scan`, the other either `200` (it landed first) or `409 selection_poisoned`; every phone sees `poisoned`; the leader's reselect clears it on every phone |
 | `TestSim100Teams` | `tests/simulation_test.go` | **100 teams** of every size from 1 to `teams.size` (team *i* has 1 + (*i* / 7) mod 6 players) at once, ~350 phones each on its own delays (0–30 ms each way) and stream; 6 rounds per team by one of 7 strategies: `steady` (members take turns), `solo` (one member scans everything), `sloppy` (a wrong scan of `2099`, added in no pattern, then `409 selection_poisoned`, then a reselect and cast), `racer` (two members scan the same point at once: one `200`, one `409 waypoint_already_scanned`), `retrier` (every scan resent: `409 waypoint_already_scanned`, `409 no_shape_selected` after the completing one), `quitter` (gives up every other attempt: `DELETE …/selection`), `shrinking` (an admin removes a member over HTTP half way; their scan is `404 not_in_team`). Bosses never attack (`game.boss_attack.interval` set to 10 years in the test's `e.cfg`), and the QR cooldown is off (`game.qr_cooldown` 0: back-to-back rounds reuse the seed's 10 waypoints; `TestQRCooldownOverHTTP` and the teamstate simulation cover it). Every select and clear is made by the team's leader (player 0, never the one removed). Every request's status and code is checked; at the end each team's `cast_count` equals its casts, every phone's newest-by-version state has the team's `version` and `cast_count`, and every removed player got `no_team`. ~7 s with the race detector. Each team picks its next pattern of another size than its last cast (the spell cooldown) |
 | `TestTeamEventStream` | `tests/events_test.go` | initial `team` / `no_team`; join, ready, leader leaving (new leader), deletion (`no_team`) arrive live; the stream follows the user into a new team; other users' streams get nothing |
-| `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/healthz` counts 1 open stream, then 0 within 2 s of disconnecting |
+| `TestEventStreamAuthAndCleanup` | `tests/events_test.go` | no token is `401` on both paths; `/health` counts 1 open stream, then 0 within 2 s of disconnecting |
 | `TestStreamStartsWithHello` | `tests/events_test.go` | a stream opens with `hello:connected`, its `server_time` within a second of now, then `no_team:snapshot`, then `leaderboard:snapshot` (waited for before the sequence is read) |
 | `TestEventTypes` | `tests/events_test.go` | every publish site over HTTP gets its envelope type, per stream and in order: created, member_joined, member_left / no_team:left, ready_changed, started + game_started, shape_selected (by the leader), scan_added ×3, boss_defeated (the seed's boss 1 has 25 HP, so the quadrilateral's cast defeats it), wrong_scan, selection_cleared (by the leader); an admin's removals (member_removed / leader_changed / no_team:removed); a lobby leader leaving (leader_changed / left) and the last member (team_deleted). Also: team_state's `version.seq` up by one per change in one epoch, and `cast_count` 0 until the cast, then 1 |
 | `TestStreamCookieAndAlias` | `tests/events_test.go` | `/api/events` accepts the `labyrinth_token` cookie; `GET /api/teams/me` and the alias refuse it (`401`), as does `/api/events` with a bad cookie; the alias with Bearer serves `hello`, `no_team` |
@@ -788,4 +789,4 @@ Team sizes and name lengths come from `config.toml` through `e.cfg.Settings`, ne
 
 **Boss attacks over real time** aren't tested here (they'd need minutes of real time; `TestAdminRevive` knocks a team out through a stored phase instead): the timer and catch-up are tested with a fake clock in `internal/teamstate/tests/attack_test.go`. `env.restart` closes the old app's `TeamState` (and its `Hub`), so a replaced app's timers never run.
 
-**Not covered here:** `/healthz` returning `503`, the heartbeat (tests wait at most 3 s; covered in `platform/live`), a slow stream being dropped over HTTP (covered in `platform/live`), `Hub.Close` on shutdown, the `Allow` header's value, and `main.go` itself (subcommands, lock ordering, lost-lock shutdown, sweep loop, timeouts).
+**Not covered here:** `/health` returning `503`, the heartbeat (tests wait at most 3 s; covered in `platform/live`), a slow stream being dropped over HTTP (covered in `platform/live`), `Hub.Close` on shutdown, the `Allow` header's value, and `main.go` itself (subcommands, lock ordering, lost-lock shutdown, sweep loop, timeouts).
