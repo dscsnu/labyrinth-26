@@ -1,5 +1,3 @@
-import { dev } from "$app/env";
-import { DEV_TOKEN } from "$app/env/private";
 import { TOKEN_COOKIE } from "#lib/server/backend.ts";
 import { verifySession } from "#lib/server/session.ts";
 import type { Handle } from "@sveltejs/kit/hooks";
@@ -10,8 +8,7 @@ const authenticate: Handle = async ({ event, resolve }) => {
     event.locals.user = null;
     event.locals.token = null;
 
-    // In dev, fall back to DEV_TOKEN so devices that can't sign in still get a session.
-    const token = event.cookies.get(TOKEN_COOKIE) ?? (dev ? DEV_TOKEN : undefined);
+    const token = event.cookies.get(TOKEN_COOKIE);
     if (!token) return resolve(event);
 
     const user = await verifySession(token);
