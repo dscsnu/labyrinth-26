@@ -35,25 +35,66 @@
         return new Map([...byShape].map(([shape, patterns]) => [shape, [...patterns.values()]]));
     });
 
-    // The page shown (an index into shapes), and which way the last turn
+    // Shapes whose patterns fall into separate damage bands, each its own
+    // page. The backend sends one range per shape, so these mirror
+    // backend/internal/spells/README.md §5: concave quadrilaterals get
+    // spell.bonus.concave_quad on top. Update them if [spell] in
+    // config.toml changes. The bands don't overlap, so a cast's damage
+    // says which one it's in.
+    const VARIANTS: Record<string, { name: string; damage: { min: number; max: number }; patterns: number }[]> = {
+        quadrilateral: [
+            { name: "Convex", damage: { min: 195, max: 205 }, patterns: 156 },
+            { name: "Concave", damage: { min: 270, max: 278 }, patterns: 54 },
+        ],
+    };
+
+    type Page = {
+        key: string;
+        shapeId: string;
+        name: string;
+        points: number[];
+        damage: { min: number; max: number };
+        patterns: number;
+        matches: (damage: number) => boolean;
+    };
+
+    // One page per shape, or per band of a shape in VARIANTS. A band holds
+    // the casts whose damage reaches its min and not the next band's.
+    let pages = $derived(
+        shapes.flatMap((s): Page[] => {
+            const variants = VARIANTS[s.id];
+            if (!variants) return [{ key: s.id, shapeId: s.id, name: s.name, points: s.points, damage: s.damage, patterns: s.patterns, matches: () => true }];
+            return variants.map((v, i) => ({
+                key: `${s.id}-${v.name}`,
+                shapeId: s.id,
+                name: `${v.name} ${s.name}`,
+                points: s.points,
+                damage: v.damage,
+                patterns: v.patterns,
+                matches: (d) => (i === 0 || d >= v.damage.min) && (i === variants.length - 1 || d < variants[i + 1].damage.min),
+            }));
+        }),
+    );
+
+    // The page shown (an index into pages), and which way the last turn
     // went, so the new page slides in from that side.
     let page = $state(0);
     let dir = $state(1);
-    let shape = $derived(shapes[Math.min(page, shapes.length - 1)]);
-    let known = $derived(shape ? (discovered.get(shape.id) ?? []) : []);
+    let shape = $derived(pages[Math.min(page, pages.length - 1)]);
+    let known = $derived(shape ? (discovered.get(shape.shapeId) ?? []).filter((p) => shape.matches(p.damage)) : []);
 
-    // Opening the book turns to the team's selected shape, if it has one;
-    // otherwise to the page it was left on. Only on opening: a teammate
-    // selecting while it's open doesn't turn the reader's page.
+    // Opening the book turns to the team's selected shape (its first page),
+    // if it has one; otherwise to the page it was left on. Only on opening:
+    // a teammate selecting while it's open doesn't turn the reader's page.
     $effect(() => {
         if (!open) return;
-        const i = untrack(() => shapes.findIndex((s) => s.id === selected));
+        const i = untrack(() => pages.findIndex((p) => p.shapeId === selected));
         if (i >= 0) page = i;
     });
 
     const turn = (by: number) => {
         const next = page + by;
-        if (next < 0 || next >= shapes.length) return;
+        if (next < 0 || next >= pages.length) return;
         dir = by;
         page = next;
     };
@@ -92,8 +133,8 @@
     >
         <header class="flex items-center justify-between border-b-4 border-ink px-4 py-3">
             <h2 id="spellbook-title" class="uppercase">Spell book</h2>
-            {#if shapes.length > 0}
-                <span class="text-[8px] leading-[16px]">{page + 1} / {shapes.length}</span>
+            {#if pages.length > 0}
+                <span class="text-[8px] leading-[16px]">{page + 1} / {pages.length}</span>
             {/if}
         </header>
 
@@ -108,7 +149,7 @@
                         <!-- The title, centred across the page. -->
                         <h3 class="flex flex-wrap items-center justify-center gap-2 text-center text-[24px] leading-[32px] uppercase">
                             {shape.name}
-                            {#if shape.id === selected}
+                            {#if shape.shapeId === selected}
                                 <span class="bg-gold px-2 text-[8px] leading-[16px]">Selected</span>
                             {/if}
                         </h3>
@@ -156,7 +197,7 @@
             <button
                 type="button"
                 aria-label="Next page"
-                disabled={page >= shapes.length - 1}
+                disabled={page >= pages.length - 1}
                 onclick={() => turn(1)}
                 class="{navButton} justify-self-end"
             >
