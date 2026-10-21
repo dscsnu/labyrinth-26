@@ -22,6 +22,12 @@ const MaxTeamSize = 16
 // tunable.
 const MaxPatternPoints = 15
 
+// MaxPowerupMultiplier is the largest powerups.damage_multiplier
+// config.toml may set: a sanity bound (any sensible boost is a few times),
+// not a tunable. It also keeps the value finite: a cast's damage times it
+// must still fit the INTEGER columns a cast writes.
+const MaxPowerupMultiplier = 100
+
 // maxNameLength is the database's limit on team names (migration 0002).
 const maxNameLength = 32
 
@@ -36,6 +42,10 @@ type Settings struct {
 	QR QRSettings `toml:"qr"`
 	// Spell are the coefficients for pattern damage calculation.
 	Spell SpellSettings `toml:"spell"`
+	// Powerups are the powerups' strengths and durations.
+	Powerups PowerupSettings `toml:"powerups"`
+	// QTE are the quick-time events' answer windows.
+	QTE QTESettings `toml:"qte"`
 	// Auth are the sign-in and token timings.
 	Auth AuthSettings `toml:"auth"`
 	// Live are the event stream settings.
@@ -131,6 +141,30 @@ type GameSettings struct {
 	QRCooldown Duration `toml:"qr_cooldown"`
 	// BossAttack is how bosses attack ([game.boss_attack]).
 	BossAttack BossAttackSettings `toml:"boss_attack"`
+}
+
+// PowerupSettings is config.toml's [powerups] table: what each powerup does.
+type PowerupSettings struct {
+	// DamageMultiplier is what the next cast after a damage_multiplier
+	// powerup's activation multiplies its damage by.
+	DamageMultiplier float64 `toml:"damage_multiplier"`
+	// Heart is the health a heart powerup gives back, capped at game.health.
+	Heart int `toml:"heart"`
+	// ShortQRCooldown is how long a cast's waypoints cool while a
+	// short_qr_cooldown powerup is active, instead of game.qr_cooldown.
+	ShortQRCooldown Duration `toml:"short_qr_cooldown"`
+	// ShortQRWindow is how long a short_qr_cooldown powerup stays active.
+	ShortQRWindow Duration `toml:"short_qr_window"`
+}
+
+// QTESettings is config.toml's [qte] table: how long quick-time events stay
+// open.
+type QTESettings struct {
+	// AnswerWindow is how long a QTE stays open once started, unless an
+	// admin gives it its own window.
+	AnswerWindow Duration `toml:"answer_window"`
+	// MaxAnswerWindow is the longest window an admin may give one QTE.
+	MaxAnswerWindow Duration `toml:"max_answer_window"`
 }
 
 // BossAttackSettings is [game.boss_attack]: every boss attacks a team every
@@ -337,6 +371,15 @@ func (s Settings) validate() []error {
 		check(v > 0, "spell.base.%s must be positive", k)
 	}
 	check(s.Spell.Bonus.ConcaveQuad >= 0, "spell.bonus.concave_quad must not be negative")
+	// NaN fails both comparisons; +Inf fails the upper bound.
+	check(s.Powerups.DamageMultiplier >= 1 && s.Powerups.DamageMultiplier <= MaxPowerupMultiplier,
+		"powerups.damage_multiplier must be 1-%d", MaxPowerupMultiplier)
+	check(s.Powerups.Heart >= 1, "powerups.heart must be at least 1")
+	check(s.Powerups.ShortQRCooldown.Duration >= 0 && s.Powerups.ShortQRCooldown.Duration <= s.Game.QRCooldown.Duration,
+		"powerups.short_qr_cooldown must be 0 to game.qr_cooldown")
+	check(s.Powerups.ShortQRWindow.Duration > 0, "powerups.short_qr_window must be positive")
+	check(s.QTE.AnswerWindow.Duration > 0, "qte.answer_window must be positive")
+	check(s.QTE.MaxAnswerWindow.Duration >= s.QTE.AnswerWindow.Duration, "qte.max_answer_window must be at least qte.answer_window")
 	check(s.Leaderboard.Size >= 1, "leaderboard.size must be at least 1")
 	check(s.Leaderboard.PublishEvery.Duration >= time.Second, "leaderboard.publish_every must be at least 1s")
 	check(s.Admin.UserSearchLimit >= 1, "admin.user_search_limit must be at least 1")

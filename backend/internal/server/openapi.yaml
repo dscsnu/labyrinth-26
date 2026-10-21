@@ -336,6 +336,140 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
 
+  /api/admin/teams/{team_id}/powerups/{kind}:
+    post:
+      tags: [admin]
+      summary: Grant a team a powerup
+      description: >-
+        The team gets a powerup of `kind` to hold until its leader activates it. A team holds at most one of each
+        kind: if it already holds one, this one is wasted (`granted: false`, nothing changes, no event). Otherwise
+        members get `team_state` of type `powerup_granted`. Allowed while knocked out. Logged with the admin's ID.
+      parameters:
+        - { name: team_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{6}$" }, example: "482913" }
+        - { name: kind, in: path, required: true, schema: { $ref: "#/components/schemas/PowerupKind" } }
+      responses:
+        "200":
+          description: Granted, or wasted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: object
+                        required: [granted, state]
+                        properties:
+                          granted: { type: boolean, description: "The team now holds it because of this grant; false: it already held one." }
+                          state: { $ref: "#/components/schemas/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`, `unknown_powerup`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+
+  /api/admin/qtes:
+    get:
+      tags: [admin]
+      summary: Every QTE, with its answers
+      description: Every QTE, newest first, in full (the answer included), with its status on the server's clock and how the teams answered.
+      responses:
+        "200":
+          description: The QTEs.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { type: array, items: { $ref: "#/components/schemas/AdminQTE" } }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+    post:
+      tags: [admin]
+      summary: Write a QTE, as a draft or sent out at once
+      description: >-
+        An admin-typed quiz. `start: false` saves a draft to start later; `start: true` sends it out now to every
+        stream (`qte` of type `started`), open for `window_s` seconds, or `qte.answer_window` (30 s) without one.
+        One QTE is open at a time. Logged with the admin's ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, powerup, quiz]
+              properties:
+                kind: { type: string, enum: [quiz] }
+                powerup: { $ref: "#/components/schemas/PowerupKind" }
+                quiz:
+                  type: object
+                  required: [question, options, correct_option]
+                  properties:
+                    question: { type: string, minLength: 1 }
+                    options: { type: array, minItems: 2, items: { type: string, minLength: 1 }, description: "Different from each other." }
+                    correct_option: { type: integer, minimum: 0 }
+                window_s: { type: integer, minimum: 1, description: "Its own window, at most `qte.max_answer_window` (300 s); omitted: `qte.answer_window`." }
+                start: { type: boolean, default: false }
+            example: { kind: quiz, powerup: heart, quiz: { question: "Which building has the clock tower?", options: ["A block", "B block", "Library"], correct_option: 2 }, start: true }
+      responses:
+        "200":
+          description: The QTE written (and started).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties: { payload: { $ref: "#/components/schemas/AdminQTE" } }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_kind`, `invalid_powerup`, `invalid_question`, `invalid_options`, `invalid_correct_option`, `invalid_window`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qte_open`" }
+
+  /api/admin/qtes/{qte_id}/start:
+    post:
+      tags: [admin]
+      summary: Send out a draft QTE
+      description: The draft opens now for its window; every stream gets `qte` of type `started`. Each QTE runs once. Logged with the admin's ID.
+      parameters:
+        - { name: qte_id, in: path, required: true, schema: { type: integer, minimum: 1 }, example: 7 }
+      responses:
+        "200":
+          description: Started.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties: { payload: { $ref: "#/components/schemas/AdminQTE" } }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_qte_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_qte`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qte_already_run`, `qte_open`" }
+
+  /api/admin/qtes/{qte_id}/end:
+    post:
+      tags: [admin]
+      summary: End an open QTE early
+      description: Answers stop now; every stream gets `qte` of type `closed`, the answer revealed. Logged with the admin's ID.
+      parameters:
+        - { name: qte_id, in: path, required: true, schema: { type: integer, minimum: 1 }, example: 7 }
+      responses:
+        "200":
+          description: Ended, with the answers so far.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties: { payload: { $ref: "#/components/schemas/AdminQTE" } }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_qte_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_qte`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qte_not_started`, `qte_closed`" }
+
   /api/admin/users:
     get:
       tags: [admin]
@@ -631,6 +765,96 @@ paths:
           $ref: "#/components/responses/Error"
           description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`, `waypoint_on_cooldown`, `qr_expired`"
 
+  /api/qte:
+    get:
+      tags: [game]
+      summary: The open quick-time event
+      description: >-
+        The QTE open now, as players see it: without its answer (`quiz.correct_option` null), or null when none
+        is open. The same JSON as the game-wide `qte` event's message. One QTE runs at a time; it disappears once
+        its window is over (the closing `qte` event reveals the answer once).
+      responses:
+        "200":
+          description: The open QTE, or null.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/QTE" }] }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+
+  /api/teams/me/state/qte/{qte_id}/answer:
+    post:
+      tags: [game]
+      summary: Answer the open quick-time event
+      description: >-
+        Any member answers the open QTE for the team, once: the first answer locks it in. It's right or wrong at
+        once (`team_state.qte`), and a right answer gives the team the QTE's powerup in the same write (wasted if
+        it already holds that kind: `granted` false). Members get `team_state` of type `qte_answered`. A resend
+        is `qte_already_answered`, even after the close. A knocked-out team can't answer.
+      parameters:
+        - { name: qte_id, in: path, required: true, schema: { type: integer, minimum: 1 }, example: 7 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [option]
+              additionalProperties: false
+              properties:
+                option: { type: integer, minimum: 0, description: "The chosen option's index (from 0).", example: 2 }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_qte_id`, `invalid_body`, `invalid_option`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_qte`, `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`, `qte_already_answered`, `qte_closed`, `knocked_out`" }
+
+  /api/teams/me/state/powerups/{kind}:
+    post:
+      tags: [game]
+      summary: Use a held powerup
+      description: |
+        The leader uses the team's held powerup of `kind` (powerups are temporary effects, at most one of each
+        kind held). Members get `team_state`.
+        - `damage_multiplier`: the team's next cast deals × `powerups.damage_multiplier` (2), then it's used up.
+        - `heart`: +`powerups.heart` (1) health, never above `game.health`; the attack clock doesn't move.
+          `full_health` at full health.
+        - `short_qr_cooldown`: for `powerups.short_qr_window` (5 min), casts cool their waypoints for
+          `powerups.short_qr_cooldown` (2 min) instead of `game.qr_cooldown`.
+        - `instant_cast`: body `{"pattern": [waypoint IDs]}`; that pattern is cast at once, with no scans,
+          whatever the class and QR cooldowns (a locked big pattern is still `pattern_locked`). Then it's a cast
+          like any other (`spell_cast` or `boss_defeated`, `last_cast.instant`); the selection and stack are
+          purged.
+
+        The first three publish `powerup_activated`. A kind still running (an armed multiplier, a running short
+        QR cooldown) is `powerup_active`. A resend finds it used: `powerup_not_held`.
+      parameters:
+        - { name: kind, in: path, required: true, schema: { $ref: "#/components/schemas/PowerupKind" } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Only for `instant_cast`; the other kinds read no body.
+              required: [pattern]
+              additionalProperties: false
+              properties:
+                pattern: { type: array, minItems: 1, items: { type: string }, description: "The pattern's waypoint IDs, each once, any order.", example: ["2001", "2002", "2007", "2008"] }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_powerup`, `not_in_team`, `unknown_waypoint`, `unknown_pattern`" }
+        "409":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `not_in_game`, `knocked_out`, `powerup_not_held`, `powerup_active`, `full_health`, `pattern_locked`"
+
   /api/qr/{waypoint_id}:
     get:
       tags: [qr]
@@ -722,15 +946,16 @@ paths:
         nobody acting, both on the server's timer: `boss_attacked` / `knocked_out` and `qr_cooldown_ended`.
         The full reference (every type and when it's sent, ordering, versioning, reconnection, and a client example) is `backend/internal/server/README.md`, "The event stream".
 
-        Later game-wide events (quizzes, quick-time events) will use the same envelope as `leaderboard`,
-        with `message` `null` when nothing is active, or an object with at least an `id`. Their schemas are not final.
+        Game-wide events use the same envelope, with `message` `null` when nothing is active, or an object with
+        at least an `id`: the `leaderboard`, and the open quick-time event (`qte`).
 
         | event | scope | data | `type` values |
         |---|---|---|---|
         | `hello` | stream | `HelloEvent` | `connected` |
         | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `finished`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `powerup_granted`, `powerup_activated`, `powerup_ended`, `qte_answered`, `resync` |
+        | `qte` | game | `QTEEvent` | `snapshot`, `started`, `closed`, `resync` |
         | `leaderboard` | game | `LeaderboardEvent` | `snapshot`, `updated` |
 
         ```
@@ -858,11 +1083,14 @@ components:
         attack clock starts now), `boss_attacked` (the boss's interval passed, with nobody acting: `health` down,
         `boss.attacks` up), `knocked_out` (an attack brought `health` to 0), `qr_cooldown_ended` (with nobody
         acting, waypoints left `qr_cooldowns` and can be scanned again; an attack due at the same moment sends
-        `boss_attacked` or `knocked_out` instead), `revived` (an admin revived the team), `resync` (reloaded
-        after a failed write).
+        `boss_attacked` or `knocked_out` instead), `revived` (an admin revived the team), `powerup_granted`
+        (`powerups.held` gained a kind), `powerup_activated` (the leader used a damage_multiplier, heart or
+        short_qr_cooldown), `powerup_ended` (with nobody acting, a short_qr_cooldown's window ended; an attack due
+        at the same moment sends `boss_attacked` or `knocked_out` instead), `qte_answered` (a member answered the
+        open quick-time event: `qte` is the answer; `powerups.held` grew if it was right), `resync` (reloaded after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, powerup_granted, powerup_activated, powerup_ended, qte_answered, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
     QRCooldown:
       type: object
@@ -975,7 +1203,7 @@ components:
     GameOverview:
       type: object
       description: What an admin needs to see about a team's game (the same values as its `team_state`).
-      required: [health, knocked_out, bosses_defeated, boss, cooldown_class, qr_cooldowns, cast_count]
+      required: [health, knocked_out, bosses_defeated, boss, cooldown_class, qr_cooldowns, cast_count, powerups]
       properties:
         health: { type: integer, minimum: 0, example: 3 }
         knocked_out: { type: boolean, description: Health 0; it needs a revive. }
@@ -984,6 +1212,7 @@ components:
         cooldown_class: { type: ["string", "null"], description: The spell class it can't cast now, as `team_state.cooldown_class`., example: class_4 }
         qr_cooldowns: { type: array, items: { $ref: "#/components/schemas/QRCooldown" } }
         cast_count: { type: integer, minimum: 0, example: 7 }
+        powerups: { $ref: "#/components/schemas/Powerups" }
     LeaderboardEntry:
       type: object
       description: One team's place on the leaderboard.
@@ -1025,6 +1254,64 @@ components:
       properties:
         type: { type: string, enum: [snapshot, updated] }
         message: { $ref: "#/components/schemas/LeaderboardBoard" }
+    QTEEvent:
+      type: object
+      description: |
+        The data of a `qte` event, sent to every stream (game-wide). Types: `snapshot` (on connect: the open QTE,
+        or null), `started` (an admin started one: it, open, `quiz.correct_option` null), `closed` (its window
+        ended or an admin ended it: it, closed, with `quiz.correct_option` revealed; from then on the resource is
+        null until the next QTE starts), `resync` (reloaded after a failed write).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, started, closed, resync] }
+        message: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/QTE" }] }
+    QTE:
+      type: object
+      description: A quick-time event as players see it. Kind-specific content sits under its kind's key (`quiz`).
+      required: [id, kind, status, powerup, started_at, ends_at]
+      properties:
+        id: { type: integer, description: What an answer names., example: 7 }
+        kind: { type: string, enum: [quiz] }
+        status: { type: string, enum: [open, closed], description: "`closed` only in the closing event." }
+        powerup: { $ref: "#/components/schemas/PowerupKind" }
+        started_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time, description: "When answers stop. Count down to it on the server's clock (hello)." }
+        quiz:
+          type: object
+          required: [question, options, correct_option]
+          properties:
+            question: { type: string, example: "Which building has the clock tower?" }
+            options: { type: array, minItems: 2, items: { type: string }, description: "The choices, in order: answer with an index (from 0)." }
+            correct_option: { type: ["integer", "null"], description: "The right choice's index in the closing event; null while open." }
+    AdminQTE:
+      type: object
+      description: A QTE in full, as only admins see it, with its status and the teams' answers.
+      required: [id, kind, powerup, quiz, window_s, created_by, created_at, started_at, ends_at, status, stats]
+      properties:
+        id: { type: integer, example: 7 }
+        kind: { type: string, enum: [quiz] }
+        powerup: { $ref: "#/components/schemas/PowerupKind" }
+        quiz:
+          type: object
+          required: [question, options, correct_option]
+          properties:
+            question: { type: string }
+            options: { type: array, items: { type: string } }
+            correct_option: { type: integer }
+        window_s: { type: ["integer", "null"], description: "Its own window; null: `qte.answer_window`." }
+        created_by: { type: ["string", "null"], format: uuid, description: "The admin who wrote it; null for a seeded one." }
+        created_at: { type: string, format: date-time }
+        started_at: { type: ["string", "null"], format: date-time, description: "Null while a draft." }
+        ends_at: { type: ["string", "null"], format: date-time, description: "Null while a draft." }
+        status: { type: string, enum: [draft, open, closed] }
+        stats:
+          type: object
+          required: [answered, correct, granted, by_option]
+          properties:
+            answered: { type: integer, description: Teams that answered. }
+            correct: { type: integer }
+            granted: { type: integer, description: Teams that got the powerup (right, and not already holding it). }
+            by_option: { type: object, additionalProperties: { type: integer }, description: "Answers per option index; {} when none." }
     User:
       type: object
       required: [id, email, name, avatar_url, role, created_at]
@@ -1063,7 +1350,7 @@ components:
 
     Game:
       type: object
-      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points, spell_classes]
+      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points, spell_classes, powerups]
       properties:
         shapes:
           type: array
@@ -1079,6 +1366,15 @@ components:
           type: array
           description: Every spell class, ascending by points. A pattern of n waypoints is in the class whose points is n.
           items: { $ref: "#/components/schemas/SpellClass" }
+        powerups:
+          type: object
+          description: What each powerup does, from config.toml's [powerups].
+          required: [damage_multiplier, heart, short_qr_cooldown_s, short_qr_window_s]
+          properties:
+            damage_multiplier: { type: number, minimum: 1, description: "What a damage_multiplier multiplies the next cast's damage by.", example: 2 }
+            heart: { type: integer, minimum: 1, description: The health a heart gives back., example: 1 }
+            short_qr_cooldown_s: { type: integer, minimum: 0, description: "Seconds a cast's waypoints cool while a short_qr_cooldown is active.", example: 120 }
+            short_qr_window_s: { type: integer, minimum: 1, description: Seconds a short_qr_cooldown stays active., example: 300 }
     SpellClass:
       type: object
       description: >-
@@ -1119,7 +1415,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, powerups, qte, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["2001", "2002"] }
@@ -1240,10 +1536,50 @@ components:
             (`GET /api/teams/me/casts`) adds each new `last_cast` it sees; when `cast_count` is more than its
             log's length, it missed some (a reconnect) and re-fetches the log.
           example: 1
+        powerups: { $ref: "#/components/schemas/Powerups" }
+        qte:
+          description: >-
+            The team's latest answer to a quick-time event, or null if it never answered one. Compare `qte_id`
+            with the `qte` event's `id` to know whether the team answered the open one.
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [qte_id, option, correct, granted, answered_by, answered_at]
+              properties:
+                qte_id: { type: integer, example: 7 }
+                option: { type: integer, minimum: 0, example: 2 }
+                correct: { type: boolean, description: It was the right option. }
+                granted: { type: boolean, description: "The team got the QTE's powerup (false: wrong, or it already held that kind)." }
+                answered_by: { type: string, format: uuid }
+                answered_at: { type: string, format: date-time }
         version: { $ref: "#/components/schemas/Version" }
+    PowerupKind:
+      type: string
+      enum: [damage_multiplier, heart, short_qr_cooldown, instant_cast]
+      description: A kind of powerup (a temporary effect, not a spell).
+    Powerups:
+      type: object
+      description: >-
+        The team's powerups. `held`: the kinds it holds, at most one of each, in kind order. `active`: the effects
+        running, in kind order: a `damage_multiplier` (until null: used up by the next cast) and a
+        `short_qr_cooldown` (until its window ends, then it leaves with `powerup_ended`). A heart or an instant
+        cast takes effect at once, so never shows in `active`. Rebuilt from the database and the clock on a
+        restart.
+      required: [held, active]
+      properties:
+        held: { type: array, items: { $ref: "#/components/schemas/PowerupKind" }, example: [heart] }
+        active:
+          type: array
+          items:
+            type: object
+            required: [kind, until]
+            properties:
+              kind: { $ref: "#/components/schemas/PowerupKind" }
+              until: { type: ["string", "null"], format: date-time, description: "When it stops; null for a damage_multiplier." }
+          example: [{kind: short_qr_cooldown, until: "2026-10-17T12:05:00Z"}]
     Cast:
       type: object
-      required: [pattern, shape, class, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss]
+      required: [pattern, shape, class, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss, instant, boosted, short_qr_cooldown]
       properties:
         pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["2001", "2002", "2007", "2008"] }
         shape: { type: string, description: The pattern's type., example: quadrilateral }
@@ -1262,6 +1598,9 @@ components:
           example: 274
         boss: { type: ["integer", "null"], description: The serial of the boss it hit, or null if none., example: 1 }
         defeated_boss: { type: boolean, description: This cast defeated that boss. }
+        instant: { type: boolean, description: "An instant_cast powerup cast it, with no scans (cast_by is the leader)." }
+        boosted: { type: boolean, description: "A damage_multiplier powerup multiplied `dealt`." }
+        short_qr_cooldown: { type: boolean, description: "A short_qr_cooldown powerup was active: its waypoints cool for `powerups.short_qr_cooldown`." }
     Boss:
       type: object
       required: [serial, name, asset, description, hp, attack_interval_s, attack_damage]

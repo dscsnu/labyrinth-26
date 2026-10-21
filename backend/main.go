@@ -139,6 +139,8 @@ func run(log *slog.Logger, args []string) error {
 	srv.RegisterOnShutdown(app.Hub.Close)
 	// No boss attacks once shutting down: they'd publish to closed streams.
 	srv.RegisterOnShutdown(app.TeamState.Close)
+	// No QTE closes once shutting down: it'd broadcast to closed streams.
+	srv.RegisterOnShutdown(app.QTEs.Close)
 
 	errCh := make(chan error, 1)
 	go func() {

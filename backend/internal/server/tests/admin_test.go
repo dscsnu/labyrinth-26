@@ -553,3 +553,115 @@ func TestRateLimitOverHTTP(t *testing.T) {
 		}
 	}
 }
+
+// TestPowerupsOverHTTP checks both powerup routes end to end. The admin
+// grant: a player is not_admin; a bad team ID, an unknown team, an unknown
+// kind and a lobby team are refused; a heart is granted (powerup_granted on a
+// member's stream), a second one wasted (granted false). The leader's use:
+// an unknown kind, one not held, a member using it (not_leader), a heart at
+// full health; a damage multiplier activates (powerup_activated, active) and
+// is powerup_active while armed; an instant cast refuses a bad body, unknown
+// waypoints and waypoints making no pattern, then casts the quadrilateral boosted,
+// and a resend is powerup_not_held; a short QR cooldown shows its until; the
+// admin overview shows the team's powerups; a player with no team is
+// not_in_team.
+func TestPowerupsOverHTTP(t *testing.T) {
+	e := setup(t)
+	if err := e.db.Seed2026(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	admin := e.newAdmin("admin")
+	ps := e.startedTeam("pw")
+	teamID := e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)
+	grant := func(as player, id, kind string) apiResult {
+		return e.call("POST", "/api/admin/teams/"+id+"/powerups/"+kind, as, nil)
+	}
+	use := func(p player, kind string, body any) apiResult {
+		return e.call("POST", "/api/teams/me/state/powerups/"+kind, p, body)
+	}
+	held := func(st map[string]any) []any { return st["powerups"].(map[string]any)["held"].([]any) }
+	activeKinds := func(st map[string]any) []string {
+		var out []string
+		for _, a := range st["powerups"].(map[string]any)["active"].([]any) {
+			out = append(out, a.(map[string]any)["kind"].(string))
+		}
+		return out
+	}
+
+	expect(t, "player grants", grant(ps[0], teamID, "heart"), http.StatusForbidden, "not_admin")
+	expect(t, "bad team id", grant(admin, "12", "heart"), http.StatusBadRequest, "invalid_team_id")
+	expect(t, "unknown team", grant(admin, "000000", "heart"), http.StatusNotFound, "team_not_found")
+	expect(t, "unknown kind", grant(admin, teamID, "shield"), http.StatusNotFound, "unknown_powerup")
+	lobby := e.call("POST", "/api/teams", e.newPlayer("lobby"), map[string]string{"name": "Lobby"}).payload["id"].(string)
+	expect(t, "lobby team", grant(admin, lobby, "heart"), http.StatusConflict, "not_in_game")
+
+	s := e.openStream(ps[1])
+	s.next(t, "connect")
+	s.nextState(t, "connect")
+	r := grant(admin, teamID, "heart")
+	expect(t, "grant a heart", r, http.StatusOK, "")
+	if r.payload["granted"] != true || len(held(r.payload["state"].(map[string]any))) != 1 {
+		t.Fatalf("the grant: %v", r.payload)
+	}
+	if ev := s.nextState(t, "grant"); ev.typ != "powerup_granted" {
+		t.Fatalf("grant event: %s", ev.typ)
+	}
+	if r := grant(admin, teamID, "heart"); r.status != http.StatusOK || r.payload["granted"] != false {
+		t.Fatalf("a second heart: %d %v", r.status, r.payload)
+	}
+
+	expect(t, "unknown kind", use(ps[0], "shield", nil), http.StatusNotFound, "unknown_powerup")
+	expect(t, "not held", use(ps[0], "damage_multiplier", nil), http.StatusConflict, "powerup_not_held")
+	expect(t, "a member uses it", use(ps[1], "heart", nil), http.StatusForbidden, "not_leader")
+	expect(t, "a heart at full health", use(ps[0], "heart", nil), http.StatusConflict, "full_health")
+	expect(t, "no team", use(e.newPlayer("loner"), "heart", nil), http.StatusNotFound, "not_in_team")
+
+	expect(t, "grant a multiplier", grant(admin, teamID, "damage_multiplier"), http.StatusOK, "")
+	s.nextState(t, "grant")
+	r = use(ps[0], "damage_multiplier", nil)
+	expect(t, "activate the multiplier", r, http.StatusOK, "")
+	if got := activeKinds(r.payload); len(got) != 1 || got[0] != "damage_multiplier" {
+		t.Fatalf("active after the multiplier: %v", got)
+	}
+	if ev := s.nextState(t, "activate"); ev.typ != "powerup_activated" {
+		t.Fatalf("activate event: %s", ev.typ)
+	}
+	expect(t, "regrant", grant(admin, teamID, "damage_multiplier"), http.StatusOK, "")
+	expect(t, "activate while armed", use(ps[0], "damage_multiplier", nil), http.StatusConflict, "powerup_active")
+
+	expect(t, "grant an instant cast", grant(admin, teamID, "instant_cast"), http.StatusOK, "")
+	expect(t, "no pattern", use(ps[0], "instant_cast", map[string]any{"pattern": []string{}}), http.StatusBadRequest, "invalid_body")
+	expect(t, "a waypoint twice", use(ps[0], "instant_cast", map[string]any{"pattern": []string{"2001", "2001", "2002"}}), http.StatusBadRequest, "invalid_body")
+	expect(t, "an unknown waypoint", use(ps[0], "instant_cast", map[string]any{"pattern": []string{"9999"}}), http.StatusNotFound, "unknown_waypoint")
+	expect(t, "no such pattern", use(ps[0], "instant_cast", map[string]any{"pattern": []string{"2001"}}), http.StatusNotFound, "unknown_pattern")
+	r = use(ps[0], "instant_cast", map[string]any{"pattern": []string{"2001", "2002", "2007", "2008"}})
+	expect(t, "instant-cast the quadrilateral", r, http.StatusOK, "")
+	lc := r.payload["last_cast"].(map[string]any)
+	if lc["instant"] != true || lc["boosted"] != true || lc["dealt"].(float64) != 2*lc["damage"].(float64)*r.payload["damage_multiplier"].(float64) {
+		t.Fatalf("the instant cast: %v", lc)
+	}
+	expect(t, "a resent instant cast", use(ps[0], "instant_cast", map[string]any{"pattern": []string{"2001", "2002", "2007", "2008"}}),
+		http.StatusConflict, "powerup_not_held")
+
+	expect(t, "grant a short qr cooldown", grant(admin, teamID, "short_qr_cooldown"), http.StatusOK, "")
+	r = use(ps[0], "short_qr_cooldown", nil)
+	expect(t, "activate the short qr cooldown", r, http.StatusOK, "")
+	act := r.payload["powerups"].(map[string]any)["active"].([]any)
+	// The instant cast used up the armed multiplier; the regranted one is held.
+	if len(act) != 1 || act[0].(map[string]any)["kind"] != "short_qr_cooldown" || act[0].(map[string]any)["until"] == nil {
+		t.Fatalf("active after the short qr cooldown: %v", act)
+	}
+
+	status, teams := e.callList("GET", "/api/admin/teams", admin)
+	var game map[string]any
+	for _, row := range teams {
+		if row := row.(map[string]any); row["team"].(map[string]any)["id"] == teamID {
+			game = row["game"].(map[string]any)
+		}
+	}
+	if status != http.StatusOK || game == nil || len(game["powerups"].(map[string]any)["active"].([]any)) != 1 ||
+		len(game["powerups"].(map[string]any)["held"].([]any)) != 2 {
+		t.Fatalf("the admin overview: %d %v", status, game)
+	}
+}

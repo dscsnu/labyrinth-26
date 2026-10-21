@@ -31,7 +31,7 @@ The client, the code and the spell PR use different words. The code's are used h
 | type | | `Shape` | line, triangle, quadrilateral, …; what a team selects |
 | shape | | `Pattern` | one valid set of 4-digit waypoint IDs of a shape |
 | point | | `Waypoint` | a QR location, 4-digit ID |
-| | spell, powerup, damage | `Spell` | what completing a pattern casts: the team's reward |
+| | spell, damage | `Spell` | what completing a pattern casts: the team's reward |
 | class | | `SpellClass` | a group of patterns by waypoint count: every 4-point pattern is `class_4`, whatever its shape |
 
 | Term | Meaning |

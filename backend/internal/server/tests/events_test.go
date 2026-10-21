@@ -29,6 +29,7 @@ type stream struct {
 	events chan sseEvent // team / no_team
 	states chan sseEvent // team_state
 	boards chan sseEvent // leaderboard (game-wide)
+	qtes   chan sseEvent // qte (game-wide)
 	cancel context.CancelFunc
 
 	mu    sync.Mutex
@@ -67,12 +68,13 @@ func (e *env) openStreamWith(auth func(*http.Request)) *stream {
 		e.t.Fatalf("stream: %d %s", res.StatusCode, res.Header.Get("Content-Type"))
 	}
 
-	s := &stream{hellos: make(chan sseEvent, 64), events: make(chan sseEvent, 64), states: make(chan sseEvent, 64), boards: make(chan sseEvent, 64), cancel: cancel}
+	s := &stream{hellos: make(chan sseEvent, 64), events: make(chan sseEvent, 64), states: make(chan sseEvent, 64), boards: make(chan sseEvent, 64), qtes: make(chan sseEvent, 64), cancel: cancel}
 	go func() {
 		defer close(s.hellos)
 		defer close(s.events)
 		defer close(s.states)
 		defer close(s.boards)
+		defer close(s.qtes)
 		defer res.Body.Close()
 		sc := bufio.NewScanner(res.Body)
 		var name string
@@ -98,6 +100,8 @@ func (e *env) openStreamWith(auth func(*http.Request)) *stream {
 					s.states <- ev
 				case "leaderboard":
 					s.boards <- ev
+				case "qte":
+					s.qtes <- ev
 				default:
 					s.events <- ev
 				}
@@ -303,7 +307,7 @@ func TestStartPublishesTeamState(t *testing.T) {
 		if st.data["team_id"] != teamID || len(st.data["waypoints"].([]any)) != 0 || len(st.data["stack"].([]any)) != 0 || st.data["selection"] != nil {
 			t.Fatalf("member %d: team_state after start %v, want empty", i, st.data)
 		}
-		want := []string{"hello:connected", "team:snapshot", "team_state:snapshot", "leaderboard:snapshot", "team:started", "team_state:game_started"}
+		want := []string{"hello:connected", "team:snapshot", "team_state:snapshot", "qte:snapshot", "leaderboard:snapshot", "team:started", "team_state:game_started"}
 		if got := s.seen(); !slices.Equal(got, want) {
 			t.Fatalf("member %d: events %v, want %v", i, got, want)
 		}
@@ -327,8 +331,8 @@ func TestStreamStartsWithHello(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no leaderboard snapshot")
 	}
-	if got := s.seen(); !slices.Equal(got, []string{"hello:connected", "no_team:snapshot", "leaderboard:snapshot"}) {
-		t.Fatalf("events %v, want [hello:connected no_team:snapshot leaderboard:snapshot]", got)
+	if got := s.seen(); !slices.Equal(got, []string{"hello:connected", "no_team:snapshot", "qte:snapshot", "leaderboard:snapshot"}) {
+		t.Fatalf("events %v, want [hello:connected no_team:snapshot qte:snapshot leaderboard:snapshot]", got)
 	}
 }
 
@@ -453,7 +457,7 @@ func TestEventTypes(t *testing.T) {
 	admin := e.newPlayer("admin")
 	e.setRole(admin, "ADMIN")
 	sa, sb, sc := e.openStream(a), e.openStream(b), e.openStream(c)
-	open := []string{"hello:connected", "no_team:snapshot", "leaderboard:snapshot"}
+	open := []string{"hello:connected", "no_team:snapshot", "qte:snapshot", "leaderboard:snapshot"}
 
 	// The lobby.
 	teamID := e.call("POST", "/api/teams", a, map[string]string{"name": "Types"}).payload["id"].(string)

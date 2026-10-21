@@ -2,6 +2,7 @@ package teamstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,6 +28,16 @@ type teamRows struct {
 	stack     []scanRow     // the stack: newest scans after the selection, oldest first
 	casts     []castRow     // every team_cast row, oldest first
 	boss      *bossRow      // team_boss, if the team has a row
+	powerups  []powerupRow  // team_powerup rows, one per kind ever held
+	answers   []QTEAnswer   // team_qte_answer rows, oldest first
+}
+
+// powerupRow is a team_powerup row: one kind of powerup for one team.
+type powerupRow struct {
+	kind           string
+	held           bool
+	activatedAt    *time.Time // NULL: never activated
+	activatedCasts *int       // damage_multiplier only: the cast log's length at activation
 }
 
 // bossRow is a team_boss row: the team's progress through the bosses and
@@ -49,6 +60,9 @@ type castRow struct {
 	dealt            int
 	bossSerial       int // 0 for NULL
 	defeatedBoss     bool
+	instant          bool
+	boosted          bool
+	shortQR          bool // team_cast.short_qr_cooldown
 }
 
 // selectionRow is a team_selection row.
@@ -107,7 +121,8 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 
 	// Every cast per team, oldest first: the cast log.
 	rows, err = d.pool.Query(ctx, `
-		SELECT team_id, pattern_id, cast_by, cast_at, already_completed, dealt, COALESCE(boss_serial, 0), defeated_boss
+		SELECT team_id, pattern_id, cast_by, cast_at, already_completed, dealt, COALESCE(boss_serial, 0), defeated_boss,
+		       instant, boosted, short_qr_cooldown
 		FROM team_cast`+filter+`
 		ORDER BY team_id, id`, teamID)
 	if err != nil {
@@ -115,7 +130,7 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 	}
 	var cast castRow
 	if _, err := pgx.ForEachRow(rows, []any{&id, &cast.patternID, &cast.castBy, &cast.castAt, &cast.alreadyCompleted,
-		&cast.dealt, &cast.bossSerial, &cast.defeatedBoss}, func() error {
+		&cast.dealt, &cast.bossSerial, &cast.defeatedBoss, &cast.instant, &cast.boosted, &cast.shortQR}, func() error {
 		t := get(id)
 		t.casts = append(t.casts, cast)
 		return nil
@@ -134,6 +149,40 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 		&boss.phaseHealth, &boss.phaseStartedAt, &boss.cooldownsReset}, func() error {
 		row := boss
 		get(id).boss = &row
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// Each team's QTE answers, oldest first.
+	rows, err = d.pool.Query(ctx, `
+		SELECT team_id, qte_id, option, correct, granted, answered_by, answered_at
+		FROM team_qte_answer`+filter+`
+		ORDER BY team_id, answered_at, qte_id`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	var ans QTEAnswer
+	if _, err := pgx.ForEachRow(rows, []any{&id, &ans.QTE, &ans.Option, &ans.Correct, &ans.Granted, &ans.By, &ans.At}, func() error {
+		t := get(id)
+		a := ans
+		a.At = a.At.UTC()
+		t.answers = append(t.answers, a)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// Each team's powerups: one row per kind it ever held.
+	rows, err = d.pool.Query(ctx,
+		"SELECT team_id, kind, held, activated_at, activated_casts FROM team_powerup"+filter, teamID)
+	if err != nil {
+		return nil, err
+	}
+	var pw powerupRow
+	if _, err := pgx.ForEachRow(rows, []any{&id, &pw.kind, &pw.held, &pw.activatedAt, &pw.activatedCasts}, func() error {
+		t := get(id)
+		t.powerups = append(t.powerups, pw)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -190,46 +239,54 @@ func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uu
 }
 
 // insertCompletingScan logs a scan that completed a pattern (a cast), in one
-// transaction, in order:
-//  1. INSERT team_scan: the scan itself
-//  2. INSERT team_pattern … ON CONFLICT DO NOTHING: the first completion only
-//  3. INSERT team_cast: every cast, repeats included, with what it did to the
-//     bosses (c.Dealt, c.Boss, NULL when 0, c.DefeatedBoss)
-//  4. UPSERT team_boss: the team's progress after the cast (p.Defeated,
-//     p.Damage, and the phase: p.PhaseHealth, p.PhaseStart, which a defeat
-//     moves to the next boss). A new row takes the multiplier's default
-//     (1); an existing one keeps its multiplier, which casts never change.
-//  5. DELETE team_selection: which also empties the stack
+// transaction: INSERT team_scan (the scan itself), then insertCastRows.
 //
 // The scan is written with wrong = false: a wrong scan can't complete.
 func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, c Cast, p BossProgress) error {
-	var bossSerial *int
-	if c.Boss != 0 {
-		bossSerial = &c.Boss
-	}
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, false)",
 			teamID, waypointID, userID, at); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO team_pattern (team_id, pattern_id, completed_at) VALUES ($1, $2, $3)
-			ON CONFLICT DO NOTHING`, teamID, patternID, at); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed, dealt, boss_serial, defeated_boss)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			teamID, patternID, userID, at, c.AlreadyCompleted, c.Dealt, bossSerial, c.DefeatedBoss); err != nil {
-			return err
-		}
-		if err := upsertBoss(ctx, tx, teamID, p); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, "DELETE FROM team_selection WHERE team_id = $1", teamID)
-		return err
+		return insertCastRows(ctx, tx, teamID, patternID, c, p)
 	})
+}
+
+// insertCastRows writes cast c of patternID, inside the caller's transaction
+// tx, in order:
+//  1. INSERT team_pattern … ON CONFLICT DO NOTHING: the first completion only
+//  2. INSERT team_cast: every cast, repeats included, with what it did to the
+//     bosses (c.Dealt, c.Boss, NULL when 0, c.DefeatedBoss) and what
+//     powerups did to it (c.Instant, c.Boosted, c.ShortQR)
+//  3. UPSERT team_boss: the team's progress after the cast (p.Defeated,
+//     p.Damage, and the phase: p.PhaseHealth, p.PhaseStart, which a defeat
+//     moves to the next boss). A new row takes the multiplier's default
+//     (1); an existing one keeps its multiplier, which casts never change.
+//  4. DELETE team_selection: which also empties the stack
+func insertCastRows(ctx context.Context, tx pgx.Tx, teamID string, patternID int, c Cast, p BossProgress) error {
+	var bossSerial *int
+	if c.Boss != 0 {
+		bossSerial = &c.Boss
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO team_pattern (team_id, pattern_id, completed_at) VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, teamID, patternID, c.At); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed, dealt, boss_serial, defeated_boss,
+		                       instant, boosted, short_qr_cooldown)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		teamID, patternID, c.By, c.At, c.AlreadyCompleted, c.Dealt, bossSerial, c.DefeatedBoss,
+		c.Instant, c.Boosted, c.ShortQR); err != nil {
+		return err
+	}
+	if err := upsertBoss(ctx, tx, teamID, p); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, "DELETE FROM team_selection WHERE team_id = $1", teamID)
+	return err
 }
 
 // upsertSelection sets the team's selected shape and starts its stack empty,
@@ -291,4 +348,117 @@ func (d db) upsertCooldownsReset(ctx context.Context, teamID string, casts int) 
 		INSERT INTO team_boss (team_id, cooldowns_reset_casts) VALUES ($1, $2)
 		ON CONFLICT (team_id) DO UPDATE SET cooldowns_reset_casts = EXCLUDED.cooldowns_reset_casts`, teamID, casts)
 	return err
+}
+
+// upsertPowerupHeld records that teamID now holds a powerup of kind: one
+// INSERT INTO team_powerup … ON CONFLICT (team_id, kind) DO UPDATE SET held =
+// true WHERE it wasn't held. Exactly one row (execOne): memory said the team
+// didn't hold one, so Postgres must agree.
+func (d db) upsertPowerupHeld(ctx context.Context, teamID, kind string) error {
+	return holdPowerup(ctx, d.pool, teamID, kind)
+}
+
+// holdPowerup is the one statement that gives a team a powerup it didn't
+// hold, on the pool or inside a transaction: INSERT INTO team_powerup …
+// ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT held.
+// Exactly one row (execOne).
+func holdPowerup(ctx context.Context, q execer, teamID, kind string) error {
+	return execOne(ctx, q, `
+		INSERT INTO team_powerup (team_id, kind, held) VALUES ($1, $2, true)
+		ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT team_powerup.held`, teamID, kind)
+}
+
+// errAnswerAfterEnd is insertQTEAnswer's refusal of an answer at or after
+// the QTE's stored ends_at: an admin's End committed while memory still
+// had it open. AnswerQTE answers it with ErrQTEClosed.
+var errAnswerAfterEnd = errors.New("answer after the qte's stored ends_at")
+
+// insertQTEAnswer records teamID's answer a to a QTE, in one transaction:
+//  1. INSERT INTO team_qte_answer … SELECT … FROM qte WHERE the QTE has
+//     started, a.Option is one of its options and a.At is before its
+//     stored ends_at. No row means the last (memory checked the others,
+//     which never change back): errAnswerAfterEnd. The primary key backs
+//     one answer per team
+//  2. if grant isn't "": holdPowerup(grant), the QTE's powerup, in the
+//     same transaction, so a right answer is never saved without it
+func (d db) insertQTEAnswer(ctx context.Context, teamID string, a QTEAnswer, grant string) error {
+	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO team_qte_answer (team_id, qte_id, option, correct, granted, answered_by, answered_at)
+			SELECT $1, id, $3, $4, $5, $6, $7 FROM qte
+			WHERE id = $2 AND started_at IS NOT NULL AND $3 < cardinality(options) AND $7 < ends_at`,
+			teamID, a.QTE, a.Option, a.Correct, a.Granted, a.By, a.At)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errAnswerAfterEnd
+		}
+		if grant == "" {
+			return nil
+		}
+		return holdPowerup(ctx, tx, teamID, grant)
+	})
+}
+
+// updatePowerupActivated uses up teamID's held powerup of kind at at: one
+// UPDATE team_powerup SET held = false, activated_at, activated_casts WHERE
+// it's held. Exactly one row (execOne): memory said it was held.
+// activatedCasts is the cast log's length for a damage_multiplier, nil for
+// any other kind.
+func (d db) updatePowerupActivated(ctx context.Context, teamID, kind string, at time.Time, activatedCasts *int) error {
+	return activatePowerup(ctx, d.pool, teamID, kind, at, activatedCasts)
+}
+
+// useHeart uses up teamID's heart at at and writes the healed progress p, in
+// one transaction, in order:
+//  1. UPDATE team_powerup (activatePowerup): exactly one row
+//  2. UPSERT team_boss (upsertBoss): the higher phase_health
+func (d db) useHeart(ctx context.Context, teamID string, at time.Time, p BossProgress) error {
+	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
+		if err := activatePowerup(ctx, tx, teamID, PowerupHeart.ID(), at, nil); err != nil {
+			return err
+		}
+		return upsertBoss(ctx, tx, teamID, p)
+	})
+}
+
+// insertInstantCast logs a cast by an instant_cast powerup, in one
+// transaction: UPDATE team_powerup (activatePowerup, exactly one row), then
+// insertCastRows. No team_scan row: nothing was scanned.
+func (d db) insertInstantCast(ctx context.Context, teamID string, patternID int, c Cast, p BossProgress) error {
+	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
+		if err := activatePowerup(ctx, tx, teamID, PowerupInstantCast.ID(), c.At, nil); err != nil {
+			return err
+		}
+		return insertCastRows(ctx, tx, teamID, patternID, c, p)
+	})
+}
+
+// activatePowerup is the one statement that uses up a held powerup, on the
+// pool or inside a transaction: UPDATE team_powerup SET held = false,
+// activated_at = at, activated_casts WHERE team_id, kind AND held. Exactly one
+// row (execOne).
+func activatePowerup(ctx context.Context, q execer, teamID, kind string, at time.Time, activatedCasts *int) error {
+	return execOne(ctx, q, `
+		UPDATE team_powerup SET held = false, activated_at = $3, activated_casts = $4
+		WHERE team_id = $1 AND kind = $2 AND held`, teamID, kind, at, activatedCasts)
+}
+
+// execer is what runs a statement: the pool or a transaction.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// execOne runs a statement that must affect exactly one row. Anything else
+// means memory and Postgres disagree, which the caller reconciles.
+func execOne(ctx context.Context, q execer, sql string, args ...any) error {
+	tag, err := q.Exec(ctx, sql, args...)
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n != 1 {
+		return fmt.Errorf("expected 1 row affected, got %d: %s", n, sql)
+	}
+	return nil
 }

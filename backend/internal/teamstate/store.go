@@ -14,6 +14,7 @@ import (
 	"labyrinth/internal/bosses"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 )
 
@@ -23,6 +24,7 @@ import (
 //	atlas     Atlas                    static waypoints/shapes/patterns (atlas use case), no lock
 //	bosses    Bosses                   the static boss sequence (bosses use case), no lock
 //	qr        QR                       verifies scanned tokens (qr use case), no lock
+//	qtes      QTEs                     the quick-time events answers are checked against, no lock
 //	clock     Clock                    the time scans and casts are stamped with, and team timers
 //	Store.mu (RWMutex) guards:
 //	  states  map[teamID]*entry        created on a team's first write
@@ -101,6 +103,13 @@ type QR interface {
 	Verify(token string) (string, error)
 }
 
+// QTEs is what team state needs from the qte use case: a QTE by ID, to check
+// an answer against (*qte.Store). Lock-free.
+type QTEs interface {
+	// ByID returns QTE id; ok is false if there's none.
+	ByID(id int64) (qte.QTE, bool)
+}
+
 // Atlas is what team state needs from the atlas use case: the static
 // waypoints, shapes and patterns. The atlas never changes after startup, so
 // reading it needs no lock.
@@ -148,6 +157,19 @@ type Rules struct {
 	// QRCooldown is how long a cast's waypoints stay disabled for the team
 	// that cast it (game.qr_cooldown); 0 turns it off.
 	QRCooldown time.Duration
+	// PowerupMultiplier is what the next cast after a damage_multiplier
+	// powerup's activation multiplies its damage by
+	// (powerups.damage_multiplier).
+	PowerupMultiplier float64
+	// PowerupHeart is the health a heart powerup gives back, capped at
+	// Health (powerups.heart).
+	PowerupHeart int
+	// ShortQRCooldown is how long a cast's waypoints stay disabled while a
+	// short_qr_cooldown powerup is active (powerups.short_qr_cooldown).
+	ShortQRCooldown time.Duration
+	// ShortQRWindow is how long a short_qr_cooldown powerup stays active
+	// (powerups.short_qr_window).
+	ShortQRWindow time.Duration
 	// OnFinished, if not nil, is called with a team's ID once a cast has
 	// defeated its last boss (and at Load for a team found like that still
 	// IN_GAME), after the team's lock is released: server.Build passes
@@ -173,6 +195,7 @@ type Store struct {
 	atlas  Atlas
 	bosses Bosses
 	qr     QR
+	qtes   QTEs
 	game   Game // built once from the atlas and rules
 	teams  Teams
 	hub    *live.Hub
@@ -193,14 +216,14 @@ func (s *Store) now() time.Time { return s.clock.Now() }
 // due while the backend was down), and arms each one's timer. Call once at startup,
 // after atlas.Load, bosses.Load and teams.Load; Close stops the timers. qr
 // verifies the tokens Scan takes.
-func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, qr QR, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
+func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, qr QR, q QTEs, hub *live.Hub, log *slog.Logger, rules Rules) (*Store, error) {
 	d := db{pool: pg.Pool()}
 	stored, err := d.selectTeams(ctx, "", rules.MaxPatternPoints+1)
 	if err != nil {
 		return nil, fmt.Errorf("load team state: %w", err)
 	}
 
-	s := &Store{rules: rules, db: d, atlas: a, bosses: b, qr: qr, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, clock: rules.Clock}
+	s := &Store{rules: rules, db: d, atlas: a, bosses: b, qr: qr, qtes: q, game: newGame(a, rules), teams: t, hub: hub, log: log, states: map[string]*entry{}, clock: rules.Clock}
 	if s.clock == nil {
 		s.clock = systemClock{}
 	}
@@ -302,7 +325,8 @@ func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
 			return st, fmt.Errorf("cast: unknown pattern %d", lc.patternID)
 		}
 		st.Casts = append(st.Casts, Cast{Pattern: p, By: lc.castBy, At: lc.castAt.UTC(), AlreadyCompleted: lc.alreadyCompleted,
-			Dealt: lc.dealt, Boss: lc.bossSerial, DefeatedBoss: lc.defeatedBoss})
+			Dealt: lc.dealt, Boss: lc.bossSerial, DefeatedBoss: lc.defeatedBoss,
+			Instant: lc.instant, Boosted: lc.boosted, ShortQR: lc.shortQR})
 	}
 	if bp := rows.boss; bp != nil {
 		// More bosses defeated than exist means game.bosses was lowered
@@ -320,6 +344,28 @@ func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
 		st.Boss.Health = st.Boss.PhaseHealth
 		st.Boss = st.Boss.at(s.now(), s.bosses)
 		st.CooldownsReset = bp.cooldownsReset
+	}
+	st.QTEAnswers = rows.answers
+	for _, pw := range rows.powerups {
+		k, ok := PowerupByID(pw.kind)
+		if !ok {
+			return st, fmt.Errorf("team_powerup: unknown kind %q", pw.kind)
+		}
+		if pw.held {
+			st.Powerups.Held = st.Powerups.Held.With(k)
+		}
+		switch {
+		case k == PowerupDamageMultiplier && pw.activatedCasts != nil:
+			// Armed until the cast log grows past its length at activation.
+			if *pw.activatedCasts > len(st.Casts) {
+				return st, fmt.Errorf("team_powerup: damage_multiplier activated at %d casts, but the log has %d", *pw.activatedCasts, len(st.Casts))
+			}
+			st.Powerups.MultiplierArmed = *pw.activatedCasts == len(st.Casts)
+		case k == PowerupShortQRCooldown && pw.activatedAt != nil:
+			if until := pw.activatedAt.UTC().Add(s.rules.ShortQRWindow); s.now().Before(until) {
+				st.Powerups.ShortQRUntil = until
+			}
+		}
 	}
 	st.QRCooldowns = s.qrCooldowns(st.Casts, st.CooldownsReset, s.now())
 	for _, sc := range rows.stack {
@@ -371,6 +417,9 @@ func (s *Store) schedule(e *entry, teamID string, st *State) {
 	next, ok := st.Boss.nextAttack(s.bosses)
 	if len(st.QRCooldowns) > 0 && (!ok || st.QRCooldowns[0].Until.Before(next)) {
 		next, ok = st.QRCooldowns[0].Until, true // the soonest QR cooldown to end
+	}
+	if w := st.Powerups.ShortQRUntil; !w.IsZero() && (!ok || w.Before(next)) {
+		next, ok = w, true // a short_qr_cooldown powerup's window ends
 	}
 	if !ok {
 		return
@@ -489,4 +538,17 @@ const (
 	// Revived: an admin revived the team: health is back to game.health and
 	// the current boss's attack clock starts again.
 	Revived live.EventType = "revived"
+	// PowerupGranted: the team earned a powerup (powerups.held gained it).
+	PowerupGranted live.EventType = "powerup_granted"
+	// PowerupActivated: the leader activated a damage_multiplier, heart or
+	// short_qr_cooldown (powerups.held lost it; powerups.active gained it,
+	// or health went up). An instant cast is a spell_cast or boss_defeated.
+	PowerupActivated live.EventType = "powerup_activated"
+	// QTEAnswered: a member answered the open QTE for the team (qte is the
+	// answer, right or wrong; powerups.held gained the QTE's powerup if it
+	// was right and the team didn't hold one).
+	QTEAnswered live.EventType = "qte_answered"
+	// PowerupEnded: by itself, with nobody acting, a short_qr_cooldown
+	// powerup's window ended (powerups.active lost it).
+	PowerupEnded live.EventType = "powerup_ended"
 )

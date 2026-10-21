@@ -30,6 +30,7 @@ import (
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/postgres/pgtest"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -59,6 +60,9 @@ type clock struct {
 	mu     sync.Mutex
 	t      time.Time
 	timers []*fakeTimer
+	// leaky makes stop miss: the timer still fires, as a real one whose
+	// callback was already on its way when stopped.
+	leaky bool
 }
 
 // fakeTimer is one pending AfterFunc call.
@@ -84,6 +88,9 @@ func (c *clock) AfterFunc(d time.Duration, f func()) func() bool {
 	return func() bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if c.leaky {
+			return false
+		}
 		was := !ft.stopped
 		ft.stopped = true
 		return was
@@ -132,6 +139,13 @@ func (c *clock) pending() int {
 // game.bosses the seed doesn't load, so these tests skip.
 const seedBosses = 6
 
+// qteRules are config.toml's [qte] with the fake clock: the qte store the
+// fixtures check answers against, on the same database and clock.
+func qteRules(set config.Settings, clk *clock) qte.Rules {
+	return qte.Rules{AnswerWindow: set.QTE.AnswerWindow.Duration, MaxAnswerWindow: set.QTE.MaxAnswerWindow.Duration,
+		Powerups: teamstate.PowerupIDs(), WriteTimeout: set.Storage.WriteTimeout.Duration, Clock: clk}
+}
+
 // passQR is a teamstate.QR that treats the token as the waypoint ID it names,
 // so these tests exercise team state without the qr use case's signing and
 // expiry. Real verification is covered by internal/qr and the server tests.
@@ -158,6 +172,7 @@ type fixtureEnv struct {
 	dbURL  string
 	teams  *teams.Store
 	state  *teamstate.Store
+	qtes   *qte.Store
 	hub    *live.Hub
 	rules  teamstate.Rules
 	clock  *clock
@@ -272,11 +287,15 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		LockedPatternPoints: set.Game.LockedPatternPoints,
 		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
 		QRCooldown:          set.Game.QRCooldown.Duration,
+		PowerupMultiplier:   set.Powerups.DamageMultiplier,
+		PowerupHeart:        set.Powerups.Heart,
+		ShortQRCooldown:     set.Powerups.ShortQRCooldown.Duration,
+		ShortQRWindow:       set.Powerups.ShortQRWindow.Duration,
 		WriteTimeout:        set.Storage.WriteTimeout.Duration,
 		Epoch:               1, // a restart in a test passes another
 	}
 	if !o.qrCooldown {
-		rules.QRCooldown = 0
+		rules.QRCooldown, rules.ShortQRCooldown = 0, 0
 	}
 	if o.rules != nil {
 		o.rules(&rules)
@@ -289,8 +308,10 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		o.bossRules(&br)
 	}
 	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
-	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, passQR{}, hub, pgtest.Quiet, rules))
-	return &fixtureEnv{atlas: at, bosses: bs, db: db, dbURL: dbURL, teams: ts, state: st, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
+	qs := pgtest.Must(qte.Load(ctx, db, hub, pgtest.Quiet, qteRules(set, clk)))
+	t.Cleanup(qs.Close)
+	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, passQR{}, qs, hub, pgtest.Quiet, rules))
+	return &fixtureEnv{atlas: at, bosses: bs, db: db, dbURL: dbURL, teams: ts, state: st, qtes: qs, hub: hub, rules: rules, clock: clk, teamID: team.ID, users: ids}
 }
 
 // tick returns n seconds: the time unit scenarios are written in. There's no
@@ -729,7 +750,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 	beforeView := f.view(t)
 	rules := f.rules
 	rules.Epoch = 2 // a new process
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, rules))
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.qtes, f.hub, pgtest.Quiet, rules))
 	afterView := pgtest.Must(restarted.ForUser(f.users[0]))
 	// Version is memory-only: a restart starts again at seq 0, in the new
 	// epoch. Everything else reloads exactly.
@@ -961,7 +982,7 @@ func TestCastLog(t *testing.T) {
 		"SELECT count(*) FROM team_cast WHERE team_id = $1", f.teamID).Scan(&rows); err != nil || rows != 3 {
 		t.Fatalf("team_cast has %d rows (%v), want 3", rows, err)
 	}
-	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
+	restarted := pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.qtes, f.hub, pgtest.Quiet, f.rules))
 	before := pgtest.Must(json.Marshal(cs))
 	after := pgtest.Must(json.Marshal(pgtest.Must(restarted.CastsForUser(f.users[2]))))
 	if string(before) != string(after) {

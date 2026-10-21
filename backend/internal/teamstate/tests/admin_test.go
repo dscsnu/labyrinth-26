@@ -7,7 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"labyrinth/internal/platform/postgres/pgtest"
+	"labyrinth/internal/qte"
+	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 )
 
@@ -145,5 +149,54 @@ func TestStandings(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].BossesDefeated != want.BossesDefeated || !got[0].LastDefeatAt.Equal(want.LastDefeatAt) || got[0].Damage != want.Damage {
 		t.Fatalf("standings %+v, want %+v", got, want)
+	}
+}
+
+// staleTeams is a teamstate.Teams whose ForUser still answers with the team
+// a user was removed from: the lookup a write makes before taking the team's
+// lock, run just before an admin's removal applied.
+type staleTeams struct {
+	*teams.Store
+	stale map[uuid.UUID]teams.Team
+}
+
+// ForUser returns the stale team for a removed user, else the real one.
+func (s staleTeams) ForUser(id uuid.UUID) (teams.Team, error) {
+	if t, ok := s.stale[id]; ok {
+		return t, nil
+	}
+	return s.Store.ForUser(id)
+}
+
+// TestRemovedDuringWrite checks every member write's second membership check,
+// under the team's lock: a member removed by an admin after the write looked
+// their team up (staleTeams) is refused not_in_team, and nothing changes.
+func TestRemovedDuringWrite(t *testing.T) {
+	f := started(t)
+	ctx := context.Background()
+	q := pgtest.Must(f.qtes.Create(ctx, f.users[0], qte.Draft{Kind: qte.KindQuiz, Powerup: "heart",
+		Quiz: &qte.Quiz{Question: "Q", Options: []string{"A", "B"}, CorrectOption: 0}}, true))
+	gone := f.users[1]
+	before := pgtest.Must(f.teams.ForUser(gone))
+	pgtest.Must(f.teams.RemoveMember(ctx, f.teamID, gone, nil))
+	f.state.Close()
+	f.state = pgtest.Must(teamstate.Load(ctx, pgtest.Open(t, f.dbURL), f.atlas, f.bosses,
+		staleTeams{Store: f.teams, stale: map[uuid.UUID]teams.Team{gone: before}}, passQR{}, f.qtes, f.hub, pgtest.Quiet, f.rules))
+	was := withoutVersionJSON(t, f.view(t))
+
+	for name, write := range map[string]func() error{
+		"select":       func() error { _, err := f.state.Select(ctx, gone, "quadrilateral"); return err },
+		"clear":        func() error { _, err := f.state.ClearSelection(ctx, gone); return err },
+		"scan":         func() error { _, err := f.state.Scan(ctx, gone, "2001"); return err },
+		"activate":     func() error { _, err := f.state.Activate(ctx, gone, teamstate.PowerupHeart); return err },
+		"instant cast": func() error { _, err := f.state.InstantCast(ctx, gone, quad); return err },
+		"answer":       func() error { _, err := f.state.AnswerQTE(ctx, gone, q.ID, 0); return err },
+	} {
+		if err := write(); !errors.Is(err, teamstate.ErrNotInTeam) {
+			t.Errorf("%s by a member removed meanwhile: %v", name, err)
+		}
+	}
+	if now := withoutVersionJSON(t, f.view(t)); now != was {
+		t.Fatalf("refused writes changed the state\nbefore: %s\nafter:  %s", was, now)
 	}
 }

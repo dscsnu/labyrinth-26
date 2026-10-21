@@ -1,6 +1,6 @@
 # Admin: the organisers' toolbox
 
-Every `/api/admin/…` route, in one use case. Admin owns **no data and no state**: each route checks its input and calls the use case that owns the data (`teams`, `teamstate`, `user`) through small interfaces declared here. It's a **facade** (AGENTS.md §3): `doc.go`, `api.go`, `read.go`, `write.go` and this README, but no `db.go` or `store.go`.
+Every `/api/admin/…` route, in one use case. Admin owns **no data and no state**: each route checks its input and calls the use case that owns the data (`teams`, `teamstate`, `qte`, `user`) through small interfaces declared here. It's a **facade** (AGENTS.md §3): `doc.go`, `api.go`, `read.go`, `write.go` and this README, but no `db.go` or `store.go`.
 
 Config values appear with their key: **20** (`admin.user_search_limit`).
 
@@ -24,12 +24,14 @@ Config values appear with their key: **20** (`admin.user_search_limit`).
 | **Admin** | A user whose role is `ADMIN` **in Postgres now**. `server.Build` wraps every admin route as `authAPI.RequireAuth(perUser(userAPI.RequireAdmin(h)))` (`perUser` is the per-user rate limit): `RequireAdmin` reads the role with `user.Get` on every request, never from the token (which can be up to **12 h**, `auth.token_ttl`, stale). Anyone else gets `403 not_admin`. |
 | **Facade** | A use case that owns nothing: its writes are the owners' writes (their rules, write-through and events), run for an admin. Admin adds only rules about *who is acting*. |
 | **Team overview** | One row of the admin's teams list: the team and, for a started or finished team, its **game at a glance** (health, knocked out, boss, cooldowns, cast count). |
+| **QTE overview** | One row of the admin's QTE list: the QTE **in full** (its answer too, which players only see at the close), its status (`draft`, `open`, `closed`) and how the teams answered (`stats`: answered, correct, granted, per option). |
 | **Own role** | An admin can't change their own role (`409 cannot_change_own_role`), so nobody locks themselves out; another admin can. |
 
 ## The flow
 1. **Look:** `GET /api/admin/teams` lists every team with its game at a glance (`/admin` filters to knocked-out teams).
-2. **Act on a team:** revive it (health back, a fresh attack clock), reset its cooldowns, remove a member (naming a new leader when removing the leader), or delete it with all its progress.
-3. **Act on a user:** find them by email (`GET /api/admin/users?email=`), then give them `PLAYER`, `HELPER` or `ADMIN`.
+2. **Act on a team:** revive it (health back, a fresh attack clock), reset its cooldowns, grant it a powerup, remove a member (naming a new leader when removing the leader), or delete it with all its progress.
+3. **Run a quiz:** write one and send it out at once, or save a draft (or use a seeded one) and start it later (`POST /api/admin/qtes`, `…/{qte_id}/start`). Every phone gets it; teams answer; it closes after its window, or when an admin ends it (`…/end`), revealing the answer. `GET /api/admin/qtes` shows each with its answers.
+4. **Act on a user:** find them by email (`GET /api/admin/users?email=`), then give them `PLAYER`, `HELPER` or `ADMIN`.
 
 **Why one use case for every admin route.** The routes were spread over `teams` and `teamstate` (each had an `AdminRoutes`). One place makes the admin surface easy to audit, gives it one error table and one log line shape, and lets a route combine use cases (the overview joins teams with team state) without either importing the other (AGENTS.md §4).
 
@@ -42,12 +44,14 @@ The package comment.
 ### `read.go`
 - **Interfaces** (AGENTS.md §4), filled by `server.Build` with the real stores:
   - `Teams`: `All`, `ByID`, `RemoveMember`, `Delete` (`*teams.Store`)
-  - `TeamState`: `TeamView`, `Revive`, `ResetCooldowns` (`*teamstate.Store`)
+  - `TeamState`: `TeamView`, `Revive`, `ResetCooldowns`, `GrantPowerup`, `QTEStats` (`*teamstate.Store`)
+  - `QTEs`: `List`, `Status`, `Create`, `Start`, `End` (`*qte.Store`)
   - `Users`: `Search`, `SetRole` (`*user.Users`)
 - **`Rules`**: `UserSearchLimit` (`admin.user_search_limit`).
-- **`Admin`**, **`New(t, st, u, rules)`**.
+- **`Admin`**, **`New(t, st, q, u, rules)`**.
 - **`TeamOverview`** `{team, game}` and **`GameOverview`** (see [Data model](#data-model)).
 - **`Teams()`**: `teams.All()` in ID order; for each team not in the `LOBBY`, `TeamState.TeamView(id)` copied into a `GameOverview`. All from memory.
+- **`QTEOverview`** (the `qte.QTE` flattened, plus `status` and `stats`) and **`QTEs()`**: `QTEs.List()` (newest first), each with `QTEs.Status` (the store's clock) and its `TeamState.QTEStats()` entry (`by_option` `{}` when nobody answered). All from memory.
 - **`SearchUsers(ctx, query)`**: `Users.Search(ctx, query, UserSearchLimit)` (one Postgres query in `user`).
 
 ### `write.go`
@@ -59,10 +63,14 @@ Each write is one call to the owner:
 | `DeleteTeam(ctx, teamID)` | `teams.Delete` | nothing |
 | `Revive(ctx, teamID)` | `teamstate.Revive` | nothing |
 | `ResetCooldowns(ctx, teamID)` | `teamstate.ResetCooldowns` | nothing |
+| `GrantPowerup(ctx, teamID, kind)` | `teamstate.GrantPowerup` | nothing |
+| `CreateQTE(ctx, adminID, draft, start)` | `qte.Create` | nothing |
+| `StartQTE(ctx, id)` | `qte.Start` | nothing |
+| `EndQTE(ctx, id)` | `qte.End` | the answers so far in its row |
 | `SetRole(ctx, adminID, userID, role)` | `user.SetRole` | `ErrCannotChangeOwnRole` when `adminID == userID`, checked first (the user use case isn't called) |
 
 ### `api.go`
-- **`Routes(mux, admin)`** registers the seven routes behind `admin`.
+- **`Routes(mux, admin)`** registers the twelve routes behind `admin`.
 - **`errorCodes`**: one table for every error the routes can meet, admin's and the owners':
 
   | Error | Status | Code |
@@ -73,13 +81,26 @@ Each write is one call to the owner:
   | `teams.ErrNewLeaderRequired` | 409 | `new_leader_required` |
   | `teams.ErrInvalidNewLeader` | 409 | `invalid_new_leader` |
   | `teamstate.ErrNotInGame` | 409 | `not_in_game` |
+  | `teamstate.ErrUnknownPowerup` | 404 | `unknown_powerup` |
+  | `qte.ErrUnknownKind` | 400 | `invalid_kind` |
+  | `qte.ErrUnknownPowerup` | 400 | `invalid_powerup` |
+  | `qte.ErrInvalidQuestion` | 400 | `invalid_question` |
+  | `qte.ErrInvalidOptions` | 400 | `invalid_options` |
+  | `qte.ErrInvalidCorrectOption` | 400 | `invalid_correct_option` |
+  | `qte.ErrInvalidWindow` | 400 | `invalid_window` |
+  | `qte.ErrQTEOpen` | 409 | `qte_open` |
+  | `qte.ErrUnknownQTE` | 404 | `unknown_qte` |
+  | `qte.ErrQTEAlreadyRun` | 409 | `qte_already_run` |
+  | `qte.ErrQTENotStarted` | 409 | `qte_not_started` |
+  | `qte.ErrQTEClosed` | 409 | `qte_closed` |
   | `user.ErrUserNotFound` | 404 | `user_not_found` (401 on `GET /api/me`, where it's the caller's own token) |
   | `user.ErrInvalidRole` | 400 | `invalid_role` |
   | `ErrCannotChangeOwnRole` | 409 | `cannot_change_own_role` |
 
 - **`teamID(w, r)`**: `{team_id}` must match `teamIDPattern` (6 digits, teams' format), else `400 invalid_team_id`. Every team route checks it first.
 - **`userID(w, raw, what)`**: a UUID, else `400 invalid_user_id` naming the field.
-- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
+- **`qteID(w, r)`**: `{qte_id}` a positive integer, else `400 invalid_qte_id`.
+- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `grantPowerup` (`{kind}` through `teamstate.PowerupByID`, else `404 unknown_powerup`), `qtes`, `createQTE` (the body has a `qte.Draft`'s fields plus `start`, with `correct_option` a pointer so a missing one isn't option 0; one that doesn't decode, or a quiz without `correct_option`, is `400 invalid_body`), `startQTE`, `endQTE`, `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
 
 ## Data model
 **Memory:** none. **Postgres:** none of its own; the owners' tables (see their READMEs).
@@ -95,9 +116,10 @@ Each write is one call to the owner:
 | `cooldown_class` | string or null | the spell class it can't cast now |
 | `qr_cooldowns` | array | the waypoints it can't scan yet, each with `until` |
 | `cast_count` | int | how many spells it has cast |
+| `powerups` | object | the powerups it holds and the ones running, as `team_state.powerups` |
 
 ## The write-through
-Doesn't apply: admin persists nothing. Each owner runs its own write-through (teams' `RemoveMember` and `Delete`, teamstate's `Revive` and `ResetCooldowns`; user's `SetRole` writes Postgres directly).
+Doesn't apply: admin persists nothing. Each owner runs its own write-through (teams' `RemoveMember` and `Delete`, teamstate's `Revive`, `ResetCooldowns` and `GrantPowerup`, qte's `Create`, `Start` and `End`; user's `SetRole` writes Postgres directly).
 
 ## API
 | Method | Path | Body | Response |
@@ -107,6 +129,11 @@ Doesn't apply: admin persists nothing. Each owner runs its own write-through (te
 | DELETE | `/api/admin/teams/{team_id}/members/{user_id}[?new_leader=<user id>]` | none | `200` the team after the removal |
 | POST | `/api/admin/teams/{team_id}/revive` | none | `200` the team's state |
 | POST | `/api/admin/teams/{team_id}/cooldowns/reset` | none | `200` the team's state |
+| POST | `/api/admin/teams/{team_id}/powerups/{kind}` | none; `kind` is `damage_multiplier`, `heart`, `short_qr_cooldown` or `instant_cast` | `200` `{"granted", "state"}`: `granted` false when the team already held one (wasted, nothing changes) |
+| GET | `/api/admin/qtes` | none | `200` `[QTEOverview]`, newest first |
+| POST | `/api/admin/qtes` | `{"kind": "quiz", "powerup", "quiz": {"question", "options", "correct_option"}, "window_s"?, "start"}` | `200` its `QTEOverview` |
+| POST | `/api/admin/qtes/{qte_id}/start` | none | `200` its `QTEOverview` |
+| POST | `/api/admin/qtes/{qte_id}/end` | none | `200` its `QTEOverview`, with the answers so far |
 | GET | `/api/admin/users[?email=<part>]` | none | `200` `[User]`, at most **20** (`admin.user_search_limit`), by email |
 | PUT | `/api/admin/users/{user_id}/role` | `{"role": "PLAYER" \| "HELPER" \| "ADMIN"}` | `200` the user |
 
@@ -123,23 +150,46 @@ Every route: `401 missing_token` / `invalid_token` / `user_not_found` (the calle
 ]}
 ```
 
+`GET /api/admin/qtes` (an open quiz one team has answered):
+```json
+{"success": true, "payload": [
+  {"id": 7, "kind": "quiz", "powerup": "heart", "quiz": {"question": "Which building has the clock tower?", "options": ["A block", "B block", "Library"], "correct_option": 2},
+   "window_s": null, "created_by": "6f1c…", "created_at": "2026-10-21T11:50:00Z", "started_at": "2026-10-21T12:00:00Z", "ends_at": "2026-10-21T12:00:30Z",
+   "status": "open", "stats": {"answered": 1, "correct": 1, "granted": 1, "by_option": {"2": 1}}}
+]}
+```
+
 `PUT /api/admin/users/9a2b…/role` `{"role": "HELPER"}` → `{"success": true, "payload": {"id": "9a2b…", "email": "…", "role": "HELPER", …}}`.
 
-Events: whatever the owner publishes (see [`internal/server/README.md`, "What publishes what"](../server/README.md#what-publishes-what)): removal and deletion publish `team` / `no_team`; revive and reset publish `team_state` (`revived`, `cooldowns_reset`); a role change publishes nothing.
+Events: whatever the owner publishes (see [`internal/server/README.md`, "What publishes what"](../server/README.md#what-publishes-what)): removal and deletion publish `team` / `no_team`; revive and reset publish `team_state` (`revived`, `cooldowns_reset`); starting and ending a QTE publish `qte` to every stream (`started`, `closed`); a role change publishes nothing.
 
 ## Rules and cases
 In validation order, per route (after the guard: `401`, then `403 not_admin`).
 
-**Team routes** (`DELETE …/{team_id}`, `…/members/{user_id}`, `…/revive`, `…/cooldowns/reset`):
+**Team routes** (`DELETE …/{team_id}`, `…/members/{user_id}`, `…/revive`, `…/cooldowns/reset`, `…/powerups/{kind}`):
 
 | Case | Result |
 |---|---|
 | `team_id` isn't 6 digits | `400 invalid_team_id` |
 | member route: `user_id` or `new_leader` isn't a UUID | `400 invalid_user_id` |
+| powerup route: `kind` isn't one of the four | `404 unknown_powerup` |
 | no such team | `404 team_not_found` |
-| revive / reset on a team not `IN_GAME` | `409 not_in_game` |
+| revive / reset / powerup on a team not `IN_GAME` | `409 not_in_game` |
+| powerup: the team already holds one of that kind | `200`, `granted: false`: wasted, nothing changed or published |
+| powerup: granted | `200`, `granted: true`; the members get `team_state` (`powerup_granted`). Allowed while knocked out |
 | removal rules | as `teams.RemoveMember`: `not_a_member`, `last_member`, `new_leader_required`, `invalid_new_leader` |
 | delete | always allowed, any status; the members get `no_team` (`team_deleted`) |
+
+**QTEs** (`POST /api/admin/qtes`, `…/{qte_id}/start`, `…/{qte_id}/end`); the rules are qte's ([`internal/qte/README.md`](../qte/README.md)):
+
+| Case | Result |
+|---|---|
+| create: body doesn't decode, or a quiz has no `correct_option` (it would otherwise read as option 0) | `400 invalid_body` |
+| create: kind not `quiz`; powerup not one of the four; question blank; under 2 options, a blank or repeated one; `correct_option` not an option; `window_s` under 1 or over **300** (`qte.max_answer_window`) | `400 invalid_kind`, `invalid_powerup`, `invalid_question`, `invalid_options`, `invalid_correct_option`, `invalid_window`, in that order |
+| create with `start`, or start: another QTE is open | `409 qte_open` (a create with `start` writes nothing) |
+| start / end: `qte_id` isn't a positive integer; no such QTE | `400 invalid_qte_id`; `404 unknown_qte` |
+| start: it has run before | `409 qte_already_run` (create a copy to ask again) |
+| end: a draft; already closed | `409 qte_not_started`; `409 qte_closed` |
 
 **Users:**
 
@@ -173,8 +223,10 @@ Nothing to recover: a failed owner write reconciles in the owner. Postgres down:
 ## Tests
 | Test | File | Covers |
 |---|---|---|
-| `TestTeamsOverview` | `tests/admin_test.go` | a lobby team's game is null; a started team's comes from its team view (fakes) |
+| `TestTeamsOverview` | `tests/admin_test.go` | a lobby team's game is null; a started team's comes from its team view (fakes), powerups included |
 | `TestSetRoleNotOwn` | `tests/admin_test.go` | an admin's own role is refused without calling the user use case; someone else's is set |
 | `TestSearchLimit` | `tests/admin_test.go` | a search passes `admin.user_search_limit` |
+| `TestAPIInternalErrors` | `tests/admin_test.go` | an unmapped error (a QTE start, a user search, over failing fakes) is a logged `500`; revive's `invalid_team_id` |
+| `TestQTEsOverview` | `tests/admin_test.go` | the QTE list in the store's order, each with its status and stats; `by_option` `{}` for a QTE nobody answered |
 
-End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles` (see the server README's Tests).
+End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestPowerupsOverHTTP`, `TestQTEsOverHTTP` (`qte_test.go`), `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles` (see the server README's Tests).

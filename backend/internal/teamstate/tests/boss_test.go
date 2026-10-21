@@ -79,7 +79,7 @@ func (f *fixtureEnv) damageOf(t *testing.T, ids []string) int {
 func (f *fixtureEnv) restart(t *testing.T) {
 	t.Helper()
 	f.state.Close() // the old store must not attack once replaced
-	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
+	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.qtes, f.hub, pgtest.Quiet, f.rules))
 }
 
 // TestCastsDamageBosses casts the quadrilateral and the triangle in turn (the spell
@@ -174,6 +174,27 @@ func TestDamageMultiplier(t *testing.T) {
 	}
 }
 
+// TestDealtClamped checks an absurd stored multiplier (1e12: its damage
+// wouldn't fit team_cast.dealt): the cast still writes, dealing the clamp
+// (math.MaxInt32) and defeating the boss, and a restart reproduces it.
+func TestDealtClamped(t *testing.T) {
+	f := started(t)
+	if _, err := f.db.Pool().Exec(context.Background(),
+		"INSERT INTO team_boss (team_id, multiplier) VALUES ($1, 1e12)", f.teamID); err != nil {
+		t.Fatal(err)
+	}
+	f.restart(t)
+	lc := f.castQuad(t, 0).State.LastCast
+	if lc.Dealt != math.MaxInt32 || !lc.DefeatedBoss {
+		t.Fatalf("the cast: dealt %d (defeated %v), want %d and defeated", lc.Dealt, lc.DefeatedBoss, math.MaxInt32)
+	}
+	before := withoutVersionJSON(t, f.view(t))
+	f.restart(t)
+	if after := withoutVersionJSON(t, f.view(t)); after != before {
+		t.Fatalf("across a restart\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 // TestEveryBossDefeated gives every boss 1 HP, so each cast defeats one: after
 // the last, boss is null and bosses_defeated is the count; casting on still
 // works (the pattern and the cast log count it) but deals nothing and hits
@@ -205,7 +226,7 @@ func TestLoadRefusesTooManyDefeated(t *testing.T) {
 		"INSERT INTO team_boss (team_id, defeated) VALUES ($1, $2)", f.teamID, f.bosses.Count()+1); err != nil {
 		t.Fatal(err)
 	}
-	_, err := teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules)
+	_, err := teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.qtes, f.hub, pgtest.Quiet, f.rules)
 	if err == nil || !strings.Contains(err.Error(), "bosses defeated") {
 		t.Fatalf("load: %v", err)
 	}

@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 
 	"github.com/google/uuid"
 
 	"labyrinth/internal/platform/httpx"
 	"labyrinth/internal/platform/identity"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -35,6 +37,11 @@ func (a *API) Routes(mux *http.ServeMux, admin func(http.HandlerFunc) http.Handl
 	mux.Handle("DELETE /api/admin/teams/{team_id}/members/{user_id}", admin(a.removeMember))
 	mux.Handle("POST /api/admin/teams/{team_id}/revive", admin(a.revive))
 	mux.Handle("POST /api/admin/teams/{team_id}/cooldowns/reset", admin(a.resetCooldowns))
+	mux.Handle("POST /api/admin/teams/{team_id}/powerups/{kind}", admin(a.grantPowerup))
+	mux.Handle("GET /api/admin/qtes", admin(a.qtes))
+	mux.Handle("POST /api/admin/qtes", admin(a.createQTE))
+	mux.Handle("POST /api/admin/qtes/{qte_id}/start", admin(a.startQTE))
+	mux.Handle("POST /api/admin/qtes/{qte_id}/end", admin(a.endQTE))
 	mux.Handle("GET /api/admin/users", admin(a.searchUsers))
 	mux.Handle("PUT /api/admin/users/{user_id}/role", admin(a.setRole))
 }
@@ -52,6 +59,18 @@ var errorCodes = []struct {
 	{teams.ErrNewLeaderRequired, http.StatusConflict, "new_leader_required"},
 	{teams.ErrInvalidNewLeader, http.StatusConflict, "invalid_new_leader"},
 	{teamstate.ErrNotInGame, http.StatusConflict, "not_in_game"},
+	{teamstate.ErrUnknownPowerup, http.StatusNotFound, "unknown_powerup"},
+	{qte.ErrUnknownKind, http.StatusBadRequest, "invalid_kind"},
+	{qte.ErrUnknownPowerup, http.StatusBadRequest, "invalid_powerup"},
+	{qte.ErrInvalidQuestion, http.StatusBadRequest, "invalid_question"},
+	{qte.ErrInvalidOptions, http.StatusBadRequest, "invalid_options"},
+	{qte.ErrInvalidCorrectOption, http.StatusBadRequest, "invalid_correct_option"},
+	{qte.ErrInvalidWindow, http.StatusBadRequest, "invalid_window"},
+	{qte.ErrQTEOpen, http.StatusConflict, "qte_open"},
+	{qte.ErrUnknownQTE, http.StatusNotFound, "unknown_qte"},
+	{qte.ErrQTEAlreadyRun, http.StatusConflict, "qte_already_run"},
+	{qte.ErrQTENotStarted, http.StatusConflict, "qte_not_started"},
+	{qte.ErrQTEClosed, http.StatusConflict, "qte_closed"},
 	{user.ErrUserNotFound, http.StatusNotFound, "user_not_found"},
 	{user.ErrInvalidRole, http.StatusBadRequest, "invalid_role"},
 	{ErrCannotChangeOwnRole, http.StatusConflict, "cannot_change_own_role"},
@@ -88,6 +107,17 @@ func userID(w http.ResponseWriter, raw, what string) (uuid.UUID, bool) {
 	if err != nil {
 		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_user_id", what+" must be a UUID")
 		return uuid.UUID{}, false
+	}
+	return id, true
+}
+
+// qteID returns the {qte_id} path value, or writes 400 invalid_qte_id and
+// returns false.
+func qteID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("qte_id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_qte_id", "qte id must be a positive integer")
+		return 0, false
 	}
 	return id, true
 }
@@ -173,6 +203,102 @@ func (a *API) resetCooldowns(w http.ResponseWriter, r *http.Request) {
 	}
 	a.log.Info("admin reset team cooldowns", "admin_id", identity.UserID(r), "team_id", id)
 	httpx.OK(w, v)
+}
+
+// grantPowerup handles POST /api/admin/teams/{team_id}/powerups/{kind}: the
+// team gets a powerup of that kind, or keeps the one it holds (granted
+// false). Returns {granted, state}.
+func (a *API) grantPowerup(w http.ResponseWriter, r *http.Request) {
+	id, ok := teamID(w, r)
+	if !ok {
+		return
+	}
+	kind, ok := teamstate.PowerupByID(r.PathValue("kind"))
+	if !ok {
+		a.fail(w, teamstate.ErrUnknownPowerup)
+		return
+	}
+	res, err := a.admin.GrantPowerup(r.Context(), id, kind)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin granted powerup", "admin_id", identity.UserID(r), "team_id", id, "kind", kind.ID(), "granted", res.Granted)
+	httpx.OK(w, res)
+}
+
+// qtes handles GET /api/admin/qtes: every QTE, newest first, with its
+// answer, status and the teams' answers.
+func (a *API) qtes(w http.ResponseWriter, _ *http.Request) {
+	httpx.OK(w, a.admin.QTEs())
+}
+
+// createQTE handles POST /api/admin/qtes {"kind", "powerup", "quiz":
+// {"question", "options", "correct_option"}, "window_s"?, "start"}: a draft
+// to launch later, or, with start, sent out at once. Returns its row.
+func (a *API) createQTE(w http.ResponseWriter, r *http.Request) {
+	// Its own shape, not qte.Draft's: correct_option is required, and only a
+	// pointer tells a missing one from option 0.
+	var req struct {
+		Kind    string `json:"kind"`
+		Powerup string `json:"powerup"`
+		Quiz    *struct {
+			Question      string   `json:"question"`
+			Options       []string `json:"options"`
+			CorrectOption *int     `json:"correct_option"`
+		} `json:"quiz"`
+		WindowS *int `json:"window_s"`
+		Start   bool `json:"start"`
+	}
+	if err := httpx.DecodeJSON(w, r, &req); err != nil || (req.Quiz != nil && req.Quiz.CorrectOption == nil) {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body",
+			`body must be {"kind", "powerup", "quiz": {"question", "options", "correct_option"}, "window_s"?, "start"}`)
+		return
+	}
+	d := qte.Draft{Kind: req.Kind, Powerup: req.Powerup, WindowS: req.WindowS}
+	if q := req.Quiz; q != nil {
+		d.Quiz = &qte.Quiz{Question: q.Question, Options: q.Options, CorrectOption: *q.CorrectOption}
+	}
+	adminID := identity.UserID(r)
+	o, err := a.admin.CreateQTE(r.Context(), adminID, d, req.Start)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin created qte", "admin_id", adminID, "qte_id", o.ID, "powerup", o.Powerup, "started", req.Start)
+	httpx.OK(w, o)
+}
+
+// startQTE handles POST /api/admin/qtes/{qte_id}/start: a draft sent out
+// now, open for its window. Returns its row.
+func (a *API) startQTE(w http.ResponseWriter, r *http.Request) {
+	id, ok := qteID(w, r)
+	if !ok {
+		return
+	}
+	o, err := a.admin.StartQTE(r.Context(), id)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin started qte", "admin_id", identity.UserID(r), "qte_id", id)
+	httpx.OK(w, o)
+}
+
+// endQTE handles POST /api/admin/qtes/{qte_id}/end: an open QTE closed now,
+// its answer revealed to everyone. Returns its row.
+func (a *API) endQTE(w http.ResponseWriter, r *http.Request) {
+	id, ok := qteID(w, r)
+	if !ok {
+		return
+	}
+	o, err := a.admin.EndQTE(r.Context(), id)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin ended qte", "admin_id", identity.UserID(r), "qte_id", id)
+	httpx.OK(w, o)
 }
 
 // searchUsers handles GET /api/admin/users[?email=<part>]: up to

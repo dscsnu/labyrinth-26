@@ -3,7 +3,8 @@ package tests
 // The game-loop simulation: simTeams teams of every size play the whole loop
 // on the fake clock (selecting, scanning, wrong scans, retries, races,
 // casts, every boss, boss attacks, knockouts, revives, an admin removing
-// members, damage multipliers), each with its own configuration. After every
+// members, damage multipliers, powerups, quizzes), each with its own
+// configuration. After every
 // step every team's state is checked against model, an independent
 // re-implementation of the rules, and at the end against the last team_state
 // its watcher received. TestGameLoopRestart plays the same league with the
@@ -32,6 +33,7 @@ import (
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/postgres/pgtest"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -56,6 +58,13 @@ const (
 	// a big pattern needs. Several steps long, so cooling QR codes still
 	// refuse scans and block whole steps.
 	simQRCooldown = 2 * time.Minute
+	// simShortQRCooldown is the league's powerups.short_qr_cooldown: shorter
+	// than simQRCooldown, so a cast during a short_qr_cooldown powerup cools
+	// for a different time than one after it.
+	simShortQRCooldown = time.Minute
+	// simShortQRWindow is the league's powerups.short_qr_window: a few steps,
+	// so windows start and end often, before and after simDownAt.
+	simShortQRWindow = 3 * time.Minute
 	// simSteps is how long the game runs: 180 × 30 s = 90 min, long enough
 	// for an idle team to be knocked out by boss 1 (10 attacks × 5 min).
 	simSteps = 180
@@ -70,6 +79,10 @@ const (
 	// simReviveDelay is how many steps a knocked-out slowpoke waits for its
 	// revive.
 	simReviveDelay = 3
+	// simQTEEvery is how often, in steps, the league starts a quiz, each open
+	// for one step (simStep): closed when the next step moves the clock. A
+	// divisor of simDownAt, so one is open when TestGameLoopRestart goes down.
+	simQTEEvery = 5
 )
 
 // simStrategies are the ways a team plays; team i plays simStrategies[i %
@@ -89,6 +102,8 @@ var simStrategies = []string{
 	"multiplier", // a stored damage multiplier (×2, ×1.5, ×0.5, ×3) scales every cast
 	"pampered",   // casts every 2 steps; every 4 an admin resets its cooldowns, and it casts its last spell again at once
 	"doomed",     // casts every 2 steps until an admin deletes the team (simDeleteAt); then its scans are not_in_team
+	"powered",    // an admin grants it powerups; its leader uses them (multiplier, heart, short QR cooldown, instant cast) and casts
+	"quizzer",    // never casts; answers each quiz right or wrong, two members at once or with a resend, or a step late (qte_closed)
 }
 
 // simDeleteAt is the step at which an admin deletes the doomed teams.
@@ -106,10 +121,16 @@ type league struct {
 	dbURL  string
 	teams  *teams.Store
 	state  *teamstate.Store
+	qtes   *qte.Store
+	qteSet qte.Rules
 	hub    *live.Hub
 	rules  teamstate.Rules
 	clock  *clock
 	sims   []*simTeam
+	// quiz is the latest quiz the league started, and quizStep the step it
+	// started at (0 before the first).
+	quiz     qte.QTE
+	quizStep int
 	// elapsed is how far the fake clock is past start: each step adds
 	// simStep, and downtime adds its length.
 	elapsed time.Duration
@@ -153,7 +174,10 @@ type simCounts struct {
 	casts, defeats, allDefeated, knockouts, revives, wrongScans, poisoned, retries,
 	cleared, already, races, removals, lastMember, refusedRemoved, knockedRefused,
 	lockedRefused, bigCasts, cooldownRefused, qrRefused, qrBlocked,
-	finishedRefused, resets, deletions, deletedRefused atomic.Int64
+	finishedRefused, resets, deletions, deletedRefused,
+	grants, wasted, boostedCasts, hearts, fullHealthRefused, shortActivations, shortCasts, shortEnded,
+	instantCasts, instantBypassed, patternLockedRefused, powerupActiveRefused, notHeldRefused, notLeaderRefused,
+	quizzes, qteRight, qteWrong, qteGranted, qteWasted, qteRaces, qteResent, qteClosed, qteKnocked atomic.Int64
 }
 
 // newLeague seeds the dev content and starts simTeams teams of every size,
@@ -219,7 +243,9 @@ func newLeague(t testing.TB, attacks bool) *league {
 	l.rules = teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints, Health: set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints, UnlockAfterBosses: set.Game.UnlockAfterBosses,
-		QRCooldown: simQRCooldown,
+		QRCooldown:        simQRCooldown,
+		PowerupMultiplier: set.Powerups.DamageMultiplier, PowerupHeart: set.Powerups.Heart,
+		ShortQRCooldown: simShortQRCooldown, ShortQRWindow: simShortQRWindow,
 		// A team through its last boss is FINISHED, as in server.Build.
 		OnFinished: func(id string) {
 			if err := l.teams.Finish(context.Background(), id); err != nil {
@@ -241,7 +267,10 @@ func newLeague(t testing.TB, attacks bool) *league {
 		br.AttackInterval = simAttackInterval
 	}
 	l.bosses = pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
-	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
+	l.qteSet = qteRules(set, l.clock)
+	l.qtes = pgtest.Must(qte.Load(ctx, db, l.hub, pgtest.Quiet, l.qteSet))
+	t.Cleanup(func() { l.qtes.Close() })
+	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, passQR{}, l.qtes, l.hub, pgtest.Quiet, l.rules))
 	l.board = leaderboard.New(l.state, l.teams, l.hub, pgtest.Quiet, leaderboard.Rules{Size: 5, PublishEvery: time.Second})
 	return l
 }
@@ -270,6 +299,40 @@ type model struct {
 	// last is the pattern of the team's latest cast; hasLast reports one.
 	last    int
 	hasLast bool
+	// held are the powerup kinds the team holds, by kind.
+	held [4]bool
+	// armed: a damage_multiplier is active; the next cast deals × it.
+	armed bool
+	// shortUntil is when the team's short_qr_cooldown window ends; it's
+	// active while now is before it.
+	shortUntil time.Time
+	// answer is the team's latest quiz answer (team_state.qte), nil before
+	// its first.
+	answer *teamstate.QTEAnswerView
+}
+
+// qrFor returns how long a cast at now cools its waypoints: the short
+// cooldown while a short_qr_cooldown window runs, else game.qr_cooldown.
+func (m *model) qrFor(now time.Time, r teamstate.Rules) time.Duration {
+	if now.Before(m.shortUntil) {
+		return r.ShortQRCooldown
+	}
+	return r.QRCooldown
+}
+
+// coolFrom puts waypoint w on cooldown until end, unless an earlier cast
+// already keeps it cooling longer: a waypoint cools until its latest end.
+func (m *model) coolFrom(w int, end time.Time) {
+	if end.After(m.qr[w]) {
+		m.qr[w] = end
+	}
+}
+
+// heal is a heart: health up by amount, never above full, from the same
+// phase start (so the attacks so far still count).
+func (m *model) heal(now time.Time, amount, full int, b *bosses.Bosses) {
+	h, _ := m.health(now, b)
+	m.phaseHealth += min(amount, full-h)
 }
 
 // finished reports whether the team has defeated every boss: it's FINISHED,
@@ -323,14 +386,15 @@ func (m *model) health(now time.Time, b *bosses.Bosses) (health, attacks int) {
 }
 
 // cast applies a cast of the pattern's damage at now: the damage dealt
-// (× the multiplier, rounded), the boss hit (0 for none) and whether it fell.
-// A defeat starts the next boss's phase at now with the team's health then.
-func (m *model) cast(now time.Time, damage int, b *bosses.Bosses) (dealt, boss int, defeated bool) {
+// (× the multiplier × factor, rounded, multiplied in that order), the boss
+// hit (0 for none) and whether it fell. A defeat starts the next boss's phase
+// at now with the team's health then.
+func (m *model) cast(now time.Time, damage int, factor float64, b *bosses.Bosses) (dealt, boss int, defeated bool) {
 	m.casts++
 	if m.defeated >= b.Count() {
 		return 0, 0, false
 	}
-	dealt = int(math.Round(float64(damage) * m.mult))
+	dealt = int(math.Round(float64(damage) * m.mult * factor))
 	boss = m.defeated + 1
 	m.damage += dealt
 	if m.damage >= b.At(m.defeated).HP {
@@ -379,6 +443,17 @@ func TestGameLoopSimulation(t *testing.T) {
 		"steps with every pattern's QR codes cooling": &counts.qrBlocked,
 		"finished teams refused":                      &counts.finishedRefused, "cooldown resets": &counts.resets,
 		"deleted teams": &counts.deletions, "deleted teams refused": &counts.deletedRefused,
+		"powerups granted": &counts.grants, "powerups wasted": &counts.wasted, "boosted casts": &counts.boostedCasts,
+		"hearts used": &counts.hearts, "hearts refused at full health": &counts.fullHealthRefused,
+		"short QR cooldowns activated": &counts.shortActivations, "casts in a short QR window": &counts.shortCasts,
+		"short QR windows ended": &counts.shortEnded, "instant casts": &counts.instantCasts,
+		"instant casts past a cooldown": &counts.instantBypassed, "locked instant casts refused": &counts.patternLockedRefused,
+		"powerups refused while active": &counts.powerupActiveRefused, "powerups refused not held": &counts.notHeldRefused,
+		"powerups refused for a member": &counts.notLeaderRefused,
+		"quizzes":                       &counts.quizzes, "right answers": &counts.qteRight, "wrong answers": &counts.qteWrong,
+		"powerups earned by a quiz": &counts.qteGranted, "quiz powerups wasted": &counts.qteWasted,
+		"members answering at once": &counts.qteRaces, "refused quiz resends": &counts.qteResent,
+		"late answers refused": &counts.qteClosed, "knocked-out answers refused": &counts.qteKnocked,
 	} {
 		if c.Load() == 0 {
 			t.Errorf("the simulation never exercised %s", name)
@@ -446,6 +521,9 @@ func (l *league) steps(t *testing.T, from, to int, counts *simCounts) {
 	for step := from; step <= to; step++ {
 		l.elapsed += simStep
 		l.clock.at(l.elapsed)
+		if step%simQTEEvery == 0 {
+			l.startQuiz(t, step, counts)
+		}
 		var wg sync.WaitGroup
 		for _, st := range l.sims {
 			wg.Add(1)
@@ -538,10 +616,18 @@ func (l *league) downAndRestart(t *testing.T, down time.Duration, step int, coun
 		}
 	}
 	l.state.Close()
+	l.qtes.Close()
 	l.elapsed += down
-	l.clock.at(l.elapsed) // fires nothing: the store is closed
+	l.clock.at(l.elapsed) // fires nothing: the stores are closed
 	l.rules.Epoch++
-	l.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, l.dbURL), l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
+	pg := pgtest.Open(t, l.dbURL)
+	l.qtes = pgtest.Must(qte.Load(context.Background(), pg, l.hub, pgtest.Quiet, l.qteSet))
+	l.state = pgtest.Must(teamstate.Load(context.Background(), pg, l.atlas, l.bosses, l.teams, passQR{}, l.qtes, l.hub, pgtest.Quiet, l.rules))
+	// A quiz started at the last step is still open after no downtime and
+	// gone after any.
+	if open := l.qtes.Public() != nil; open != (down == 0 && l.quizStep == step) {
+		t.Fatalf("after %v down, the quiz from step %d open: %v", down, l.quizStep, open)
+	}
 	l.board = leaderboard.New(l.state, l.teams, l.hub, pgtest.Quiet, leaderboard.Rules{Size: 5, PublishEvery: time.Second})
 	for _, st := range l.sims {
 		if st.model.deleted {
@@ -589,6 +675,10 @@ func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	}
 	v := l.view(t, st)
 	m := &st.model
+	if !m.shortUntil.IsZero() && !now.Before(m.shortUntil) {
+		m.shortUntil = time.Time{} // the window ended by itself (powerup_ended)
+		counts.shortEnded.Add(1)
+	}
 	health, attacks := m.health(now, l.bosses)
 	fail := func(what string, got, want any) {
 		t.Fatalf("step %d, team %d (%s, %d members): %s is %v, want %v\nstate: %+v", step, st.i, st.strategy, len(st.members), what, got, want, v)
@@ -620,6 +710,35 @@ func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 		return a.Waypoint == b.Waypoint && a.Until.Equal(b.Until)
 	}) {
 		fail("qr_cooldowns", qr, want)
+	}
+	var held, active []string
+	for k := range 4 {
+		if m.held[k] {
+			held = append(held, teamstate.Powerup(k).ID())
+		}
+	}
+	if m.armed {
+		active = append(active, "damage_multiplier")
+	}
+	if !m.shortUntil.IsZero() {
+		active = append(active, "short_qr_cooldown@"+m.shortUntil.UTC().Format(time.RFC3339Nano))
+	}
+	var gotActive []string
+	for _, a := range v.Powerups.Active {
+		if a.Until != nil {
+			gotActive = append(gotActive, a.Kind+"@"+a.Until.UTC().Format(time.RFC3339Nano))
+		} else {
+			gotActive = append(gotActive, a.Kind)
+		}
+	}
+	if !slices.Equal(v.Powerups.Held, held) && !(len(held) == 0 && len(v.Powerups.Held) == 0) {
+		fail("powerups.held", v.Powerups.Held, held)
+	}
+	if !slices.Equal(gotActive, active) {
+		fail("powerups.active", gotActive, active)
+	}
+	if (v.QTE == nil) != (m.answer == nil) || (v.QTE != nil && !sameAnswer(*v.QTE, *m.answer)) {
+		fail("qte", v.QTE, m.answer)
 	}
 	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
 	if v.UnlockedPoints != unlocked || slices.Contains(v.LockedShapes, "pentagon") != (unlocked < 5) ||
@@ -683,6 +802,10 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	}
 
 	switch st.strategy {
+	case "quizzer":
+		l.quizzer(t, st, step, knocked, counts)
+	case "powered":
+		l.powered(t, st, step, knocked, counts)
 	case "pampered":
 		if every(4) && (st.model.cooldown != "" || len(st.model.qrCooldowns(now)) > 0) {
 			v, err := l.state.ResetCooldowns(context.Background(), st.id)
@@ -987,7 +1110,7 @@ func (l *league) castPattern(t *testing.T, st *simTeam, p int, knocked bool, cou
 			counts.retries.Add(1)
 		}
 	}
-	l.expectCast(t, st, p, res, counts)
+	l.expectCast(t, st, p, res, counts, false)
 }
 
 // lockedFor reports whether pat is locked for st (bigger than the model's
@@ -1029,26 +1152,40 @@ func (l *league) selectOK(t *testing.T, st *simTeam, shape string, knocked bool,
 	return true
 }
 
-// expectCast checks a completing scan's result against the model's cast.
-func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.ScanResult, counts *simCounts) {
+// expectCast checks a completing scan's result (or an instant cast's,
+// instant) against the model's cast.
+func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.ScanResult, counts *simCounts, instant bool) {
 	m := &st.model
 	before := m.defeated
 	already := m.patterns[p]
 	m.patterns[p] = true
 	m.cooldown = l.atlas.Pattern(p).Spell.Class
 	m.last, m.hasLast = p, true
+	now := l.clock.Now()
+	short := now.Before(m.shortUntil)
 	for _, w := range l.atlas.Pattern(p).Waypoints.Indexes() {
-		m.qr[w] = l.clock.Now().Add(l.rules.QRCooldown)
+		m.coolFrom(w, now.Add(m.qrFor(now, l.rules)))
 	}
-	dealt, boss, defeated := m.cast(l.clock.Now(), l.atlas.Pattern(p).Spell.Damage, l.bosses)
+	factor, boosted := 1.0, m.armed
+	if boosted {
+		factor, m.armed = l.rules.PowerupMultiplier, false
+	}
+	dealt, boss, defeated := m.cast(now, l.atlas.Pattern(p).Spell.Damage, factor, l.bosses)
 	lc := res.State.LastCast
 	if res.Outcome != teamstate.OutcomePatternCompleted || lc == nil || lc.Dealt != dealt || lc.DefeatedBoss != defeated ||
-		res.AlreadyCompleted != already || (boss == 0) != (lc.Boss == nil) || (lc.Boss != nil && *lc.Boss != boss) {
+		res.AlreadyCompleted != already || (boss == 0) != (lc.Boss == nil) || (lc.Boss != nil && *lc.Boss != boss) ||
+		lc.Boosted != boosted || lc.ShortQRCooldown != short || lc.Instant != instant {
 		t.Errorf("team %d (%s): cast %+v (outcome %s, already %v), want dealt %d to boss %d, defeated %v, already %v",
 			st.i, st.strategy, lc, res.Outcome, res.AlreadyCompleted, dealt, boss, defeated, already)
 		return
 	}
 	counts.casts.Add(1)
+	if boosted {
+		counts.boostedCasts.Add(1)
+	}
+	if short {
+		counts.shortCasts.Add(1)
+	}
 	if l.atlas.Pattern(p).Waypoints.Len() >= l.rules.LockedPatternPoints {
 		counts.bigCasts.Add(1)
 	}
@@ -1178,7 +1315,7 @@ func (l *league) race(t *testing.T, st *simTeam, knocked bool, counts *simCounts
 			return
 		}
 	}
-	l.expectCast(t, st, p, res, counts)
+	l.expectCast(t, st, p, res, counts, false)
 }
 
 // remove has an admin remove st.removed (naming member 1 the new leader when
@@ -1292,4 +1429,257 @@ func (l *league) checkLeaderboard(t *testing.T) {
 				st.i, st.strategy, me, i+1, st.model.defeated, st.model.damage, st.model.finished(l.bosses))
 		}
 	}
+}
+
+// powered is one step of a powered team. One step in four an admin grants
+// it a random powerup (wasted when it already holds one). Otherwise its
+// leader uses one held kind, picked at random: a damage multiplier arms the
+// next cast (powerup_active if one is armed), a heart heals (full_health at
+// full health), a short QR cooldown starts its window (powerup_active while
+// one runs), an instant cast casts at once (instantCast). Knocked out, any
+// use is knocked_out. Now and then a member tries to use one (not_leader)
+// and the leader one not held (powerup_not_held). It casts every other step.
+func (l *league) powered(t *testing.T, st *simTeam, step int, knocked bool, counts *simCounts) {
+	ctx := context.Background()
+	m := &st.model
+	now := l.clock.Now()
+	leader := st.members[rotate(st)(0)]
+	if (step+st.i)%4 == 0 {
+		k := teamstate.Powerup(st.rng.IntN(len(m.held)))
+		res, err := l.state.GrantPowerup(ctx, st.id, k)
+		if err != nil || res.Granted == m.held[k] {
+			t.Errorf("team %d: grant %s: granted %v while holding %v: %v", st.i, k.ID(), res.Granted, m.held[k], err)
+			return
+		}
+		if res.Granted {
+			m.held[k] = true
+			counts.grants.Add(1)
+		} else {
+			counts.wasted.Add(1)
+		}
+		return
+	}
+	// use has the leader use kind k, wanting err; it reports success.
+	use := func(k teamstate.Powerup, want error) bool {
+		_, err := l.state.Activate(ctx, leader, k)
+		if !errors.Is(err, want) {
+			t.Errorf("team %d: use %s: %v, want %v", st.i, k.ID(), err, want)
+			return false
+		}
+		return err == nil
+	}
+	var held []teamstate.Powerup
+	for k := range len(m.held) {
+		if m.held[k] {
+			held = append(held, teamstate.Powerup(k))
+		}
+	}
+	if knocked {
+		for _, k := range held {
+			if k != teamstate.PowerupInstantCast {
+				use(k, teamstate.ErrKnockedOut)
+				counts.knockedRefused.Add(1)
+				break
+			}
+		}
+		return
+	}
+	if other := st.members[rotate(st)(1)]; other != leader && st.rng.IntN(4) == 0 {
+		if _, err := l.state.Activate(ctx, other, teamstate.PowerupHeart); !errors.Is(err, teamstate.ErrNotLeader) {
+			t.Errorf("team %d: a member using a powerup: %v, want not_leader", st.i, err)
+		}
+		counts.notLeaderRefused.Add(1)
+	}
+	if k := teamstate.Powerup(st.rng.IntN(3)); !m.held[k] && st.rng.IntN(3) == 0 {
+		use(k, teamstate.ErrPowerupNotHeld)
+		counts.notHeldRefused.Add(1)
+	}
+	if len(held) > 0 {
+		switch k := held[st.rng.IntN(len(held))]; k {
+		case teamstate.PowerupDamageMultiplier:
+			if m.armed {
+				use(k, teamstate.ErrPowerupActive)
+				counts.powerupActiveRefused.Add(1)
+			} else if use(k, nil) {
+				m.held[k], m.armed = false, true
+			}
+		case teamstate.PowerupHeart:
+			if h, _ := m.health(now, l.bosses); h >= l.rules.Health {
+				use(k, teamstate.ErrFullHealth)
+				counts.fullHealthRefused.Add(1)
+			} else if use(k, nil) {
+				m.held[k] = false
+				m.heal(now, l.rules.PowerupHeart, l.rules.Health, l.bosses)
+				counts.hearts.Add(1)
+			}
+		case teamstate.PowerupShortQRCooldown:
+			if now.Before(m.shortUntil) {
+				use(k, teamstate.ErrPowerupActive)
+				counts.powerupActiveRefused.Add(1)
+			} else if use(k, nil) {
+				m.held[k], m.shortUntil = false, now.Add(l.rules.ShortQRWindow)
+				counts.shortActivations.Add(1)
+			}
+		case teamstate.PowerupInstantCast:
+			l.instantCast(t, st, leader, counts)
+			return
+		}
+	}
+	if (step+st.i)%2 == 0 {
+		l.castRandom(t, st, false, counts, rotate(st))
+	}
+}
+
+// instantCast has st's leader use its instant cast. Before the unlock, one
+// try in three names a big pattern: pattern_locked, and it keeps the
+// powerup. Otherwise it picks a pattern it has unlocked, preferring one the
+// cooldowns would refuse a scan for (its class, or a cooling waypoint), and
+// checks the cast against the model.
+func (l *league) instantCast(t *testing.T, st *simTeam, leader uuid.UUID, counts *simCounts) {
+	ctx := context.Background()
+	m := &st.model
+	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
+	if unlocked < l.rules.MaxPatternPoints && len(l.big) > 0 && st.rng.IntN(3) == 0 {
+		p := l.big[st.rng.IntN(len(l.big))]
+		if _, err := l.state.InstantCast(ctx, leader, l.atlas.WaypointIDs(l.atlas.Pattern(p).Waypoints)); !errors.Is(err, teamstate.ErrPatternLocked) {
+			t.Errorf("team %d: instant-casting a locked pattern: %v, want pattern_locked", st.i, err)
+		}
+		counts.patternLockedRefused.Add(1)
+		return
+	}
+	var bypass, open []int
+	for p := range l.atlas.PatternCount() {
+		if l.atlas.Pattern(p).Waypoints.Len() > unlocked {
+			continue
+		}
+		if l.castable(st, p) {
+			open = append(open, p)
+		} else {
+			bypass = append(bypass, p)
+		}
+	}
+	pool := bypass
+	if len(pool) == 0 {
+		pool = open
+	}
+	p := pool[st.rng.IntN(len(pool))]
+	v, err := l.state.InstantCast(ctx, leader, l.atlas.WaypointIDs(l.atlas.Pattern(p).Waypoints))
+	if err != nil || v.LastCast == nil {
+		t.Errorf("team %d: instant cast: %v", st.i, err)
+		return
+	}
+	m.held[teamstate.PowerupInstantCast] = false
+	counts.instantCasts.Add(1)
+	if len(bypass) > 0 {
+		counts.instantBypassed.Add(1)
+	}
+	l.expectCast(t, st, p, teamstate.ScanResult{Outcome: teamstate.OutcomePatternCompleted,
+		AlreadyCompleted: v.LastCast.AlreadyCompleted, State: v}, counts, true)
+}
+
+// startQuiz has an admin start a quiz, open for one step, earning the kinds
+// in turn; the right option turns too.
+func (l *league) startQuiz(t *testing.T, step int, counts *simCounts) {
+	t.Helper()
+	n := int(counts.quizzes.Add(1))
+	window := int(simStep / time.Second)
+	l.quiz = pgtest.Must(l.qtes.Create(context.Background(), l.sims[0].members[0], qte.Draft{
+		Kind: qte.KindQuiz, Powerup: teamstate.Powerup(n % 4).ID(), WindowS: &window,
+		Quiz: &qte.Quiz{Question: fmt.Sprintf("Quiz %d?", n), Options: []string{"A", "B", "C", "D"}, CorrectOption: n % 4},
+	}, true))
+	l.quizStep = step
+}
+
+// quizzer is a quizzer team's step. At a quiz's start it answers (right
+// half the time), but one time in four waits and answers the step after,
+// refused as closed; a team of two or more sometimes has two members answer
+// at once (exactly one recorded), else sometimes a teammate resends
+// (refused). Knocked out, its answers are refused.
+func (l *league) quizzer(t *testing.T, st *simTeam, step int, knocked bool, counts *simCounts) {
+	ctx := context.Background()
+	q := l.quiz
+	late := step == l.quizStep+1 && q.ID != 0
+	if (step != l.quizStep && !late) || (step == l.quizStep && st.rng.IntN(4) == 0) {
+		return
+	}
+	if late && st.model.answer != nil && st.model.answer.QTEID == q.ID {
+		return // answered in time
+	}
+	option := q.Quiz.CorrectOption
+	if st.rng.IntN(2) == 0 {
+		option = (option + 1 + st.rng.IntN(3)) % 4
+	}
+	who := rotate(st)
+	if late || knocked {
+		_, err := l.state.AnswerQTE(ctx, st.members[who(step)], q.ID, option)
+		switch {
+		case knocked && !late && errors.Is(err, teamstate.ErrKnockedOut):
+			counts.qteKnocked.Add(1)
+		case late && errors.Is(err, teamstate.ErrQTEClosed):
+			counts.qteClosed.Add(1)
+		default:
+			t.Errorf("team %d: answering (late %v, knocked out %v): %v", st.i, late, knocked, err)
+		}
+		return
+	}
+	var v teamstate.View
+	if len(st.members) > 1 && st.rng.IntN(3) == 0 {
+		views, errs := make([]teamstate.View, 2), make([]error, 2)
+		var wg sync.WaitGroup
+		for r := range 2 {
+			wg.Go(func() { views[r], errs[r] = l.state.AnswerQTE(ctx, st.members[who(step+r)], q.ID, option) })
+		}
+		wg.Wait()
+		if (errs[0] == nil) == (errs[1] == nil) || !errors.Is(errors.Join(errs...), teamstate.ErrQTEAlreadyAnswered) {
+			t.Errorf("team %d: two members answering at once: %v", st.i, errs)
+			return
+		}
+		v = views[0]
+		if errs[1] == nil {
+			v = views[1]
+		}
+		counts.qteRaces.Add(1)
+	} else {
+		var err error
+		if v, err = l.state.AnswerQTE(ctx, st.members[who(step)], q.ID, option); err != nil {
+			t.Errorf("team %d: answering: %v", st.i, err)
+			return
+		}
+		if st.rng.IntN(3) == 0 {
+			if _, err := l.state.AnswerQTE(ctx, st.members[who(step+1)], q.ID, q.Quiz.CorrectOption); !errors.Is(err, teamstate.ErrQTEAlreadyAnswered) {
+				t.Errorf("team %d: a resend: %v, want qte_already_answered", st.i, err)
+				return
+			}
+			counts.qteResent.Add(1)
+		}
+	}
+	kind, _ := teamstate.PowerupByID(q.Powerup)
+	m := &st.model
+	a := teamstate.QTEAnswerView{QTEID: q.ID, Option: option, Correct: option == q.Quiz.CorrectOption, AnsweredAt: l.clock.Now()}
+	a.Granted = a.Correct && !m.held[kind]
+	if v.QTE == nil {
+		t.Errorf("team %d: an answer without team_state.qte", st.i)
+		return
+	}
+	a.AnsweredBy = v.QTE.AnsweredBy // whichever member won
+	m.answer = &a
+	switch {
+	case a.Granted:
+		m.held[kind] = true
+		counts.qteGranted.Add(1)
+		counts.qteRight.Add(1)
+	case a.Correct:
+		counts.qteWasted.Add(1)
+		counts.qteRight.Add(1)
+	default:
+		counts.qteWrong.Add(1)
+	}
+}
+
+// sameAnswer reports that a and b are the same answer, times compared as
+// instants.
+func sameAnswer(a, b teamstate.QTEAnswerView) bool {
+	at := a.AnsweredAt.Equal(b.AnsweredAt)
+	a.AnsweredAt, b.AnsweredAt = time.Time{}, time.Time{}
+	return at && a == b
 }

@@ -36,7 +36,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Bosses count** | `game.bosses`, **6**: how many bosses every team fights. The table must hold exactly that many, or none at all. |
 | **Progress** | A team's place in the sequence: bosses defeated, damage dealt to the current one, and its damage multiplier. Owned by `teamstate` (`State.Boss`, table `team_boss`), not here. |
 | **Dealt** | What one cast does to the current boss: the pattern's damage × the team's multiplier, rounded. Computed by `teamstate`. |
-| **Multiplier** | Per team, default **1**. Nothing changes it yet; it's stored so a future power-up can. |
+| **Multiplier** | Per team, default **1**. Nothing changes it; a `damage_multiplier` powerup (teamstate) multiplies one cast on top of it. |
 
 ## The flow
 1. **Content is loaded.** `go run . seed` (`seeds/2026_bosses.sql`, the last of the 2026 seeds) writes 6 bosses, still with placeholder 2025-theme names; real content would be a migration or a seed of its own. The backend is stopped while content changes.
@@ -113,7 +113,7 @@ Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack 
 
 0009 also adds `team_boss` and three `team_cast` columns, and 0010 adds `team_boss.phase_health` and `phase_started_at`; those belong to teamstate: see its README.
 
-**Seed** `seeds/2026_bosses.sql`, applied last by `Seed2026` (after `2026.sql` and `2026_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1), one quadrilateral defeats boss 1, 2 or 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
+**Seed** `seeds/2026_bosses.sql`, applied by `Seed2026` after `2026.sql` and `2026_spells.sql` (and before the quiz drafts, `2026_qtes.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1), one quadrilateral defeats boss 1, 2 or 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
 
 | Serial | Name | Asset | HP | Attacks every (`game.boss_attack.interval`) | Attack damage (`game.boss_attack.damage`) | Full health lasts |
 |---|---|---|---|---|---|---|
@@ -142,7 +142,7 @@ Applied by `teamstate` (`deal` in `read.go`, called by `Scan` when a scan comple
 4. **Overkill is lost.** A cast never carries damage over to the next boss: a cast of 274 on a boss with 7 HP left defeats it, and the next boss starts at 0.
 5. **One cast defeats at most one boss**, by rule 4.
 6. **After the last boss**, `Defeated` = `game.bosses`: `boss` is `null` in `team_state`, and casts still count toward patterns, shapes and the cast log but deal **0** and hit no boss (`dealt: 0`, `boss: null`).
-7. **The multiplier** is per team, stored in `team_boss.multiplier`, default 1. **Nothing sets it yet**: it's there for a future power-up. Casts never change it.
+7. **The multiplier** is per team, stored in `team_boss.multiplier`, default 1. **Nothing sets it**; a `damage_multiplier` powerup multiplies one cast on top of it (teamstate README, "Powerups"). Casts never change it.
 8. Every cast records what it did: `dealt`, the boss's serial (`boss`), and `defeated_boss`.
 9. A team's `team_state` event for a cast that defeats a boss has type **`boss_defeated`** instead of `spell_cast`.
 10. **A defeat starts the next boss's phase** at the cast's time, with the health the team has then: the next boss's attack clock starts from zero.
@@ -275,7 +275,7 @@ No races: the list is built before `Load` returns and never modified, so every g
 | Starting health **10** | `config.toml` `game.health` (at least 1) | Edit, restart; stored phases keep their `phase_health` |
 
 ## Not decided yet
-- **What sets the multiplier.** Only stored and applied; no route or rule changes it. A power-up use case would update `team_boss.multiplier` and teamstate's memory together (a teamstate write, AGENTS.md §6).
+- **What sets the multiplier.** Only stored and applied; no route or rule changes it. The `damage_multiplier` powerup is temporary, so it multiplies one cast on top of the stored value rather than changing it (teamstate README, "Powerups").
 - **Overkill carry-over.** Lost by design for now; carrying it to the next boss is a one-line change in `deal`.
 - **Winning.** Defeating every boss doesn't change the team's status (`FINISHED` is still unset) or rank teams; a leaderboard would read `bosses_defeated` and the last `defeated_boss` cast's time.
 - **Config changes mid-event.** A changed `game.boss_attack.interval` or damage applies retroactively to every current phase after a restart (health is derived). If that's ever unwanted, the phase would have to store the boss's interval and damage too.

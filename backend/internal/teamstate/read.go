@@ -46,6 +46,12 @@ type State struct {
 	// 0 if never. A position, not a time, so a cast at the same instant as
 	// the reset still counts. Stored in team_boss.cooldowns_reset_casts.
 	CooldownsReset int
+	// Powerups are the powerups the team holds and the ones running.
+	Powerups Powerups
+	// QTEAnswers are the team's answers to quick-time events, one per QTE,
+	// oldest first (team_qte_answer). A write builds a new slice
+	// (copy-on-write).
+	QTEAnswers []QTEAnswer
 	// Version orders this team's snapshots (see live.Version): every apply
 	// sets the next one. Memory-only; it starts again, in a new Epoch, after a
 	// restart.
@@ -71,13 +77,108 @@ func (st State) LastCast() (c Cast, ok bool) {
 	return st.Casts[len(st.Casts)-1], true
 }
 
+// QTEAnswer is a team's answer to a quick-time event: right or wrong at once,
+// its powerup granted with it.
+type QTEAnswer struct {
+	// QTE is the QTE's ID.
+	QTE int64
+	// Option is the index it chose.
+	Option int
+	// Correct reports that it was the right one.
+	Correct bool
+	// Granted reports that the team got the QTE's powerup (false when wrong,
+	// or when it already held that kind).
+	Granted bool
+	// By is the member who answered for the team.
+	By uuid.UUID
+	// At is when.
+	At time.Time
+}
+
+// Powerup is a kind of powerup: a temporary effect a team holds (at most one
+// of each kind) and its leader activates. Each kind is a rule of its own, so
+// the kinds are fixed in code; their strengths and durations are in
+// config.toml ([powerups]).
+type Powerup uint8
+
+const (
+	// PowerupDamageMultiplier: the team's next cast after activation deals
+	// × Rules.PowerupMultiplier, then it's used up.
+	PowerupDamageMultiplier Powerup = iota
+	// PowerupHeart gives back Rules.PowerupHeart health, never above
+	// Rules.Health.
+	PowerupHeart
+	// PowerupShortQRCooldown: for Rules.ShortQRWindow after activation, the
+	// team's casts cool their waypoints for Rules.ShortQRCooldown instead of
+	// Rules.QRCooldown.
+	PowerupShortQRCooldown
+	// PowerupInstantCast casts a pattern the leader names at once, with no
+	// scans, whatever the cooldowns.
+	PowerupInstantCast
+	// powerupKinds is how many kinds there are: the length of powerupIDs and
+	// PowerupSet's range. A code fact (each kind is a rule), not config.
+	powerupKinds
+)
+
+// powerupIDs are the kinds' wire names, by kind: team_powerup.kind and what
+// the API takes and shows.
+var powerupIDs = [powerupKinds]string{"damage_multiplier", "heart", "short_qr_cooldown", "instant_cast"}
+
+// PowerupIDs returns every powerup kind's wire name, in kind order: what
+// server.Build gives the qte use case, so a QTE can only earn a real kind.
+func PowerupIDs() []string { return powerupIDs[:] }
+
+// ID returns k's wire name, e.g. "heart".
+func (k Powerup) ID() string { return powerupIDs[k] }
+
+// PowerupByID returns the kind whose wire name is id; ok is false for an
+// unknown name.
+func PowerupByID(id string) (k Powerup, ok bool) {
+	for i, name := range powerupIDs {
+		if name == id {
+			return Powerup(i), true
+		}
+	}
+	return 0, false
+}
+
+// PowerupSet is a set of powerup kinds: bit k for kind k.
+type PowerupSet uint8
+
+// Has reports whether k is in s.
+func (s PowerupSet) Has(k Powerup) bool { return s&(1<<k) != 0 }
+
+// With returns s with k added.
+func (s PowerupSet) With(k Powerup) PowerupSet { return s | 1<<k }
+
+// Without returns s with k removed.
+func (s PowerupSet) Without(k Powerup) PowerupSet { return s &^ (1 << k) }
+
+// Powerups are a team's powerups: the kinds it holds and the effects
+// running. A value inside State, copied with it.
+type Powerups struct {
+	// Held are the kinds the team holds, at most one of each
+	// (team_powerup.held).
+	Held PowerupSet
+	// MultiplierArmed reports that a damage_multiplier powerup is active:
+	// the team's next cast deals × Rules.PowerupMultiplier and uses it up.
+	// Derived: team_powerup.activated_casts equals the cast log's length.
+	MultiplierArmed bool
+	// ShortQRUntil is when the running short_qr_cooldown powerup stops:
+	// casts before it cool their waypoints for Rules.ShortQRCooldown. Zero
+	// when none is running; catchUp clears it once passed. Derived:
+	// team_powerup.activated_at + Rules.ShortQRWindow.
+	ShortQRUntil time.Time
+}
+
 // QRCooldown is a waypoint a team can't scan until Until: it was in one of
-// the team's casts less than game.qr_cooldown ago.
+// the team's casts less than game.qr_cooldown ago (or
+// powerups.short_qr_cooldown, for a cast during a short_qr_cooldown powerup).
 type QRCooldown struct {
 	// Waypoint is the waypoint's index in the atlas.
 	Waypoint int
-	// Until is when it opens again: the latest such cast's time plus
-	// game.qr_cooldown. It's on cooldown while now is before Until.
+	// Until is when it opens again: the latest end among its casts'
+	// cooldowns. It's on cooldown while now is before Until.
 	Until time.Time
 }
 
@@ -112,6 +213,13 @@ type Cast struct {
 	Boss int
 	// DefeatedBoss reports that this cast finished Boss.
 	DefeatedBoss bool
+	// Instant reports that an instant_cast powerup cast it, with no scans.
+	Instant bool
+	// Boosted reports that a damage_multiplier powerup multiplied Dealt.
+	Boosted bool
+	// ShortQR reports that a short_qr_cooldown powerup was active: its
+	// waypoints cool for Rules.ShortQRCooldown, not Rules.QRCooldown.
+	ShortQR bool
 }
 
 // BossProgress is a team's progress through the bosses, which every team
@@ -195,18 +303,32 @@ func (p BossProgress) nextAttack(b Bosses) (at time.Time, ok bool) {
 	return p.PhaseStart.Add(time.Duration(p.Attacks+1) * b.At(p.Defeated).AttackInterval()), true
 }
 
+// maxDealt is the most one cast deals: the INTEGER columns that hold it
+// (team_cast.dealt, team_boss.damage). Far above any boss's HP, so a clamped
+// cast still defeats its boss, and damage resets.
+const maxDealt = math.MaxInt32
+
 // deal applies a cast of the given damage at now to p, against bosses: the
-// new progress, the damage dealt (damage × multiplier, rounded), the serial
+// new progress, the damage dealt (damage × multiplier × factor, rounded,
+// multiplied in that order; factor is a damage_multiplier powerup's, or 1),
+// the serial
 // of the boss hit (0 if every boss is already defeated, in which case
 // nothing is dealt), and whether the cast defeated it. A defeat starts the
 // next boss's phase at now, with the team's current health. p must already
 // be at now.
-func deal(p BossProgress, damage int, now time.Time, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
+func deal(p BossProgress, damage int, factor float64, now time.Time, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
 	if p.Defeated >= b.Count() {
 		return p, 0, 0, false
 	}
 	boss := b.At(p.Defeated)
-	dealt = int(math.Round(float64(damage) * p.Multiplier))
+	// Clamped: team_cast.dealt is INTEGER, and an absurd multiplier (a
+	// stored one has no upper bound) would overflow it, failing every cast.
+	// !(v < maxDealt) also catches +Inf and NaN.
+	v := math.Round(float64(damage) * p.Multiplier * factor)
+	if !(v < maxDealt) {
+		v = maxDealt
+	}
+	dealt = int(v)
 	next = p
 	next.Damage += dealt
 	if next.Damage >= boss.HP {
@@ -347,6 +469,12 @@ type View struct {
 	// included. A client holding the log (GET /api/teams/me/casts) re-fetches
 	// it when this is more than its length plus the cast it just saw.
 	CastCount int `json:"cast_count"`
+	// Powerups are the powerups the team holds and the ones running.
+	Powerups PowerupsView `json:"powerups"`
+	// QTE is the team's latest answer to a quick-time event, or null if it
+	// never answered one: compare its qte_id with the qte event's id to know
+	// whether the team answered the open one.
+	QTE *QTEAnswerView `json:"qte"`
 	// Version orders this team's snapshots: keep a copy only if its epoch
 	// differs from the one held, or it has a higher seq (live.Version).
 	Version live.Version `json:"version"`
@@ -376,6 +504,60 @@ type CastView struct {
 	Boss *int `json:"boss"`
 	// DefeatedBoss reports that this cast defeated that boss.
 	DefeatedBoss bool `json:"defeated_boss"`
+	// Instant reports that an instant_cast powerup cast it, with no scans.
+	Instant bool `json:"instant"`
+	// Boosted reports that a damage_multiplier powerup multiplied Dealt.
+	Boosted bool `json:"boosted"`
+	// ShortQRCooldown reports that its waypoints cool for
+	// powerups.short_qr_cooldown (a short_qr_cooldown powerup was active).
+	ShortQRCooldown bool `json:"short_qr_cooldown"`
+}
+
+// QTEAnswerView is a QTEAnswer as JSON.
+type QTEAnswerView struct {
+	// QTEID is the QTE answered.
+	QTEID int64 `json:"qte_id"`
+	// Option is the index chosen.
+	Option int `json:"option"`
+	// Correct reports that it was right.
+	Correct bool `json:"correct"`
+	// Granted reports that the team got the QTE's powerup.
+	Granted bool `json:"granted"`
+	// AnsweredBy is the member who answered.
+	AnsweredBy uuid.UUID `json:"answered_by"`
+	// AnsweredAt is when.
+	AnsweredAt time.Time `json:"answered_at"`
+}
+
+// QTEStat counts the teams' answers to one QTE, for the admin overview.
+type QTEStat struct {
+	// Answered is how many teams answered.
+	Answered int `json:"answered"`
+	// Correct is how many answered right.
+	Correct int `json:"correct"`
+	// Granted is how many got the powerup (right, and not already holding
+	// it).
+	Granted int `json:"granted"`
+	// ByOption counts the answers per option index.
+	ByOption map[int]int `json:"by_option"`
+}
+
+// PowerupsView is a team's Powerups as JSON.
+type PowerupsView struct {
+	// Held are the kinds the team holds, in kind order; [] when none.
+	Held []string `json:"held"`
+	// Active are the effects running, in kind order; [] when none. A heart
+	// or an instant cast takes effect at once, so never shows here.
+	Active []ActivePowerupView `json:"active"`
+}
+
+// ActivePowerupView is one running powerup effect.
+type ActivePowerupView struct {
+	// Kind is the powerup's wire name.
+	Kind string `json:"kind"`
+	// Until is when it stops, or null for one used up by the next cast
+	// (damage_multiplier).
+	Until *time.Time `json:"until"`
 }
 
 // BossView is the boss a team is fighting, as JSON.
@@ -453,6 +635,23 @@ type Game struct {
 	// SpellClasses are every spell class, ascending by points: a pattern of
 	// n waypoints is in the class whose points is n.
 	SpellClasses []atlas.SpellClass `json:"spell_classes"`
+	// Powerups are what each powerup does ([powerups]).
+	Powerups GamePowerups `json:"powerups"`
+}
+
+// GamePowerups are the powerups' strengths and durations, from config.toml.
+type GamePowerups struct {
+	// DamageMultiplier is what a damage_multiplier powerup multiplies the
+	// next cast's damage by.
+	DamageMultiplier float64 `json:"damage_multiplier"`
+	// Heart is the health a heart powerup gives back.
+	Heart int `json:"heart"`
+	// ShortQRCooldownS is how long, in seconds, a cast's waypoints cool
+	// while a short_qr_cooldown powerup is active.
+	ShortQRCooldownS int `json:"short_qr_cooldown_s"`
+	// ShortQRWindowS is how long, in seconds, a short_qr_cooldown powerup
+	// stays active.
+	ShortQRWindowS int `json:"short_qr_window_s"`
 }
 
 // GameShape is one selectable shape: what the client calls a pattern type.
@@ -503,23 +702,34 @@ func (s *Store) shapeLocked(shape, unlocked int) bool {
 //
 // Only casts from index reset on count (an admin's ResetCooldowns).
 func (s *Store) qrCooldowns(casts []Cast, reset int, now time.Time) []QRCooldown {
-	cd := s.rules.QRCooldown
-	if cd <= 0 {
+	longest := max(s.rules.QRCooldown, s.rules.ShortQRCooldown)
+	if longest <= 0 {
 		return nil
 	}
-	seen := atlas.WaypointSet(0)
-	var out []QRCooldown
+	var until [atlas.MaxWaypoints]time.Time // by waypoint index: the latest end so far
+	var cooling atlas.WaypointSet
 	for i := len(casts) - 1; i >= reset; i-- {
-		until := casts[i].At.Add(cd)
-		if !now.Before(until) {
-			break // this cast and every older one are past their cooldown, or reset
+		c := casts[i]
+		if !now.Before(c.At.Add(longest)) {
+			break // this cast and every older one are past any cooldown, or reset
 		}
-		for _, w := range s.atlas.Pattern(casts[i].Pattern).Waypoints.Indexes() {
-			if !seen.Has(w) {
-				seen = seen.With(w)
-				out = append(out, QRCooldown{Waypoint: w, Until: until})
+		end := c.At.Add(s.rules.QRCooldown)
+		if c.ShortQR {
+			end = c.At.Add(s.rules.ShortQRCooldown)
+		}
+		if !now.Before(end) {
+			continue
+		}
+		for _, w := range s.atlas.Pattern(c.Pattern).Waypoints.Indexes() {
+			if end.After(until[w]) {
+				until[w] = end
 			}
+			cooling = cooling.With(w)
 		}
+	}
+	var out []QRCooldown
+	for _, w := range cooling.Indexes() {
+		out = append(out, QRCooldown{Waypoint: w, Until: until[w]})
 	}
 	slices.SortFunc(out, func(a, b QRCooldown) int {
 		if c := a.Until.Compare(b.Until); c != 0 {
@@ -575,6 +785,8 @@ func newGame(a Atlas, r Rules) Game {
 		LockedPatternPoints: r.LockedPatternPoints,
 		UnlockAfterBosses:   r.UnlockAfterBosses,
 		SpellClasses:        a.SpellClasses(),
+		Powerups: GamePowerups{DamageMultiplier: r.PowerupMultiplier, Heart: r.PowerupHeart,
+			ShortQRCooldownS: int(r.ShortQRCooldown.Seconds()), ShortQRWindowS: int(r.ShortQRWindow.Seconds())},
 	}
 	for i := range a.ShapeCount() {
 		sh := a.Shape(i)
@@ -678,7 +890,11 @@ func (s *Store) view(teamID string, st State) View {
 		Stack: []StackScanView{}, Poisoned: st.Poisoned(), CastCount: len(st.Casts), Version: st.Version,
 		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier,
 		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut(), UnlockedPoints: s.unlockedPoints(st), LockedShapes: []string{},
-		CooldownShapes: []string{}, QRCooldowns: []QRCooldownView{}}
+		CooldownShapes: []string{}, QRCooldowns: []QRCooldownView{}, Powerups: powerupsView(st.Powerups)}
+	if n := len(st.QTEAnswers); n > 0 {
+		a := st.QTEAnswers[n-1]
+		v.QTE = &QTEAnswerView{QTEID: a.QTE, Option: a.Option, Correct: a.Correct, Granted: a.Granted, AnsweredBy: a.By, AnsweredAt: a.At.UTC()}
+	}
 	for _, qc := range st.QRCooldowns { // already soonest first, ties by waypoint index (ID order)
 		v.QRCooldowns = append(v.QRCooldowns, QRCooldownView{WaypointID: c.Waypoint(qc.Waypoint).ID, Until: qc.Until.UTC()})
 	}
@@ -724,12 +940,31 @@ func (s *Store) view(teamID string, st State) View {
 	return v
 }
 
+// powerupsView turns a team's Powerups into JSON: held and active kinds in
+// kind order, both [] when empty.
+func powerupsView(p Powerups) PowerupsView {
+	v := PowerupsView{Held: []string{}, Active: []ActivePowerupView{}}
+	for k := range powerupKinds {
+		if p.Held.Has(k) {
+			v.Held = append(v.Held, k.ID())
+		}
+	}
+	if p.MultiplierArmed {
+		v.Active = append(v.Active, ActivePowerupView{Kind: PowerupDamageMultiplier.ID()})
+	}
+	if !p.ShortQRUntil.IsZero() {
+		until := p.ShortQRUntil.UTC()
+		v.Active = append(v.Active, ActivePowerupView{Kind: PowerupShortQRCooldown.ID(), Until: &until})
+	}
+	return v
+}
+
 // castView turns a Cast into JSON, with its pattern's damage from the atlas.
 func (s *Store) castView(lc Cast) CastView {
 	p := s.atlas.Pattern(lc.Pattern)
 	cv := CastView{Pattern: s.atlas.WaypointIDs(p.Waypoints), Shape: s.atlas.Shape(p.Shape).ID, Class: p.Spell.Class,
 		CastBy: lc.By, CastAt: lc.At.UTC(), AlreadyCompleted: lc.AlreadyCompleted, Damage: p.Spell.Damage,
-		Dealt: lc.Dealt, DefeatedBoss: lc.DefeatedBoss}
+		Dealt: lc.Dealt, DefeatedBoss: lc.DefeatedBoss, Instant: lc.Instant, Boosted: lc.Boosted, ShortQRCooldown: lc.ShortQR}
 	if lc.Boss != 0 {
 		serial := lc.Boss
 		cv.Boss = &serial
@@ -784,6 +1019,32 @@ func (s *Store) Standings() []Standing {
 			}
 		}
 		out = append(out, sd)
+	}
+	return out
+}
+
+// QTEStats returns every team's answers counted per QTE, from memory: what
+// the admin overview shows next to each QTE.
+func (s *Store) QTEStats() map[int64]QTEStat {
+	out := map[int64]QTEStat{}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.states {
+		for _, a := range e.cur.Load().QTEAnswers {
+			st := out[a.QTE]
+			if st.ByOption == nil {
+				st.ByOption = map[int]int{}
+			}
+			st.Answered++
+			st.ByOption[a.Option]++
+			if a.Correct {
+				st.Correct++
+			}
+			if a.Granted {
+				st.Granted++
+			}
+			out[a.QTE] = st
+		}
 	}
 	return out
 }
