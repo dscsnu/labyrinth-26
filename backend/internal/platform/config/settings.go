@@ -48,6 +48,8 @@ type Settings struct {
 	Leaderboard LeaderboardSettings `toml:"leaderboard"`
 	// Admin are the admin tools' limits.
 	Admin AdminSettings `toml:"admin"`
+	// RateLimit is the per-user request rate limit.
+	RateLimit RateLimitSettings `toml:"ratelimit"`
 }
 
 // SpellSettings is config.toml's [spell] table.
@@ -79,6 +81,18 @@ type LeaderboardSettings struct {
 	// PublishEvery is how often the server checks whether the top changed,
 	// and so the most often it broadcasts the leaderboard.
 	PublishEvery Duration `toml:"publish_every"`
+}
+
+// RateLimitSettings is config.toml's [ratelimit] table: a token bucket per
+// signed-in user.
+type RateLimitSettings struct {
+	// PerSecond is the average requests a second each user may make.
+	PerSecond float64 `toml:"per_second"`
+	// Burst is how many requests a user may make at once before the
+	// average applies.
+	Burst int `toml:"burst"`
+	// Idle is how long an unused user's bucket is kept before it's dropped.
+	Idle Duration `toml:"idle"`
 }
 
 // AdminSettings is config.toml's [admin] table.
@@ -326,6 +340,9 @@ func (s Settings) validate() []error {
 	check(s.Leaderboard.Size >= 1, "leaderboard.size must be at least 1")
 	check(s.Leaderboard.PublishEvery.Duration >= time.Second, "leaderboard.publish_every must be at least 1s")
 	check(s.Admin.UserSearchLimit >= 1, "admin.user_search_limit must be at least 1")
+	check(s.RateLimit.PerSecond > 0, "ratelimit.per_second must be positive")
+	check(s.RateLimit.Burst >= 1, "ratelimit.burst must be at least 1")
+	check(s.RateLimit.Idle.Duration >= time.Second, "ratelimit.idle must be at least 1s")
 	check(s.Auth.TokenTTL.Duration > 0, "auth.token_ttl must be positive")
 	check(s.Auth.LoginCodeTTL.Duration > 0, "auth.login_code_ttl must be positive")
 	check(s.Auth.OAuthStateTTL.Duration >= time.Second, "auth.oauth_state_ttl must be at least 1s")

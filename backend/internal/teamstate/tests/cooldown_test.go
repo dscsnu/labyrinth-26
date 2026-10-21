@@ -10,31 +10,30 @@ import (
 	"labyrinth/internal/teamstate"
 )
 
-// mixedShape adds a waypoint, 1012, and a shape mixing a 3-point (class_3)
+// mixedShape adds a waypoint, 2097, and a shape mixing a 3-point (class_3)
 // and a 4-point (class_4) pattern through it, neither inside the other, so a
 // cooldown on either class leaves the shape selectable but narrows what
-// fits. Both use 1012 because the seed already has a pattern for every set
-// of three of its waypoints, and no two patterns may share a set.
+// fits. (Every 2026 shape is one size, and every set of the 10 checkpoints
+// is already a pattern, so both go through a test-only waypoint.)
 const mixedShape = `
-	INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Mixed', 0, 0);
+	INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2097', 'Mixed', 0, 0);
 	INSERT INTO shape (id, name) VALUES ('mixed', 'Mixed');
 	INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1006, 'mixed', 50, 'class_3'), (1007, 'mixed', 80, 'class_4');
 	INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
-		(1006, '1005'), (1006, '1006'), (1006, '1012'),
-		(1007, '1001'), (1007, '1002'), (1007, '1008'), (1007, '1012');`
+		(1006, '2005'), (1006, '2006'), (1006, '2097'),
+		(1007, '2001'), (1007, '2002'), (1007, '2008'), (1007, '2097');`
 
 // TestSpellCooldown checks the spell cooldown: the class of the team's last
 // cast can't be cast again until a spell of another class is.
 //
 //   - before any cast: no cooldown, nothing on cooldown
-//   - after the square (class_4): cooldown_class class_4; the shapes made only
-//     of class_4 patterns (lightning, square, tree) are in cooldown_shapes and
+//   - after the quadrilateral (class_4): cooldown_class class_4; the shape
+//     made only of class_4 patterns (quadrilateral) is in cooldown_shapes and
 //     selecting one is shape_on_cooldown (nothing written or published); the
 //     mixed shape is selectable, but a scan that only fits its class_4
 //     pattern is wrong
 //   - after the mixed shape's class_3 pattern: cooldown_class class_3; the
-//     square is selectable and casts again; triangle and collinear are on
-//     cooldown
+//     quadrilateral is selectable and casts again; triangle is on cooldown
 //   - a restart rebuilds the cooldown from the cast log
 //   - a defeated boss doesn't clear it
 func TestSpellCooldown(t *testing.T) {
@@ -53,15 +52,12 @@ func TestSpellCooldown(t *testing.T) {
 	}
 	v := f.view(t)
 	if v.CooldownClass == nil || *v.CooldownClass != "class_4" || v.BossesDefeated != 1 ||
-		!slices.Equal(v.CooldownShapes, []string{"lightning", "square", "tree"}) {
+		!slices.Equal(v.CooldownShapes, []string{"quadrilateral"}) {
 		t.Fatalf("after the square: cooldown %v, shapes %v, defeated %d", v.CooldownClass, v.CooldownShapes, v.BossesDefeated)
 	}
 	seq := v.Version.Seq
-	if _, err := f.state.Select(ctx, f.users[0], "square"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
+	if _, err := f.state.Select(ctx, f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
 		t.Fatalf("selecting the square on cooldown: %v, want shape_on_cooldown", err)
-	}
-	if _, err := f.state.Select(ctx, f.users[0], "tree"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
-		t.Fatalf("selecting the tree (all class_4) on cooldown: %v, want shape_on_cooldown", err)
 	}
 	expectNoEvent(t, sub, "refused selections")
 	if v := f.view(t); v.Version.Seq != seq || v.Selection != nil {
@@ -69,12 +65,12 @@ func TestSpellCooldown(t *testing.T) {
 	}
 
 	// The mixed shape is selectable: its class_3 pattern isn't on cooldown.
-	// 1001 is only in its class_4 pattern, so it's wrong now.
+	// 2001 is only in its class_4 pattern, so it's wrong now.
 	f.selectAt(t, f.tick(200), 0, "mixed")
-	expectOutcome(t, "a point only in the cooled-down pattern", f.scanAt(t, f.tick(201), 0, "1001"), teamstate.OutcomeWrongScan)
+	expectOutcome(t, "a point only in the cooled-down pattern", f.scanAt(t, f.tick(201), 0, "2001"), teamstate.OutcomeWrongScan)
 	f.selectAt(t, f.tick(202), 0, "mixed")
 	var res teamstate.ScanResult
-	for i, w := range []string{"1005", "1006", "1012"} {
+	for i, w := range []string{"2005", "2006", "2097"} {
 		res = f.scanAt(t, f.tick(float64(203+i)), i, w)
 	}
 	expectOutcome(t, "the mixed shape's class_3 pattern", res, teamstate.OutcomePatternCompleted)
@@ -82,14 +78,14 @@ func TestSpellCooldown(t *testing.T) {
 		t.Fatalf("cast class %q, want class_3", c)
 	}
 	v = f.view(t)
-	if v.CooldownClass == nil || *v.CooldownClass != "class_3" || !slices.Equal(v.CooldownShapes, []string{"collinear", "triangle"}) {
+	if v.CooldownClass == nil || *v.CooldownClass != "class_3" || !slices.Equal(v.CooldownShapes, []string{"triangle"}) {
 		t.Fatalf("after a class_3 cast: cooldown %v, shapes %v", v.CooldownClass, v.CooldownShapes)
 	}
 
 	// A restart rebuilds the cooldown from the cast log.
 	f.restart(t)
 	v = f.view(t)
-	if v.CooldownClass == nil || *v.CooldownClass != "class_3" || !slices.Equal(v.CooldownShapes, []string{"collinear", "triangle"}) {
+	if v.CooldownClass == nil || *v.CooldownClass != "class_3" || !slices.Equal(v.CooldownShapes, []string{"triangle"}) {
 		t.Fatalf("after a restart: cooldown %v, shapes %v", v.CooldownClass, v.CooldownShapes)
 	}
 	if _, err := f.state.Select(ctx, f.users[0], "triangle"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
@@ -120,7 +116,7 @@ func TestCooldownFailedCastKeepsIt(t *testing.T) {
 		t.Fatal("the completing scan with the database closed should fail")
 	}
 	v := f.view(t)
-	if v.CooldownClass == nil || *v.CooldownClass != "class_4" || v.CastCount != 1 || v.LastCast.Shape != "square" {
+	if v.CooldownClass == nil || *v.CooldownClass != "class_4" || v.CastCount != 1 || v.LastCast.Shape != "quadrilateral" {
 		t.Fatalf("after a failed cast: cooldown %v, casts %d, last %s", v.CooldownClass, v.CastCount, v.LastCast.Shape)
 	}
 }
@@ -144,7 +140,7 @@ func TestCooldownKnockedOutFirst(t *testing.T) {
 	if v := f.view(t); !v.KnockedOut || v.CooldownClass == nil || *v.CooldownClass != "class_4" {
 		t.Fatalf("knocked out with the square on cooldown: knocked %v, cooldown %v", v.KnockedOut, v.CooldownClass)
 	}
-	if _, err := f.state.Select(context.Background(), f.users[0], "square"); !errors.Is(err, teamstate.ErrKnockedOut) {
+	if _, err := f.state.Select(context.Background(), f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrKnockedOut) {
 		t.Fatalf("selecting a shape on cooldown while knocked out: %v, want knocked_out", err)
 	}
 	if _, err := f.state.Select(context.Background(), f.users[0], "triangle"); !errors.Is(err, teamstate.ErrKnockedOut) {
@@ -153,18 +149,13 @@ func TestCooldownKnockedOutFirst(t *testing.T) {
 }
 
 // TestCooldownOnBigPatterns checks the cooldown once big patterns are
-// unlocked (every boss at 1 HP, a 5-point pentagon added by SQL): casting the
+// unlocked (every boss at 1 HP; a seed pentagon): casting the
 // pentagon puts class_5 on cooldown, the pentagon moves to cooldown_shapes
 // (not locked_shapes) and selecting it is shape_on_cooldown; a 4-point cast
 // opens it again.
 func TestCooldownOnBigPatterns(t *testing.T) {
-	pent := []string{"1003", "1004", "1005", "1006", "1009"}
-	f := started(t, fixtureOptions{sql: `
-		UPDATE boss SET hp = 1;
-		INSERT INTO shape (id, name) VALUES ('pentagon', 'Pentagon');
-		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1003, 'pentagon', 150, 'class_5');
-		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
-			(1003, '1003'), (1003, '1004'), (1003, '1005'), (1003, '1006'), (1003, '1009');`})
+	pent := []string{"2003", "2004", "2005", "2006", "2009"}
+	f := started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1"})
 	if f.rules.LockedPatternPoints != 5 || f.rules.MaxPatternPoints < 5 {
 		t.Skipf("test assumes locked_pattern_points = 5 (got %d)", f.rules.LockedPatternPoints)
 	}

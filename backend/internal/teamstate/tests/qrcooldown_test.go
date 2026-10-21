@@ -89,12 +89,12 @@ func TestQRCooldown(t *testing.T) {
 		t.Fatalf("refused scans changed the state: seq %d (was %d), stack %v, %d scans logged (was %d)",
 			v.Version.Seq, seq, v.Stack, f.loggedScans(t), logged)
 	}
-	expectOutcome(t, "1003, not in the square", f.scanAt(t, f.tick(12), 4, "1003"), teamstate.OutcomeScanAdded)
-	expectType(t, sub, "1003", teamstate.ScanAdded)
+	expectOutcome(t, "1003, not in the square", f.scanAt(t, f.tick(12), 4, "2003"), teamstate.OutcomeScanAdded)
+	expectType(t, sub, "2003", teamstate.ScanAdded)
 
 	f.clock.at(until.Sub(start) - time.Microsecond)
 	expectNoEvent(t, sub, "just before until")
-	if err := f.scanErrAt(until.Sub(start)-time.Microsecond, 0, "1001"); !errors.Is(err, teamstate.ErrWaypointOnCooldown) {
+	if err := f.scanErrAt(until.Sub(start)-time.Microsecond, 0, "2001"); !errors.Is(err, teamstate.ErrWaypointOnCooldown) {
 		t.Fatalf("1001 a microsecond before until: %v, want waypoint_on_cooldown", err)
 	}
 	seq = f.view(t).Version.Seq
@@ -106,8 +106,8 @@ func TestQRCooldown(t *testing.T) {
 	}
 	expectNoEvent(t, sub, "one event per expiry")
 
-	expectOutcome(t, "1001 at until", f.scanAt(t, until.Sub(start), 0, "1001"), teamstate.OutcomeScanAdded)
-	res = f.scanAt(t, until.Sub(start)+f.tick(1), 1, "1002")
+	expectOutcome(t, "1001 at until", f.scanAt(t, until.Sub(start), 0, "2001"), teamstate.OutcomeScanAdded)
+	res = f.scanAt(t, until.Sub(start)+f.tick(1), 1, "2002")
 	expectOutcome(t, "the triangle", res, teamstate.OutcomePatternCompleted)
 	if got := qrIDs(t, res.State, until.Add(f.tick(1)+cd)); !slices.Equal(got, triangle) {
 		t.Fatalf("after the triangle: qr_cooldowns %v, want %v", got, triangle)
@@ -131,7 +131,7 @@ func TestQRCooldownWriteCatchesUp(t *testing.T) {
 	at := f.tick(4) + f.rules.QRCooldown
 	f.clock.at(at)
 	expectNoEvent(t, sub, "no timer")
-	res := f.scanAt(t, at, 2, "1001")
+	res := f.scanAt(t, at, 2, "2001")
 	expectType(t, sub, "caught-up expiry", teamstate.QRCooldownEnded)
 	expectType(t, sub, "the scan", teamstate.ScanAdded)
 	if res.Outcome != teamstate.OutcomeScanAdded || len(res.State.QRCooldowns) != 0 {
@@ -171,7 +171,7 @@ func TestQRCooldownAndAttackTogether(t *testing.T) {
 // scan fails and qr_cooldowns stays empty.
 func TestQRCooldownFailedCast(t *testing.T) {
 	f := qrStarted(t, fixtureOptions{})
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	for i, w := range square[:3] {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
 	}
@@ -207,7 +207,7 @@ func TestQRCooldownRestart(t *testing.T) {
 		t.Fatalf("restarted after the cooldown ended: qr_cooldowns %v", v.QRCooldowns)
 	}
 	f.selectAt(t, f.tick(6)+f.rules.QRCooldown, 0, "triangle")
-	expectOutcome(t, "1001 after the restart", f.scanAt(t, f.tick(7)+f.rules.QRCooldown, 0, "1001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "1001 after the restart", f.scanAt(t, f.tick(7)+f.rules.QRCooldown, 0, "2001"), teamstate.OutcomeScanAdded)
 }
 
 // TestQRCooldownLatestCastWins checks the one way a waypoint can be in two
@@ -231,11 +231,11 @@ func TestQRCooldownLatestCastWins(t *testing.T) {
 	f.restart(t)
 	v := f.view(t)
 	want := []teamstate.QRCooldownView{
-		{WaypointID: "1007", Until: start.Add(f.tick(4) + 3*cd)},
-		{WaypointID: "1008", Until: start.Add(f.tick(4) + 3*cd)},
-		{WaypointID: "1001", Until: triangleAt.Add(3 * cd)},
-		{WaypointID: "1002", Until: triangleAt.Add(3 * cd)},
-		{WaypointID: "1003", Until: triangleAt.Add(3 * cd)},
+		{WaypointID: "2007", Until: start.Add(f.tick(4) + 3*cd)},
+		{WaypointID: "2008", Until: start.Add(f.tick(4) + 3*cd)},
+		{WaypointID: "2001", Until: triangleAt.Add(3 * cd)},
+		{WaypointID: "2002", Until: triangleAt.Add(3 * cd)},
+		{WaypointID: "2003", Until: triangleAt.Add(3 * cd)},
 	}
 	if !slices.EqualFunc(v.QRCooldowns, want, func(a, b teamstate.QRCooldownView) bool {
 		return a.WaypointID == b.WaypointID && a.Until.Equal(b.Until)
@@ -253,5 +253,5 @@ func TestQRCooldownOff(t *testing.T) {
 		t.Fatalf("qr_cooldowns with game.qr_cooldown 0: %#v, want []", res.State.QRCooldowns)
 	}
 	f.selectAt(t, f.tick(10), 0, "triangle")
-	expectOutcome(t, "1001 straight after the square", f.scanAt(t, f.tick(11), 0, "1001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "1001 straight after the square", f.scanAt(t, f.tick(11), 0, "2001"), teamstate.OutcomeScanAdded)
 }

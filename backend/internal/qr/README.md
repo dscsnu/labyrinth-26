@@ -33,8 +33,8 @@ shows. Config values appear with their key: **5 s** (`qr.rotate`) and **5 s**
 photo must scan and submit within **10 s** of issue. **Why the display signs
 locally.** Signing needs no secret from the server each rotation, so the
 display makes one request and then works offline for as long as its clock is
-right. **Why the key is per-waypoint.** A display for `1001` can't sign tokens
-for `1002`: the key is `HMAC(QR_SECRET, "qr:1001")`, scoped to that waypoint.
+right. **Why the key is per-waypoint.** A display for `2001` can't sign tokens
+for `2002`: the key is `HMAC(QR_SECRET, "qr:2001")`, scoped to that waypoint.
 **Why minting is staff-only.** If players could call `GET /api/qr/{id}`, they
 could sign their own tokens for any waypoint without being there, defeating the
 purpose.
@@ -73,9 +73,9 @@ Not applicable: nothing is persisted, so a restart has nothing to reload.
 
 | Step | Action | Result |
 |---|---|---|
-| 1 | Staff opens `/qr`, enters `1001`. Page calls `GET /api/qr/1001`. | `SigningKey` checks `1001` is in the atlas and returns `{"waypoint_id":"1001","key":"<64 hex chars>","rotate_ms":5000,"window_ms":10000,"server_time":1760000000}`. |
-| 2 | Page signs `1001:1760000000` with the key and renders the QR. | The QR shows `1001:1760000000.<base64url sig>`. |
-| 3 | Player scans and submits the token at `t = 1760000003`. | `Verify` derives the `1001` key, recomputes the HMAC (match), checks `t < issued+10s` (yes): returns `"1001"`. |
+| 1 | Staff opens `/qr`, enters `2001`. Page calls `GET /api/qr/2001`. | `SigningKey` checks `2001` is in the atlas and returns `{"waypoint_id":"2001","key":"<64 hex chars>","rotate_ms":5000,"window_ms":10000,"server_time":1760000000}`. |
+| 2 | Page signs `2001:1760000000` with the key and renders the QR. | The QR shows `2001:1760000000.<base64url sig>`. |
+| 3 | Player scans and submits the token at `t = 1760000003`. | `Verify` derives the `2001` key, recomputes the HMAC (match), checks `t < issued+10s` (yes): returns `"2001"`. |
 | 4 | A friend scans a photo of the same QR at `t = 1760000011`. | Signature OK, but `t` is past the window: `ErrExpired` → `409 qr_expired`. |
 
 ## The write-through
@@ -91,17 +91,17 @@ there are no lock/validate/build/persist/apply/publish steps and no reconcile.
 | POST | `/api/qr/verify` | Bearer | `{"qr"}` → `{"waypoint_id"}`. Changes nothing. |
 
 ```json
-// GET /api/qr/1001 → 200
+// GET /api/qr/2001 → 200
 {"success": true, "payload": {
-  "waypoint_id": "1001",
+  "waypoint_id": "2001",
   "key": "9f3a…64 hex chars",
   "rotate_ms": 5000,
   "window_ms": 10000,
   "server_time": 1760000000
 }}
 
-// POST /api/qr/verify {"qr":"1001:1760000000.nR5…"} → 200
-{"success": true, "payload": {"waypoint_id": "1001"}}
+// POST /api/qr/verify {"qr":"2001:1760000000.nR5…"} → 200
+{"success": true, "payload": {"waypoint_id": "2001"}}
 
 // errors
 {"success": false, "code": "invalid_qr", "message": "invalid qr token"}          // 400

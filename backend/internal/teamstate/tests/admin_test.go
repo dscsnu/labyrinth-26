@@ -27,7 +27,7 @@ func TestResetCooldowns(t *testing.T) {
 	if v := f.view(t); v.CooldownClass == nil || len(v.QRCooldowns) != len(square) {
 		t.Fatalf("after the square: cooldown %v, qr %v", v.CooldownClass, v.QRCooldowns)
 	}
-	if _, err := f.state.Select(context.Background(), f.users[0], "square"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
+	if _, err := f.state.Select(context.Background(), f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
 		t.Fatalf("the square before the reset: %v", err)
 	}
 	for len(sub.C) > 0 {

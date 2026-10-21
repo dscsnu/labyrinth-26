@@ -20,8 +20,8 @@ import (
 	"labyrinth/internal/platform/postgres/pgtest"
 )
 
-// simSquare is a square in the 2025 seed.
-var simSquare = []string{"1001", "1002", "1007", "1008"}
+// simSquare is a quadrilateral in the 2026 seed.
+var simSquare = []string{"2001", "2002", "2007", "2008"}
 
 // simClient is one player's phone: a network delay each way, and an event
 // stream delivered after the same delay.
@@ -134,12 +134,18 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// simTeam starts a team on the 2025 seed, gives every player a client (delays
+// simTeam starts a team on the 2026 seed (plus 2099, in no pattern: the one
+// wrong scan), gives every player a client (delays
 // from delay(i)), and selects shape.
 func simTeam(t *testing.T, shape string, delay func(i int) (up, down time.Duration)) (*env, []*simClient) {
 	t.Helper()
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Every scan of the 2026 checkpoints fits its shape; 2099 (in no
+	// pattern) is the one wrong scan.
+	if _, err := e.db.Pool().Exec(context.Background(), "INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2099', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -158,7 +164,7 @@ func simTeam(t *testing.T, shape string, delay func(i int) (up, down time.Durati
 // it, and every player's screen ends with the stack purged and the square
 // completed.
 func TestSimTeamCompletesUnderLatency(t *testing.T) {
-	_, cs := simTeam(t, "square", func(i int) (time.Duration, time.Duration) {
+	_, cs := simTeam(t, "quadrilateral", func(i int) (time.Duration, time.Duration) {
 		return time.Duration(i*30) * time.Millisecond, time.Duration(150-i*25) * time.Millisecond
 	})
 	var wg sync.WaitGroup
@@ -188,7 +194,7 @@ func TestSimTeamCompletesUnderLatency(t *testing.T) {
 		eventually(t, "player sees the purge and the square", func() bool {
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			return len(c.stack) == 0 && len(c.shape) == 1 && c.shape[0] == "square"
+			return len(c.stack) == 0 && len(c.shape) == 1 && c.shape[0] == "quadrilateral"
 		})
 	}
 }
@@ -197,7 +203,7 @@ func TestSimTeamCompletesUnderLatency(t *testing.T) {
 // moment: one is accepted, the other gets waypoint_already_scanned, and every
 // screen converges on a stack holding that one scan.
 func TestSimRaceSameWaypoint(t *testing.T) {
-	_, cs := simTeam(t, "square", func(i int) (time.Duration, time.Duration) {
+	_, cs := simTeam(t, "quadrilateral", func(i int) (time.Duration, time.Duration) {
 		return time.Duration(i*5) * time.Millisecond, 10 * time.Millisecond
 	})
 	type result struct {
@@ -241,10 +247,10 @@ func TestSimRaceSameWaypoint(t *testing.T) {
 // attempt poisoned, a teammate's scan racing it is either accepted before it
 // or refused after it (selection_poisoned), and a reselect clears it for all.
 func TestSimWrongScanReachesEveryone(t *testing.T) {
-	e, cs := simTeam(t, "square", func(i int) (time.Duration, time.Duration) {
+	e, cs := simTeam(t, "quadrilateral", func(i int) (time.Duration, time.Duration) {
 		return time.Duration(i*10) * time.Millisecond, time.Duration(60-i*10) * time.Millisecond
 	})
-	if status, code, _, err := cs[0].scan("1001"); err != nil || status != http.StatusOK {
+	if status, code, _, err := cs[0].scan("2001"); err != nil || status != http.StatusOK {
 		t.Fatalf("first scan: %d %s %v", status, code, err)
 	}
 	var wg sync.WaitGroup
@@ -254,8 +260,8 @@ func TestSimWrongScanReachesEveryone(t *testing.T) {
 		code   string
 	}
 	wg.Add(2)
-	go func() { defer wg.Done(); _, _, wrongOutcome, _ = cs[1].scan("1004") }() // in no square with 1001: wrong either way
-	go func() { defer wg.Done(); other.status, other.code, _, _ = cs[2].scan("1002") }()
+	go func() { defer wg.Done(); _, _, wrongOutcome, _ = cs[1].scan("2099") }() // in no pattern: wrong either way
+	go func() { defer wg.Done(); other.status, other.code, _, _ = cs[2].scan("2002") }()
 	wg.Wait()
 	if wrongOutcome != "wrong_scan" {
 		t.Fatalf("the wrong scan's outcome: %q", wrongOutcome)
@@ -271,7 +277,7 @@ func TestSimWrongScanReachesEveryone(t *testing.T) {
 		})
 	}
 
-	expect(t, "reselect", e.call("PUT", "/api/teams/me/state/selection", cs[0].p, map[string]string{"shape": "square"}), http.StatusOK, "")
+	expect(t, "reselect", e.call("PUT", "/api/teams/me/state/selection", cs[0].p, map[string]string{"shape": "quadrilateral"}), http.StatusOK, "")
 	for _, c := range cs {
 		eventually(t, "every phone sees it cleared", func() bool {
 			c.mu.Lock()
@@ -354,13 +360,13 @@ func TestSim100Teams(t *testing.T) {
 	const teams, rounds = 100, 6
 	e := setup(t)
 	ctx := context.Background()
-	if err := e.db.SeedDev2025(ctx); err != nil {
+	if err := e.db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// 1012 is in no pattern: wrong for every shape. Bosses never attack, and
+	// 2099 is in no pattern: wrong for every shape. Bosses never attack, and
 	// QR codes don't cool down (back-to-back rounds reuse waypoints): this is
 	// about requests and streams, not time.
-	if _, err := e.db.Pool().Exec(ctx, "INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
+	if _, err := e.db.Pool().Exec(ctx, "INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2099', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
 	}
 	e.cfg.Settings.Game.BossAttack.Interval.Duration = 10 * 365 * 24 * time.Hour // never, for this test
@@ -372,7 +378,7 @@ func TestSim100Teams(t *testing.T) {
 	rows := pgtest.Must(e.db.Pool().Query(ctx, `
 		SELECT p.shape_id, array_agg(pw.waypoint_id ORDER BY pw.waypoint_id)
 		FROM pattern p JOIN pattern_waypoint pw ON pw.pattern_id = p.id
-		GROUP BY p.id HAVING count(*) >= 2 ORDER BY p.id`))
+		GROUP BY p.id HAVING count(*) BETWEEN 2 AND 4 ORDER BY p.id -- 5+ points are locked until boss 5`))
 	for rows.Next() {
 		var p simPattern
 		if err := rows.Scan(&p.shape, &p.waypoints); err != nil {
@@ -489,7 +495,7 @@ func TestSim100Teams(t *testing.T) {
 					want("select", status, code, http.StatusOK, "")
 					status, code, _, _ = turns(0).scan(p.waypoints[0])
 					want("first scan", status, code, http.StatusOK, "")
-					status, code, outcome, _ := turns(1).scan("1012")
+					status, code, outcome, _ := turns(1).scan("2099")
 					if want("wrong scan", status, code, http.StatusOK, "") && outcome != "wrong_scan" {
 						fail("the wrong scan's outcome is %q", outcome)
 					}
@@ -528,7 +534,7 @@ func TestSim100Teams(t *testing.T) {
 						st.removed = len(st.clients) - 1
 						r := e.call("DELETE", fmt.Sprintf("/api/admin/teams/%s/members/%s", st.id, st.clients[st.removed].p.id), admin, nil)
 						want("admin removal", r.status, r.code, http.StatusOK, "")
-						status, code, _, _ := st.clients[st.removed].scan("1001")
+						status, code, _, _ := st.clients[st.removed].scan("2001")
 						want("the removed member's scan", status, code, http.StatusNotFound, "not_in_team")
 					}
 					cast(p, turns, false)

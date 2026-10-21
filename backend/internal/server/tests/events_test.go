@@ -370,7 +370,7 @@ func TestStreamCookieAuth(t *testing.T) {
 // team_state.last_cast arrives over the event stream with its positive damage value.
 func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -385,19 +385,19 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	expectTeam(t, "initial team", s.next(t, "initial team"), len(ps))
 	s.nextState(t, "initial team_state")
 
-	expect(t, "select collinear", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "collinear"}), http.StatusOK, "")
+	expect(t, "select triangle", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "triangle"}), http.StatusOK, "")
 	s.nextState(t, "selection state")
 
-	// Pattern 1 has waypoints 1001, 1003, 1004.
+	// The triangle 2001, 2003, 2004.
 	scan := func(p player, waypoint string) {
 		r := e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(waypoint, time.Now().Unix())})
 		expect(t, "scan "+waypoint, r, http.StatusOK, "")
 	}
-	scan(ps[0], "1001")
+	scan(ps[0], "2001")
 	s.nextState(t, "first scan")
-	scan(ps[1], "1003")
+	scan(ps[1], "2003")
 	s.nextState(t, "second scan")
-	scan(ps[2], "1004") // completes pattern 1
+	scan(ps[2], "2004") // completes the triangle
 
 	completedState := s.nextState(t, "cast completed state")
 	lastCast, ok := completedState.data["last_cast"].(map[string]any)
@@ -409,11 +409,13 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 		t.Fatalf("expected positive damage in last_cast, got %v", lastCast["damage"])
 	}
 	var want int
-	if err := e.db.Pool().QueryRow(context.Background(), "SELECT damage FROM pattern WHERE id = 1").Scan(&want); err != nil {
+	if err := e.db.Pool().QueryRow(context.Background(), `
+		SELECT p.damage FROM pattern p
+		WHERE (SELECT array_agg(waypoint_id ORDER BY waypoint_id) FROM pattern_waypoint WHERE pattern_id = p.id) = ARRAY['2001', '2003', '2004']`).Scan(&want); err != nil {
 		t.Fatal(err)
 	}
 	if int(damage) != want {
-		t.Fatalf("expected pattern 1's stored damage %d, got %v", want, damage)
+		t.Fatalf("expected the triangle's stored damage %d, got %v", want, damage)
 	}
 }
 
@@ -438,12 +440,12 @@ func waitSeen(t *testing.T, what string, s *stream, want ...string) {
 // counts the cast.
 func TestEventTypes(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// 1012 is in no pattern, so it's wrong for every shape.
 	if _, err := e.db.Pool().Exec(context.Background(),
-		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
+		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2099', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart() // content is read at startup
@@ -481,13 +483,13 @@ func TestEventTypes(t *testing.T) {
 		expect(t, "select "+shape, e.call("PUT", "/api/teams/me/state/selection", a, map[string]string{"shape": shape}), http.StatusOK, "")
 	}
 	expect(t, "start", e.call("POST", "/api/teams/me/start", a, nil), http.StatusOK, "")
-	sel("square")
-	scan(a, "1001")
-	scan(b, "1002")
-	scan(c, "1007")
-	scan(a, "1008") // completes the square
+	sel("quadrilateral")
+	scan(a, "2001")
+	scan(b, "2002")
+	scan(c, "2007")
+	scan(a, "2008") // completes the square
 	sel("triangle") // the square's class is on cooldown now
-	scan(b, "1012") // wrong
+	scan(b, "2099") // wrong
 	expect(t, "clear", e.call("DELETE", "/api/teams/me/state/selection", a, nil), http.StatusOK, "")
 	// Boss 1 has 25 HP in the seed: the first cast defeats it (boss_defeated,
 	// a spell_cast that finished the boss).

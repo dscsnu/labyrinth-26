@@ -30,31 +30,31 @@ func qrToken(waypoint string, secs int64) string {
 // and that an unknown waypoint is refused.
 func TestQRGuard(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart() // content is read at startup
 	p := e.newPlayer("p")
 
-	expect(t, "no token", e.call("GET", "/api/qr/1001", player{}, nil), http.StatusUnauthorized, "missing_token")
-	expect(t, "player", e.call("GET", "/api/qr/1001", p, nil), http.StatusForbidden, "not_staff")
+	expect(t, "no token", e.call("GET", "/api/qr/2001", player{}, nil), http.StatusUnauthorized, "missing_token")
+	expect(t, "player", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_staff")
 	expect(t, "bad id", e.call("GET", "/api/qr/10", p, nil), http.StatusForbidden, "not_staff") // role checked first
 
 	e.setRole(p, "HELPER") // the token still says PLAYER
 	expect(t, "bad id as helper", e.call("GET", "/api/qr/10", p, nil), http.StatusBadRequest, "invalid_waypoint_id")
 	expect(t, "unknown waypoint", e.call("GET", "/api/qr/9999", p, nil), http.StatusNotFound, "unknown_waypoint")
 
-	r := e.call("GET", "/api/qr/1001", p, nil)
+	r := e.call("GET", "/api/qr/2001", p, nil)
 	expect(t, "helper mints", r, http.StatusOK, "")
-	if r.payload["waypoint_id"] != "1001" || r.payload["key"] == "" {
+	if r.payload["waypoint_id"] != "2001" || r.payload["key"] == "" {
 		t.Fatalf("mint payload: %v", r.payload)
 	}
 
 	e.setRole(p, "ADMIN")
-	expect(t, "admin mints", e.call("GET", "/api/qr/1001", p, nil), http.StatusOK, "")
+	expect(t, "admin mints", e.call("GET", "/api/qr/2001", p, nil), http.StatusOK, "")
 
 	e.setRole(p, "PLAYER")
-	expect(t, "demoted", e.call("GET", "/api/qr/1001", p, nil), http.StatusForbidden, "not_staff")
+	expect(t, "demoted", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_staff")
 }
 
 // TestQRVerify checks POST /api/qr/verify over HTTP: a fresh token returns its
@@ -67,14 +67,14 @@ func TestQRVerify(t *testing.T) {
 		return e.call("POST", "/api/qr/verify", p, map[string]string{"qr": token})
 	}
 
-	fresh := qrToken("1001", time.Now().Unix())
+	fresh := qrToken("2001", time.Now().Unix())
 	r := verify(fresh)
 	expect(t, "fresh", r, http.StatusOK, "")
-	if r.payload["waypoint_id"] != "1001" {
+	if r.payload["waypoint_id"] != "2001" {
 		t.Fatalf("verified waypoint: %v", r.payload)
 	}
 
-	expect(t, "expired", verify(qrToken("1001", time.Now().Unix()-100)), http.StatusConflict, "qr_expired")
+	expect(t, "expired", verify(qrToken("2001", time.Now().Unix()-100)), http.StatusConflict, "qr_expired")
 
 	// Change the signature's first character to a different base64url one.
 	// Every bit of a first character is signature data, so the bytes always

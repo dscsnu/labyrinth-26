@@ -255,10 +255,10 @@
     </p>
 {/if}
 <form onsubmit={scan}>
-    <input bind:value={waypoint} inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="1001" required
+    <input bind:value={waypoint} inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="2001" required
         disabled={!selected || ts.poisoned || ts.knocked_out || busy} />
     <button disabled={!selected || ts.poisoned || ts.knocked_out || busy}>Scan</button>
-    <small>dev seed waypoints: 1001–1011</small>
+    <small>waypoints: 2001–2010</small>
 </form>
 
 {#if message}

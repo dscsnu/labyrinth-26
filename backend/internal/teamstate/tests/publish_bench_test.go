@@ -59,7 +59,7 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 	ctx := context.Background()
 	set := configtest.Settings(b)
 	db := pgtest.Open(b, pgtest.URL(b, "teamstate_test"))
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		b.Fatal(err)
 	}
 	hub := live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer)

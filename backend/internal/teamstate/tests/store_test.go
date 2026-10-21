@@ -1,9 +1,11 @@
 package tests
 
 // teamstate.Store-level tests against a real Postgres (TEST_DATABASE_URL), in schema
-// teamstate_test, with the 2025 dev seed, config.toml's rules and a fake
-// clock. In the seed the square T6, R, SARC, C1 is waypoints 1001, 1002, 1007,
-// 1008, and every three waypoints form a triangle or a collinear pattern.
+// teamstate_test, with the 2026 seed, config.toml's rules and a fake
+// clock. In the 2026 seed every 2 to 6 of the 10 checkpoints (2001-2010) form a
+// pattern of the shape of that size (line … hexagon), so every scan fits its
+// shape; the fixture adds nowhere, in no pattern, for wrong scans. square is
+// one of the quadrilaterals.
 // Times are written with f.tick (seconds after the fake clock's start). There
 // is no time limit, so they only order and stamp events.
 
@@ -33,13 +35,18 @@ import (
 	"labyrinth/internal/user"
 )
 
-// triangle is a triangle in the 2025 seed (pattern 204, class_3): tests cast
-// it between two squares (class_4), since the spell cooldown refuses a spell
-// of the last cast's class.
-var triangle = []string{"1001", "1002", "1003"}
+// triangle is a triangle in the 2026 seed (class_3): tests cast it between
+// two quadrilaterals (class_4), since the spell cooldown refuses a spell of
+// the last cast's class.
+var triangle = []string{"2001", "2002", "2003"}
 
-// square is a square in the 2025 seed (T6, R, SARC, C1).
-var square = []string{"1001", "1002", "1007", "1008"}
+// nowhere is the waypoint the fixture adds in no pattern: scanning it is a
+// wrong scan (the 2026 content has none of its own).
+const nowhere = "2099"
+
+// square is a quadrilateral in the 2026 seed (G Block Junc, Arcade, Lake,
+// Canopies): the name stays from 2025, when it was a square.
+var square = []string{"2001", "2002", "2007", "2008"}
 
 // start is the fake clock's starting time.
 var start = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
@@ -121,7 +128,7 @@ func (c *clock) pending() int {
 	return n
 }
 
-// seedBosses is how many bosses the 2025 dev seed has; with another
+// seedBosses is how many bosses the 2026 seed has; with another
 // game.bosses the seed doesn't load, so these tests skip.
 const seedBosses = 6
 
@@ -133,9 +140,9 @@ type passQR struct{}
 // Verify returns the token as the waypoint ID.
 func (passQR) Verify(token string) (string, error) { return token, nil }
 
-// seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
+// seedMaxPoints is the most waypoints in any 2026 seed pattern (its hexagons). With a
 // smaller game.max_pattern_points the seed can't load, so these tests skip.
-const seedMaxPoints = 4
+const seedMaxPoints = 6
 
 // minTestTeam is the team size these tests are written for: the fixture's
 // team has six members, and scenarios address them by index up to 5 (any
@@ -203,17 +210,23 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 	ctx := context.Background()
 	set := configtest.Settings(t)
 	if set.Game.MaxPatternPoints < seedMaxPoints {
-		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, set.Game.MaxPatternPoints)
+		t.Skipf("the 2026 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, set.Game.MaxPatternPoints)
 	}
 	if set.Game.Bosses != seedBosses {
-		t.Skipf("the 2025 seed has %d bosses; game.bosses is %d", seedBosses, set.Game.Bosses)
+		t.Skipf("the 2026 seed has %d bosses; game.bosses is %d", seedBosses, set.Game.Bosses)
 	}
 	if set.Teams.Size < minTestTeam {
 		t.Skipf("teamstate tests need teams.size >= %d", minTestTeam)
 	}
 	dbURL := pgtest.URL(t, "teamstate_test")
 	db := pgtest.Open(t, dbURL)
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// In the 2026 content every combination of the 10 checkpoints is a
+	// pattern, so every scan fits its shape. nowhere (in no pattern) is the
+	// one waypoint whose scan is wrong.
+	if _, err := db.Pool().Exec(ctx, "INSERT INTO waypoint (id, name, latitude, longitude) VALUES ($1, 'Nowhere', 0, 0)", nowhere); err != nil {
 		t.Fatal(err)
 	}
 	if o.sql != "" {
@@ -359,16 +372,16 @@ func TestWritesRequireGame(t *testing.T) {
 	if _, err := f.state.Scan(ctx, f.users[0], "9999"); !errors.Is(err, teamstate.ErrUnknownWaypoint) {
 		t.Fatalf("unknown waypoint: %v", err)
 	}
-	if _, err := f.state.Select(ctx, f.users[0], "hexagon"); !errors.Is(err, teamstate.ErrUnknownShape) {
+	if _, err := f.state.Select(ctx, f.users[0], "dodecagon"); !errors.Is(err, teamstate.ErrUnknownShape) {
 		t.Fatalf("unknown shape: %v", err)
 	}
-	if _, err := f.state.Scan(ctx, uuid.New(), "1001"); !errors.Is(err, teamstate.ErrNotInTeam) {
+	if _, err := f.state.Scan(ctx, uuid.New(), "2001"); !errors.Is(err, teamstate.ErrNotInTeam) {
 		t.Fatalf("no team: %v", err)
 	}
-	if _, err := f.state.Scan(ctx, f.users[0], "1001"); !errors.Is(err, teamstate.ErrNotInGame) {
+	if _, err := f.state.Scan(ctx, f.users[0], "2001"); !errors.Is(err, teamstate.ErrNotInGame) {
 		t.Fatalf("lobby scan: %v", err)
 	}
-	if _, err := f.state.Select(ctx, f.users[0], "square"); !errors.Is(err, teamstate.ErrNotInGame) {
+	if _, err := f.state.Select(ctx, f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrNotInGame) {
 		t.Fatalf("lobby select: %v", err)
 	}
 	if _, err := f.state.ClearSelection(ctx, f.users[0]); !errors.Is(err, teamstate.ErrNotInGame) {
@@ -380,7 +393,7 @@ func TestWritesRequireGame(t *testing.T) {
 // refused and changes nothing.
 func TestScanNeedsSelection(t *testing.T) {
 	f := started(t)
-	if err := f.scanErrAt(0, 0, "1001"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
+	if err := f.scanErrAt(0, 0, "2001"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("scan without selection: %v", err)
 	}
 	if v := f.view(t); len(v.Waypoints) != 0 || len(v.Stack) != 0 || f.loggedScans(t) != 0 {
@@ -396,32 +409,32 @@ func TestScanNeedsSelection(t *testing.T) {
 func TestSquareCasts(t *testing.T) {
 	f := started(t)
 
-	if v := f.selectAt(t, 0, 0, "square"); v.Selection == nil || v.Selection.SelectedBy != f.users[0] {
+	if v := f.selectAt(t, 0, 0, "quadrilateral"); v.Selection == nil || v.Selection.SelectedBy != f.users[0] {
 		t.Fatalf("selection: %+v", v.Selection)
 	}
-	expectOutcome(t, "first scan", f.scanAt(t, f.tick(1), 0, "1001"), teamstate.OutcomeScanAdded)
-	if err := f.scanErrAt(f.tick(2), 1, "1001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
+	expectOutcome(t, "first scan", f.scanAt(t, f.tick(1), 0, "2001"), teamstate.OutcomeScanAdded)
+	if err := f.scanErrAt(f.tick(2), 1, "2001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("same waypoint again: %v", err)
 	}
 	// The same member scans a second waypoint: allowed.
-	expectOutcome(t, "member 0 again", f.scanAt(t, f.tick(3), 0, "1002"), teamstate.OutcomeScanAdded)
-	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1001", "1002"}) || f.loggedScans(t) != 2 {
+	expectOutcome(t, "member 0 again", f.scanAt(t, f.tick(3), 0, "2002"), teamstate.OutcomeScanAdded)
+	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"2001", "2002"}) || f.loggedScans(t) != 2 {
 		t.Fatalf("stack: %v", got)
 	}
 
 	// 1001, 1002, 1007 is a triangle, but the team selected a square.
-	expectOutcome(t, "third scan", f.scanAt(t, f.tick(10), 2, "1007"), teamstate.OutcomeScanAdded)
-	res := f.scanAt(t, f.tick(12), 0, "1008")
+	expectOutcome(t, "third scan", f.scanAt(t, f.tick(10), 2, "2007"), teamstate.OutcomeScanAdded)
+	res := f.scanAt(t, f.tick(12), 0, "2008")
 	expectOutcome(t, "fourth scan", res, teamstate.OutcomePatternCompleted)
 	if !slices.Equal(res.Pattern, square) || res.AlreadyCompleted {
 		t.Fatalf("completion: %+v", res)
 	}
 	st := res.State
-	if st.Selection != nil || len(st.Stack) != 0 || st.Poisoned || !slices.Equal(st.Shapes, []string{"square"}) ||
+	if st.Selection != nil || len(st.Stack) != 0 || st.Poisoned || !slices.Equal(st.Shapes, []string{"quadrilateral"}) ||
 		len(st.Patterns) != 1 || !slices.Equal(st.Waypoints, square) || st.LastCast == nil || st.LastCast.CastBy != f.users[0] {
 		t.Fatalf("after completion: %+v", st)
 	}
-	if err := f.scanErrAt(f.tick(13), 4, "1009"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
+	if err := f.scanErrAt(f.tick(13), 4, "2009"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("selection should clear after completion: %v", err)
 	}
 }
@@ -430,7 +443,7 @@ func TestSquareCasts(t *testing.T) {
 // waypoint of a pattern, the largest included.
 func TestOneMemberScansWholePattern(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	res := teamstate.ScanResult{}
 	for i, w := range square {
 		res = f.scanAt(t, f.tick(float64(i+1)), 3, w)
@@ -442,7 +455,7 @@ func TestOneMemberScansWholePattern(t *testing.T) {
 // still complete a pattern, and nothing drops out of the stack with time.
 func TestNoTimeLimit(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	for i, w := range square[:3] {
 		f.scanAt(t, time.Duration(i)*time.Hour, i, w)
 	}
@@ -458,21 +471,21 @@ func TestNoTimeLimit(t *testing.T) {
 // count toward a new one.
 func TestEverySelectionPurges(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	for i, w := range square[:3] {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
 	}
 
-	if v := f.selectAt(t, f.tick(4), 0, "square"); len(v.Stack) != 0 || v.Selection.SelectedBy != f.users[0] {
+	if v := f.selectAt(t, f.tick(4), 0, "quadrilateral"); len(v.Stack) != 0 || v.Selection.SelectedBy != f.users[0] {
 		t.Fatalf("reselecting the same shape should purge: %+v", v)
 	}
-	res := f.scanAt(t, f.tick(5), 3, "1008") // without the purge this would complete the square
+	res := f.scanAt(t, f.tick(5), 3, "2008") // without the purge this would complete the square
 	expectOutcome(t, "after reselect", res, teamstate.OutcomeScanAdded)
-	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"1008"}) {
+	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"2008"}) {
 		t.Fatalf("stack after reselect: %v", got)
 	}
 	// Members who scanned before the purge may scan again at once.
-	expectOutcome(t, "member 0 after purge", f.scanAt(t, f.tick(6), 0, "1001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "member 0 after purge", f.scanAt(t, f.tick(6), 0, "2001"), teamstate.OutcomeScanAdded)
 
 	if v := f.selectAt(t, f.tick(7), 0, "triangle"); len(v.Stack) != 0 || v.Selection.Shape != "triangle" {
 		t.Fatalf("selecting another shape should purge: %+v", v)
@@ -484,17 +497,17 @@ func TestEverySelectionPurges(t *testing.T) {
 // included): nothing logged, no event.
 func TestRescanIsRejected(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2001")
 
 	sub := f.hub.Subscribe(f.users[2])
 	defer sub.Close()
 	for _, member := range []int{0, 1} {
-		if err := f.scanErrAt(f.tick(2), member, "1001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
+		if err := f.scanErrAt(f.tick(2), member, "2001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 			t.Fatalf("member %d rescanning 1001: %v", member, err)
 		}
 	}
-	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1001"}) || f.loggedScans(t) != 1 {
+	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"2001"}) || f.loggedScans(t) != 1 {
 		t.Fatalf("rescans changed state: %v, %d logged", got, f.loggedScans(t))
 	}
 	select {
@@ -508,7 +521,7 @@ func TestRescanIsRejected(t *testing.T) {
 // scan (a flaky network retrying) push exactly one scan.
 func TestConcurrentRescansAddOneScan(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 
 	const copies = 8
 	errs := make([]error, copies)
@@ -517,7 +530,7 @@ func TestConcurrentRescansAddOneScan(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, errs[i] = f.state.Scan(context.Background(), f.users[0], "1001")
+			_, errs[i] = f.state.Scan(context.Background(), f.users[0], "2001")
 		}()
 	}
 	wg.Wait()
@@ -540,12 +553,11 @@ func TestConcurrentRescansAddOneScan(t *testing.T) {
 // outcome wrong_scan, marked wrong in the stack, and the attempt poisoned, so
 // every later scan, by anyone, is refused with selection_poisoned.
 func TestWrongScanIsReported(t *testing.T) {
-	f := started(t, fixtureOptions{sql: `
-		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0);`})
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
+	f := started(t)
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2001")
 
-	res := f.scanAt(t, f.tick(2), 1, "1012") // in no square
+	res := f.scanAt(t, f.tick(2), 1, nowhere) // in no pattern
 	expectOutcome(t, "wrong waypoint", res, teamstate.OutcomeWrongScan)
 	if !res.State.Poisoned || len(res.State.Stack) != 2 || res.State.Stack[0].Wrong || !res.State.Stack[1].Wrong {
 		t.Fatalf("after a wrong scan: %+v", res.State)
@@ -554,7 +566,7 @@ func TestWrongScanIsReported(t *testing.T) {
 		t.Fatalf("a wrong scan is still logged: %d", f.loggedScans(t))
 	}
 	for _, member := range []int{1, 2} { // the scanner and a teammate
-		if err := f.scanErrAt(f.tick(3), member, "1002"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
+		if err := f.scanErrAt(f.tick(3), member, "2002"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
 			t.Fatalf("member %d scanning a poisoned attempt: %v", member, err)
 		}
 	}
@@ -564,17 +576,17 @@ func TestWrongScanIsReported(t *testing.T) {
 // and that selecting again purges it so the square then completes.
 func TestWrongScanPoisonsSelection(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
-	f.scanAt(t, f.tick(2), 1, "1002")
-	// 1003 is in no square with 1001 and 1002: wrong.
-	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, "1003"), teamstate.OutcomeWrongScan)
-	if err := f.scanErrAt(f.tick(4), 3, "1007"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2001")
+	f.scanAt(t, f.tick(2), 1, "2002")
+	// nowhere is in no pattern: wrong.
+	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, nowhere), teamstate.OutcomeWrongScan)
+	if err := f.scanErrAt(f.tick(4), 3, "2007"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
 		t.Fatalf("the rest of the square on a poisoned attempt: %v", err)
 	}
 
 	// Reselecting purges the wrong scan; the square then completes.
-	if v := f.selectAt(t, f.tick(6), 0, "square"); v.Poisoned || len(v.Stack) != 0 {
+	if v := f.selectAt(t, f.tick(6), 0, "quadrilateral"); v.Poisoned || len(v.Stack) != 0 {
 		t.Fatalf("after reselect: %+v", v)
 	}
 	res := teamstate.ScanResult{}
@@ -589,7 +601,7 @@ func TestWrongScanPoisonsSelection(t *testing.T) {
 // new selection, after which every member may scan again.
 func TestCompletionPurges(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	for i, w := range square {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
@@ -599,7 +611,7 @@ func TestCompletionPurges(t *testing.T) {
 	for _, c := range []struct {
 		member   int
 		waypoint string
-	}{{3, "1008"}, {4, "1009"}} {
+	}{{3, "2008"}, {4, "2009"}} {
 		if err := f.scanErrAt(f.tick(4), c.member, c.waypoint); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 			t.Fatalf("member %d scanning %s after completion: %v", c.member, c.waypoint, err)
 		}
@@ -607,7 +619,7 @@ func TestCompletionPurges(t *testing.T) {
 	// A new selection works again (the triangle: the square's class is on
 	// cooldown after its cast).
 	f.selectAt(t, f.tick(5), 0, "triangle")
-	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "1001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "2001"), teamstate.OutcomeScanAdded)
 }
 
 // TestOutOfOrderScanning checks that a pattern completes whatever order the
@@ -616,9 +628,9 @@ func TestCompletionPurges(t *testing.T) {
 // set the same bits, so the same pattern is found.
 func TestOutOfOrderScanning(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 
-	order := []string{"1008", "1007", "1002", "1001"} // square, scrambled
+	order := []string{"2008", "2007", "2002", "2001"} // square, scrambled
 	res := teamstate.ScanResult{}
 	for i, w := range order {
 		res = f.scanAt(t, f.tick(float64(i)), i, w)
@@ -635,11 +647,11 @@ func TestSinglePointPattern(t *testing.T) {
 	f := started(t, fixtureOptions{sql: `
 		INSERT INTO shape (id, name) VALUES ('dot', 'Dot');
 		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1001, 'dot', 15, 'class_1');
-		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES (1001, '1011');`})
+		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES (1001, '2010');`})
 	f.selectAt(t, 0, 0, "dot")
-	res := f.scanAt(t, f.tick(1), 0, "1011")
+	res := f.scanAt(t, f.tick(1), 0, "2010")
 	expectOutcome(t, "single point", res, teamstate.OutcomePatternCompleted)
-	if !slices.Equal(res.Pattern, []string{"1011"}) {
+	if !slices.Equal(res.Pattern, []string{"2010"}) {
 		t.Fatalf("pattern %v", res.Pattern)
 	}
 }
@@ -648,12 +660,8 @@ func TestSinglePointPattern(t *testing.T) {
 // max_pattern_points waypoints completes exactly as the stack fills (big
 // patterns unlocked from the start: unlock_after_bosses 0).
 func TestSixPointPatternAtCapacity(t *testing.T) {
-	hex := []string{"1003", "1004", "1005", "1006", "1009", "1010"}
-	f := started(t, fixtureOptions{rules: func(r *teamstate.Rules) { r.UnlockAfterBosses = 0 }, sql: `
-		INSERT INTO shape (id, name) VALUES ('hexagon', 'Hexagon');
-		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1002, 'hexagon', 150, 'class_6');
-		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
-			(1002, '1003'), (1002, '1004'), (1002, '1005'), (1002, '1006'), (1002, '1009'), (1002, '1010');`})
+	hex := []string{"2003", "2004", "2005", "2006", "2009", "2010"}
+	f := started(t, fixtureOptions{rules: func(r *teamstate.Rules) { r.UnlockAfterBosses = 0 }}) // a seed hexagon
 	if f.rules.MaxPatternPoints != len(hex) {
 		t.Skipf("test assumes max_pattern_points = %d", len(hex))
 	}
@@ -692,13 +700,13 @@ func TestClearSelection(t *testing.T) {
 	if v := pgtest.Must(f.state.ClearSelection(ctx, f.users[0])); v.Selection != nil {
 		t.Fatalf("clear with nothing selected: %+v", v)
 	}
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2001")
 	v := pgtest.Must(f.state.ClearSelection(ctx, f.users[0]))
-	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"1001"}) {
+	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"2001"}) {
 		t.Fatalf("after clear: %+v", v)
 	}
-	if err := f.scanErrAt(f.tick(2), 1, "1002"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
+	if err := f.scanErrAt(f.tick(2), 1, "2002"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
 		t.Fatalf("scan after clear: %v", err)
 	}
 }
@@ -708,14 +716,14 @@ func TestClearSelection(t *testing.T) {
 // still rejected after the restart.
 func TestRestartRestoresEverything(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	for i, w := range square {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
 	later := f.tick(100) // long after the square
 	f.selectAt(t, later, 0, "triangle")
-	f.scanAt(t, later, 4, "1003")
-	f.scanAt(t, later+f.tick(1), 5, "1004")
+	f.scanAt(t, later, 4, "2003")
+	f.scanAt(t, later+f.tick(1), 5, "2004")
 	f.clock.at(later + f.tick(2))
 
 	beforeView := f.view(t)
@@ -733,7 +741,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatalf("state changed across restart\nbefore: %s\nafter:  %s", before, after)
 	}
-	if _, err := restarted.Scan(context.Background(), f.users[5], "1004"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
+	if _, err := restarted.Scan(context.Background(), f.users[5], "2004"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("rescan after restart: %v", err)
 	}
 }
@@ -743,7 +751,7 @@ func TestRestartRestoresEverything(t *testing.T) {
 // number).
 func TestConcurrentScans(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 
 	race := func(scans [2]func() error) (ok int, errs []error) {
 		var wg sync.WaitGroup
@@ -766,12 +774,12 @@ func TestConcurrentScans(t *testing.T) {
 		return func() error { _, err := f.state.Scan(context.Background(), f.users[i], w); return err }
 	}
 
-	ok, errs := race([2]func() error{scan(0, "1001"), scan(1, "1001")})
+	ok, errs := race([2]func() error{scan(0, "2001"), scan(1, "2001")})
 	if ok != 1 || !errors.Is(errs[0], teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("two members, one waypoint: %d ok, %v", ok, errs)
 	}
 	// One member may scan any number of waypoints: both are accepted.
-	ok, errs = race([2]func() error{scan(2, "1002"), scan(2, "1007")})
+	ok, errs = race([2]func() error{scan(2, "2002"), scan(2, "2007")})
 	if ok != 2 {
 		t.Fatalf("one member, two waypoints: %d ok, %v", ok, errs)
 	}
@@ -783,8 +791,8 @@ func TestConcurrentScans(t *testing.T) {
 func TestFailedWriteReconciles(t *testing.T) {
 	f := started(t)
 	ctx := context.Background()
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2001")
 
 	conn := pgtest.Must(pgx.Connect(ctx, f.dbURL))
 	if _, err := conn.Exec(ctx, "DELETE FROM team_selection WHERE team_id = $1", f.teamID); err != nil {
@@ -803,27 +811,27 @@ func TestFailedWriteReconciles(t *testing.T) {
 		t.Fatalf("reload published %s at seq %d, want resync at %d", typ, pub.Version.Seq, seq+1)
 	}
 	v := f.view(t)
-	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"1001"}) {
+	if v.Selection != nil || len(v.Stack) != 0 || !slices.Equal(v.Waypoints, []string{"2001"}) {
 		t.Fatalf("not reconciled from Postgres: %+v", v)
 	}
-	f.selectAt(t, f.tick(2), 0, "square")
+	f.selectAt(t, f.tick(2), 0, "quadrilateral")
 }
 
 // TestReadsDoNotTouchDatabase checks that reads keep working with the
 // database closed, and that a failed write leaves memory unchanged.
 func TestReadsDoNotTouchDatabase(t *testing.T) {
 	f := started(t)
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1001")
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2001")
 	f.db.Close()
 
-	if v := f.view(t); v.Selection == nil || !slices.Equal(stackWaypoints(v), []string{"1001"}) {
+	if v := f.view(t); v.Selection == nil || !slices.Equal(stackWaypoints(v), []string{"2001"}) {
 		t.Fatalf("read after DB close: %+v", v)
 	}
-	if err := f.scanErrAt(f.tick(2), 1, "1002"); err == nil {
+	if err := f.scanErrAt(f.tick(2), 1, "2002"); err == nil {
 		t.Fatal("scan with the database closed should fail")
 	}
-	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"1001"}) {
+	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"2001"}) {
 		t.Fatalf("failed write changed memory: %v", got)
 	}
 }
@@ -835,11 +843,11 @@ func TestStateIsPublished(t *testing.T) {
 	sub := f.hub.Subscribe(f.users[3])
 	defer sub.Close()
 
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 0, "1010")
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 0, "2010")
 	_, sel := nextState(t, sub)
 	_, scanned := nextState(t, sub)
-	if sel.Selection == nil || sel.Selection.Shape != "square" || !slices.Equal(stackWaypoints(scanned), []string{"1010"}) {
+	if sel.Selection == nil || sel.Selection.Shape != "quadrilateral" || !slices.Equal(stackWaypoints(scanned), []string{"2010"}) {
 		t.Fatalf("events: %+v / %+v", sel, scanned)
 	}
 }
@@ -864,13 +872,13 @@ func TestPublishTeam(t *testing.T) {
 		}
 	}
 
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	nextState(t, subs[0]) // the selection's own event
 	f.state.PublishTeam(f.teamID)
-	if _, v := nextState(t, subs[0]); v.Selection == nil || v.Selection.Shape != "square" {
+	if _, v := nextState(t, subs[0]); v.Selection == nil || v.Selection.Shape != "quadrilateral" {
 		t.Fatalf("republished state %+v, want the square selected", v)
 	}
-	if got, _ := json.Marshal(f.view(t)); f.loggedScans(t) != 0 || !strings.Contains(string(got), `"square"`) {
+	if got, _ := json.Marshal(f.view(t)); f.loggedScans(t) != 0 || !strings.Contains(string(got), `"quadrilateral"`) {
 		t.Fatalf("PublishTeam changed state: %s", got)
 	}
 
@@ -929,7 +937,7 @@ func TestCastLog(t *testing.T) {
 	}
 	for round := range 3 {
 		t0 := time.Duration(round) * f.tick(100)
-		shape, ids, class := "square", square, "class_4"
+		shape, ids, class := "quadrilateral", square, "class_4"
 		if round == 1 {
 			shape, ids, class = "triangle", triangle, "class_3"
 		}
@@ -995,7 +1003,7 @@ func TestVersionAndTypes(t *testing.T) {
 
 	f.state.PublishTeam(f.teamID)
 	want("publish team", teamstate.GameStarted, 0, 0)
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	want("select", teamstate.ShapeSelected, 1, 0)
 	for i, w := range square[:3] {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
@@ -1011,17 +1019,17 @@ func TestVersionAndTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	quiet("clear with nothing selected")
-	if _, err := f.state.Select(ctx, f.users[0], "square"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
+	if _, err := f.state.Select(ctx, f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
 		t.Fatalf("reselecting the square right after its cast: %v, want shape_on_cooldown", err)
 	}
 	quiet("square on cooldown")
 	f.selectAt(t, f.tick(6), 0, "triangle")
 	want("select another class", teamstate.ShapeSelected, 1, 1)
-	f.scanAt(t, f.tick(7), 0, "1001")
+	f.scanAt(t, f.tick(7), 0, "2001")
 	want("scan", teamstate.ScanAdded, 1, 1)
-	f.scanAt(t, f.tick(7), 1, "1003")
+	f.scanAt(t, f.tick(7), 1, "2003")
 	want("scan", teamstate.ScanAdded, 1, 1)
-	f.scanAt(t, f.tick(8), 2, "1004") // 1001 1003 1004 is a line, in no triangle: wrong
+	f.scanAt(t, f.tick(8), 2, nowhere) // in no pattern: wrong
 	want("wrong scan", teamstate.WrongScan, 1, 1)
 	if _, err := f.state.ClearSelection(ctx, f.users[0]); err != nil {
 		t.Fatal(err)
@@ -1032,23 +1040,25 @@ func TestVersionAndTypes(t *testing.T) {
 	}
 }
 
-// TestBigPatternsUnlock adds a 5-point pentagon and a shape mixing a 4-point
-// and a 5-point pattern, and checks the unlock: before the team has defeated
+// TestBigPatternsUnlock uses a seed pentagon, and adds a shape mixing a
+// 4-point and a 5-point pattern (through nowhere and a second test-only
+// waypoint, 2098, so neither repeats a seed pattern's set; 2098 is only in
+// the 5-point one), and checks the unlock: before the team has defeated
 // unlock_after_bosses bosses, unlocked_points is locked_pattern_points − 1,
 // the pentagon is in locked_shapes and can't be selected (shape_locked), and
 // in the mixed shape a scan that only fits the 5-point pattern is wrong;
 // after that many defeats (every boss at 1 HP) unlocked_points is
 // max_pattern_points and both cast.
 func TestBigPatternsUnlock(t *testing.T) {
-	pent := []string{"1003", "1004", "1005", "1006", "1009"}
+	pent := []string{"2003", "2004", "2005", "2006", "2009"}
 	f := started(t, fixtureOptions{sql: `
 		UPDATE boss SET hp = 1;
-		INSERT INTO shape (id, name) VALUES ('pentagon', 'Pentagon'), ('mixed', 'Mixed');
-		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1003, 'pentagon', 150, 'class_5'), (1004, 'mixed', 100, 'class_4'), (1005, 'mixed', 150, 'class_5');
+		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2098', 'Elsewhere', 0, 0);
+		INSERT INTO shape (id, name) VALUES ('mixed', 'Mixed');
+		INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (1004, 'mixed', 100, 'class_4'), (1005, 'mixed', 150, 'class_5');
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
-			(1003, '1003'), (1003, '1004'), (1003, '1005'), (1003, '1006'), (1003, '1009'),
-			(1004, '1001'), (1004, '1002'), (1004, '1008'), (1004, '1009'),
-			(1005, '1003'), (1005, '1004'), (1005, '1005'), (1005, '1006'), (1005, '1010');`})
+			(1004, '2001'), (1004, '2002'), (1004, '2008'), (1004, '2099'),
+			(1005, '2003'), (1005, '2004'), (1005, '2005'), (1005, '2098'), (1005, '2099');`})
 	if f.rules.LockedPatternPoints != 5 || f.rules.MaxPatternPoints < 5 || f.rules.UnlockAfterBosses < 1 {
 		t.Skipf("test assumes locked_pattern_points = 5 and something to unlock (unlock_after_bosses %d)", f.rules.UnlockAfterBosses)
 	}
@@ -1060,7 +1070,7 @@ func TestBigPatternsUnlock(t *testing.T) {
 		t.Fatalf("selecting a locked shape: %v", err)
 	}
 	f.selectAt(t, 0, 0, "mixed")
-	if res := f.scanAt(t, f.tick(1), 0, "1010"); res.Outcome != teamstate.OutcomeWrongScan {
+	if res := f.scanAt(t, f.tick(1), 0, "2098"); res.Outcome != teamstate.OutcomeWrongScan {
 		t.Fatalf("a point only in the locked 5-point pattern: %s", res.Outcome)
 	}
 
@@ -1086,11 +1096,11 @@ func TestBigPatternsUnlock(t *testing.T) {
 func TestOnlyLeaderSelects(t *testing.T) {
 	f := started(t)
 	ctx := context.Background()
-	if _, err := f.state.Select(ctx, f.users[1], "square"); !errors.Is(err, teamstate.ErrNotLeader) {
+	if _, err := f.state.Select(ctx, f.users[1], "quadrilateral"); !errors.Is(err, teamstate.ErrNotLeader) {
 		t.Fatalf("a member selecting: %v", err)
 	}
-	f.selectAt(t, 0, 0, "square")
-	f.scanAt(t, f.tick(1), 3, "1001")
+	f.selectAt(t, 0, 0, "quadrilateral")
+	f.scanAt(t, f.tick(1), 3, "2001")
 	if _, err := f.state.ClearSelection(ctx, f.users[2]); !errors.Is(err, teamstate.ErrNotLeader) {
 		t.Fatalf("a member clearing: %v", err)
 	}

@@ -17,9 +17,9 @@ import (
 // fixture can't load, so the atlas tests skip rather than fail.
 const fixtureMaxPoints = 3
 
-// seedMaxPoints is the most waypoints in any 2025 seed pattern. With a
+// seedMaxPoints is the most waypoints in any 2026 seed pattern (its hexagons). With a
 // smaller game.max_pattern_points the seed can't load, so tests on it skip.
-const seedMaxPoints = 4
+const seedMaxPoints = 6
 
 // maxPoints returns config.toml's game.max_pattern_points, skipping the test
 // if the fixture's patterns wouldn't fit.
@@ -365,45 +365,61 @@ func TestFitsShapeCastable(t *testing.T) {
 	}
 }
 
-// TestDevSeedLoads checks, against a real Postgres (TEST_DATABASE_URL, schema
-// atlas_test), that the 2025 seed loads and validates under config.toml's
-// rules, that a known square is found, and that the seed can be applied twice.
-func TestDevSeedLoads(t *testing.T) {
+// TestSeedLoads checks, against a real Postgres (TEST_DATABASE_URL, schema
+// atlas_test), that the 2026 seed loads and validates under config.toml's
+// rules: its 10 checkpoints, its 5 shapes, and every combination of 2 to 6
+// checkpoints as a pattern of the shape of its size (45 lines, 120
+// triangles, 210 quadrilaterals, 252 pentagons, 210 hexagons), each with
+// positive damage and the class of its size; and that the seed can be
+// applied twice.
+func TestSeedLoads(t *testing.T) {
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "atlas_test"))
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
 	limit := configtest.Settings(t).Game.MaxPatternPoints
 	if limit < seedMaxPoints {
-		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
+		t.Skipf("the 2026 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
 	}
 	a, err := atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.WaypointCount() != 11 || a.ShapeCount() != 5 || a.PatternCount() != 359 {
+	if a.WaypointCount() != 10 || a.ShapeCount() != 5 || a.PatternCount() != 837 {
 		t.Fatalf("loaded %d waypoints, %d shapes, %d patterns", a.WaypointCount(), a.ShapeCount(), a.PatternCount())
 	}
-	square := []string{"1001", "1002", "1007", "1008"}
-	set, _ := a.SetOf(square)
-	p, ok := a.PatternFor(set)
-	if !ok || a.Shape(a.Pattern(p).Shape).ID != "square" {
-		t.Fatalf("%v should be a square", square)
+	want := map[string]int{"line": 45, "triangle": 120, "quadrilateral": 210, "pentagon": 252, "hexagon": 210}
+	for shape := range a.ShapeCount() {
+		id := a.Shape(shape).ID
+		ps := a.ShapePatterns(shape)
+		if len(ps) != want[id] {
+			t.Fatalf("shape %s: %d patterns, want %d", id, len(ps), want[id])
+		}
+		for _, p := range ps {
+			pat := a.Pattern(p)
+			size := pat.Waypoints.Len()
+			if wantShape := []string{"", "", "line", "triangle", "quadrilateral", "pentagon", "hexagon"}[size]; wantShape != id {
+				t.Fatalf("pattern %d has %d points but is a %s", pat.ID, size, id)
+			}
+			if pat.Spell.Damage <= 0 || pat.Spell.Class != fmt.Sprintf("class_%d", size) {
+				t.Fatalf("pattern %d: damage %d, class %q", pat.ID, pat.Spell.Damage, pat.Spell.Class)
+			}
+		}
 	}
-	if a.Pattern(p).Spell.Damage <= 0 {
-		t.Fatalf("pattern %d: damage = %d, want > 0", a.Pattern(p).ID, a.Pattern(p).Spell.Damage)
+	quad := []string{"2001", "2002", "2003", "2004"}
+	set, _ := a.SetOf(quad)
+	if p, ok := a.PatternFor(set); !ok || a.Shape(a.Pattern(p).Shape).ID != "quadrilateral" {
+		t.Fatalf("%v should be a quadrilateral", quad)
 	}
-	// The seed puts every pattern in the class of its waypoint count (Load
-	// would refuse otherwise); the square is class_4.
-	if c := a.Pattern(p).Spell.Class; c != "class_4" {
-		t.Fatalf("square's class %q, want class_4", c)
-	}
-	if w := a.Waypoint(0); w.ID != "1001" || w.Latitude == 0 || w.Longitude == 0 {
+	if w := a.Waypoint(0); w.ID != "2001" || w.Name != "G Block Junc" || w.Latitude == 0 || w.Longitude == 0 {
 		t.Fatalf("waypoint 0: %+v", w)
 	}
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatalf("seeding again: %v", err)
+	}
+	if again := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})); again.PatternCount() != 837 {
+		t.Fatalf("after seeding again: %d patterns", again.PatternCount())
 	}
 }
 
@@ -417,7 +433,7 @@ var (
 )
 
 // BenchmarkLookups measures the lookups a scan relies on, on the small
-// fixture (four waypoints, three patterns). Numbers on the 2025 seed are in
+// fixture (four waypoints, three patterns). Numbers measured on the 2025 seed are in
 // FitsShape's comment and the README.
 func BenchmarkLookups(b *testing.B) {
 	a, err := atlas.New(fixture(), atlas.Rules{MaxPatternPoints: maxPoints(b)})
@@ -451,7 +467,7 @@ func BenchmarkLookups(b *testing.B) {
 func TestLoadRefusesMissingDamage(t *testing.T) {
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "atlas_test"))
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Pool().Exec(ctx, "UPDATE pattern SET damage = NULL WHERE id = 7"); err != nil {
@@ -459,7 +475,7 @@ func TestLoadRefusesMissingDamage(t *testing.T) {
 	}
 	limit := configtest.Settings(t).Game.MaxPatternPoints
 	if limit < seedMaxPoints {
-		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
+		t.Skipf("the 2026 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
 	}
 	_, err := atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})
 	if err == nil || !strings.Contains(err.Error(), "pattern 7: damage must be positive") {
@@ -473,7 +489,7 @@ func TestLoadRefusesMissingDamage(t *testing.T) {
 func TestLoadRefusesMissingSpellClass(t *testing.T) {
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "atlas_test"))
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Pool().Exec(ctx, "UPDATE pattern SET spell_class_id = NULL WHERE id = 7"); err != nil {
@@ -481,7 +497,7 @@ func TestLoadRefusesMissingSpellClass(t *testing.T) {
 	}
 	limit := configtest.Settings(t).Game.MaxPatternPoints
 	if limit < seedMaxPoints {
-		t.Skipf("the 2025 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
+		t.Skipf("the 2026 seed has %d-point patterns; game.max_pattern_points is %d", seedMaxPoints, limit)
 	}
 	_, err := atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: limit})
 	if err == nil || !strings.Contains(err.Error(), "pattern 7 has no spell class") {

@@ -14,8 +14,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"flag"
 	"fmt"
+	"labyrinth/internal/qr"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -43,7 +45,7 @@ func main() {
 func run() error {
 	var (
 		players      = flag.Int("players", 10_000, "virtual players (rounded down to whole teams of config.toml teams.size)")
-		scenarioList = flag.String("scenarios", "rush,sse,reads,ramp", "comma-separated: rush, sse, reads, ramp")
+		scenarioList = flag.String("scenarios", "rush,sse,reads,ramp,play", "comma-separated: rush, sse, reads, ramp, play")
 		dbName       = flag.String("db", "labyrinth_bench", "benchmark database name (must contain \"bench\")")
 		port         = flag.Int("port", 3100, "port for the backend under test")
 		pool         = flag.Int("pool", 0, "backend Postgres pool size (pool_max_conns); 0 = pgx default")
@@ -54,6 +56,9 @@ func run() error {
 		rampSteps    = flag.String("ramp-steps", "250,500,1000,2000,4000,8000,10000", "ramp worker counts")
 		rampDur      = flag.Duration("ramp-step", 15*time.Second, "length of each ramp step")
 		rampP99      = flag.Duration("ramp-p99", 500*time.Millisecond, "ramp stops once p99 exceeds this")
+		playDur      = flag.Duration("play-duration", time.Minute, "how long every team plays the game loop")
+		qrCooldown   = flag.String("qr-cooldown", "", `override game.qr_cooldown for the backend under test (e.g. "0s" for the most casts); empty keeps config.toml's`)
+		rateLimit    = flag.Bool("rate-limit", false, "keep config.toml's [ratelimit]; by default the backend under test lifts it, so players polling flat out measure capacity, not the limit")
 	)
 	flag.Parse()
 
@@ -77,7 +82,7 @@ func run() error {
 
 	scenarios := strings.Split(*scenarioList, ",")
 	for _, s := range scenarios {
-		if !slices.Contains([]string{"rush", "sse", "reads", "ramp"}, s) {
+		if !slices.Contains([]string{"rush", "sse", "reads", "ramp", "play"}, s) {
 			return fmt.Errorf("unknown scenario %q", s)
 		}
 	}
@@ -119,12 +124,35 @@ func run() error {
 		n, n/teamSize, runtime.NumCPU(), poolDesc)
 	fmt.Printf("backend log: %s\n", logPath)
 
+	// Every backend under test reads a copy of config.toml with the
+	// overrides the flags ask for.
+	var overrides []override
+	if !*rateLimit {
+		overrides = append(overrides, override{"per_second", "1000000"}, override{"burst", "1000000"})
+	}
+	if *qrCooldown != "" {
+		overrides = append(overrides, override{"qr_cooldown", strconv.Quote(*qrCooldown)})
+	}
+	var backendEnv []string
+	if len(overrides) > 0 {
+		path, err := configWith(config.SettingsPath(), overrides...)
+		if err != nil {
+			return err
+		}
+		backendEnv = append(backendEnv, "CONFIG_FILE="+path)
+	}
+	limitDesc := "lifted (-rate-limit keeps it)"
+	if *rateLimit {
+		limitDesc = fmt.Sprintf("%g/s, bursts of %d", settings.RateLimit.PerSecond, settings.RateLimit.Burst)
+	}
+	fmt.Printf("rate limit: %s\n", limitDesc)
+
 	// fresh gives each scenario an empty database, a new backend and new players.
 	fresh := func() (*backend, []player, error) {
 		if err := resetDB(ctx, benchURL); err != nil {
 			return nil, nil, fmt.Errorf("reset bench db: %w", err)
 		}
-		b, err := startBackend(bin, dir, backendDB, strconv.Itoa(*port), logPath)
+		b, err := startBackend(bin, dir, backendDB, strconv.Itoa(*port), logPath, backendEnv...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -209,6 +237,12 @@ func run() error {
 		b.stop()
 	}
 
+	if has("play") {
+		if err := runPlay(ctx, bin, dir, benchURL, backendDB, strconv.Itoa(*port), logPath, backendEnv, key, settings, n, *window, *streamPar, *playDur, *qrCooldown); err != nil {
+			return err
+		}
+	}
+
 	if has("ramp") {
 		b, ps, err := fresh()
 		if err != nil {
@@ -241,4 +275,66 @@ func waitStarted(streams []*stream, d time.Duration) int {
 		}
 	}
 	return missed
+}
+
+// runPlay is the play scenario: a fresh database with the 2026 content, a
+// backend (with env, the config overrides), every team formed and
+// started with every player streaming, then the game loop for d.
+func runPlay(ctx context.Context, bin, dir, benchURL, backendDB, port, logPath string, env []string, key ed25519.PrivateKey,
+	settings config.Settings, n int, window time.Duration, streamPar int, d time.Duration, qrCooldown string) error {
+	secret, err := loadQRSecret()
+	if err != nil {
+		return err
+	}
+	if err := resetDB(ctx, benchURL); err != nil {
+		return fmt.Errorf("reset bench db: %w", err)
+	}
+	if err := seedContent(ctx, benchURL); err != nil {
+		return fmt.Errorf("seed bench db: %w", err)
+	}
+	waypoints, err := playWaypoints(ctx, benchURL)
+	if err != nil {
+		return err
+	}
+	b, err := startBackend(bin, dir, backendDB, port, logPath, env...)
+	if err != nil {
+		return err
+	}
+	defer b.stop()
+	ps, err := createPlayers(ctx, benchURL, key, settings.Auth.TokenTTL.Duration, n)
+	if err != nil {
+		return fmt.Errorf("create players: %w", err)
+	}
+	sign, err := newSigner(secret, waypoints, qr.Rules{Rotate: settings.QR.Rotate.Duration, Tolerance: settings.QR.Tolerance.Duration})
+	if err != nil {
+		return err
+	}
+
+	rec := newRecorder()
+	c := newClient(b.url, rec)
+	f := newFanout()
+	b.sampler.reset()
+	start := time.Now()
+	streams, failed := openStreams(c, ps, f, streamPar)
+	teams := formTeams(c, ps, window, true, f)
+	rec.print(fmt.Sprintf("play setup: %d event streams, %d teams form and start", len(ps), len(teams)), time.Since(start), b.sampler.snapshot())
+	rec = newRecorder()
+	c.rec = rec
+	b.sampler.reset()
+	start = time.Now()
+	stats := play(c, teams, waypoints, sign, d)
+	cooldown := settings.Game.QRCooldown.Duration.String()
+	if qrCooldown != "" {
+		cooldown = qrCooldown
+	}
+	rec.print(fmt.Sprintf("game loop: %d teams play for %s, every player streaming (QR cooldown %s)", len(teams), d, cooldown),
+		time.Since(start), b.sampler.snapshot())
+	fmt.Printf("   casts %d, bosses defeated %d, waits for free checkpoints %d, knocked out %d, finished %d, streams failed %d\n",
+		stats.casts.Load(), stats.bossesDefeated.Load(), stats.waits.Load(), stats.knockedOut.Load(), stats.finished.Load(), failed)
+	for _, s := range streams {
+		if s != nil {
+			s.cancel()
+		}
+	}
+	return nil
 }

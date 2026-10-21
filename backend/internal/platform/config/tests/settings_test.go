@@ -73,6 +73,10 @@ size = 10
 publish_every = "5s"
 [admin]
 user_search_limit = 20
+[ratelimit]
+per_second = 10
+burst = 40
+idle = "10m"
 `
 
 // writeTOML writes content to a temporary config.toml and returns its path.
@@ -103,7 +107,7 @@ func TestLoadSettings(t *testing.T) {
 		s.Game.BossAttack.Interval.Duration != 10*time.Minute || s.Game.BossAttack.BossDamage()[6] != 6 || len(s.Game.BossAttack.Damage) != 6 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.Walkability != 1.5 || s.Spell.Per100m != 0.8 || s.Spell.Bonus.ConcaveQuad != 75 || s.Spell.BaseDamage()[4] != 186 || len(s.Spell.Base) != 6 ||
-		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second || s.Leaderboard.Size != 10 || s.Leaderboard.PublishEvery.Duration != 5*time.Second || s.Admin.UserSearchLimit != 20 {
+		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second || s.Leaderboard.Size != 10 || s.Leaderboard.PublishEvery.Duration != 5*time.Second || s.Admin.UserSearchLimit != 20 || s.RateLimit.PerSecond != 10 || s.RateLimit.Burst != 40 || s.RateLimit.Idle.Duration != 10*time.Minute {
 		t.Fatalf("decoded %+v", s)
 	}
 }
@@ -163,6 +167,9 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"zero leaderboard size":               {"size = 10", "size = 0", "leaderboard.size must be at least 1"},
 		"leaderboard under a second":          {`publish_every = "5s"`, `publish_every = "500ms"`, "leaderboard.publish_every must be at least 1s"},
 		"zero user search limit":              {"user_search_limit = 20", "user_search_limit = 0", "admin.user_search_limit must be at least 1"},
+		"zero rate":                           {"per_second = 10", "per_second = 0", "ratelimit.per_second must be positive"},
+		"zero burst":                          {"burst = 40", "burst = 0", "ratelimit.burst must be at least 1"},
+		"idle under a second":                 {`idle = "10m"`, `idle = "10ms"`, "ratelimit.idle must be at least 1s"},
 	}
 	for name, c := range cases {
 		if strings.Count(validTOML, c.from) != 1 {

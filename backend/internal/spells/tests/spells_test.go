@@ -3,10 +3,13 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"github.com/jackc/pgx/v5"
 	"maps"
 	"math"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"labyrinth/internal/platform/config"
@@ -191,11 +194,11 @@ func TestPureMathGeometry(t *testing.T) {
 }
 
 // TestSeedPatternGeometryProperties checks geometric invariants and damage properties
-// against the real database seed (SeedDev2025).
+// against the real database seed (Seed2026).
 func TestSeedPatternGeometryProperties(t *testing.T) {
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "spells_geom_test"))
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -260,12 +263,13 @@ func TestSeedPatternGeometryProperties(t *testing.T) {
 			t.Errorf("pattern %d: hull size %d exceeds waypoint count %d", pid, len(hull), len(pts))
 		}
 
-		// Verify square 87 ("1001", "1002", "1007", "1008") tour is within 1 m of 1558 m
-		if pid == 87 {
+		// Pattern 1 is the line G Block Junc (2001) – Arcade (2002): its
+		// out-and-back tour is damage_lookup.json's 382.30 m.
+		if pid == 1 {
 			tour := spells.TourM(pts)
-			const expectedTour = 1557.96
+			const expectedTour = 382.30
 			if math.Abs(tour-expectedTour) > 1.0 {
-				t.Errorf("pattern 87 tour %f, expected ~%f", tour, expectedTour)
+				t.Errorf("pattern 1 tour %f, expected ~%f", tour, expectedTour)
 			}
 		}
 
@@ -276,8 +280,8 @@ func TestSeedPatternGeometryProperties(t *testing.T) {
 		}
 	}
 
-	if patternCount != 359 {
-		t.Fatalf("expected 359 patterns in dev seed, got %d", patternCount)
+	if patternCount != 837 {
+		t.Fatalf("expected 837 patterns in the 2026 seed, got %d", patternCount)
 	}
 }
 
@@ -287,7 +291,7 @@ func TestSeedPatternGeometryProperties(t *testing.T) {
 func TestPatternDamageDrift(t *testing.T) {
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "spells_drift_test"))
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -354,7 +358,7 @@ func TestPatternDamageDrift(t *testing.T) {
 		for _, d := range drifted {
 			t.Errorf("drift detected for pattern %d: stored=%d, computed=%d", d.id, d.stored, d.computed)
 		}
-		t.Fatalf("%d patterns drifted. Re-run `go run ./cmd/spells` to regenerate dev_2025_spells.sql", len(drifted))
+		t.Fatalf("%d patterns drifted. Re-run `go run ./cmd/spells` to regenerate 2026_spells.sql", len(drifted))
 	}
 }
 
@@ -452,4 +456,64 @@ func intKeyed(t *testing.T, m map[string]int) map[int]int {
 		out[n] = v
 	}
 	return out
+}
+
+// TestSeedMatchesDamageLookup checks that the 2026 seed is
+// damage_lookup.json: its waypoints are the JSON's checkpoints (by name,
+// with the same coordinates), and every seeded pattern's damage is the
+// JSON's for the same set of checkpoints, all 837 of them.
+func TestSeedMatchesDamageLookup(t *testing.T) {
+	ctx := context.Background()
+	data, err := os.ReadFile(damageLookupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lookup damageLookup
+	if err := json.Unmarshal(data, &lookup); err != nil {
+		t.Fatal(err)
+	}
+	db := pgtest.Open(t, pgtest.URL(t, "spells_lookup_test"))
+	if err := db.Seed2026(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := pgtest.Must(db.Pool().Query(ctx, "SELECT name, latitude, longitude FROM waypoint"))
+	var name string
+	var lat, lon float64
+	seeded := 0
+	_, err = pgx.ForEachRow(rows, []any{&name, &lat, &lon}, func() error {
+		seeded++
+		cp, ok := lookup.Metadata.Checkpoints[name]
+		if !ok || cp.Latitude != lat || cp.Longitude != lon {
+			t.Errorf("waypoint %q (%v, %v) isn't a damage_lookup.json checkpoint", name, lat, lon)
+		}
+		return nil
+	})
+	if err != nil || seeded != len(lookup.Metadata.Checkpoints) {
+		t.Fatalf("%d waypoints seeded, %d checkpoints (%v)", seeded, len(lookup.Metadata.Checkpoints), err)
+	}
+
+	want := map[string]int{}
+	for _, p := range lookup.Patterns {
+		names := slices.Clone(p.Points)
+		slices.Sort(names)
+		want[strings.Join(names, "|")] = p.Damage
+	}
+	rows = pgtest.Must(db.Pool().Query(ctx, `
+		SELECT p.damage, string_agg(w.name, '|' ORDER BY w.name COLLATE "C")
+		FROM pattern p JOIN pattern_waypoint pw ON pw.pattern_id = p.id JOIN waypoint w ON w.id = pw.waypoint_id
+		GROUP BY p.id, p.damage`))
+	var damage int
+	var key string
+	count := 0
+	_, err = pgx.ForEachRow(rows, []any{&damage, &key}, func() error {
+		count++
+		if w, ok := want[key]; !ok || w != damage {
+			t.Errorf("pattern %s: damage %d, damage_lookup.json %d (listed %v)", key, damage, w, ok)
+		}
+		return nil
+	})
+	if err != nil || count != len(want) {
+		t.Fatalf("%d patterns seeded, %d in damage_lookup.json (%v)", count, len(want), err)
+	}
 }

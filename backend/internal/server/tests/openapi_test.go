@@ -37,6 +37,7 @@ var unroutedCodes = []string{"not_found", "method_not_allowed"}
 var statusByName = map[string]int{
 	"StatusBadRequest": 400, "StatusUnauthorized": 401, "StatusForbidden": 403,
 	"StatusNotFound": 404, "StatusMethodNotAllowed": 405, "StatusConflict": 409,
+	"StatusTooManyRequests": 429,
 }
 
 // loadSpec reads and parses openapi.yaml, returning its raw text too.

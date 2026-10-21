@@ -170,3 +170,16 @@ publish_every = "5s"
 # The most users an admin's user search (GET /api/admin/users) returns.
 # Allowed: at least 1.
 user_search_limit = 20
+
+[ratelimit]
+# Every signed-in user's requests go through a token bucket: on average
+# per_second requests a second, in bursts of up to burst; past it, 429
+# rate_limited with Retry-After. Per user, not per IP: on campus Wi-Fi
+# thousands of phones share a few public addresses. A scan is one request, so
+# the burst covers a team scanning a pattern in quick succession and a phone
+# reloading. Allowed: per_second more than 0, burst at least 1.
+per_second = 10
+burst = 40
+# How long an idle user's bucket is kept (a new one starts full, so dropping
+# it never limits anyone more). Allowed: at least 1s.
+idle = "10m"

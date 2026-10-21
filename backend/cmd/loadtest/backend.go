@@ -89,14 +89,21 @@ func buildBackend(dir string) (string, error) {
 
 // startBackend runs bin against dbURL on port, logging to logPath, and waits
 // up to healthTimeout for /healthz.
-func startBackend(bin, dir, dbURL, port, logPath string) (*backend, error) {
+func startBackend(bin, dir, dbURL, port, logPath string, env ...string) (*backend, error) {
+	// A backend left over from an interrupted run would answer the health
+	// check below in place of this one (which would exit: the database is
+	// locked to one instance), so refuse to start over it.
+	if res, err := http.Get("http://localhost:" + port + "/healthz"); err == nil {
+		res.Body.Close()
+		return nil, fmt.Errorf("something is already serving on port %s (a backend left over from an interrupted run?); stop it or pass -port", port)
+	}
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "DATABASE_URL="+dbURL, "PORT="+port)
+	cmd.Env = append(append(os.Environ(), "DATABASE_URL="+dbURL, "PORT="+port), env...)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		return nil, err

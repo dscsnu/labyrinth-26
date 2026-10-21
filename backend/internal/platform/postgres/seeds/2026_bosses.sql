@@ -1,7 +1,9 @@
--- Placeholder bosses for local development: the 2025 theme's evil exes, the
--- Katayanagi twins fought as one boss. HP: 25, 100, 250, 510, 900, 1500
--- (3,285 in all). A cast deals 60–131 in this seed (pattern.damage,
--- multiplier 1), so boss 1 falls to one cast and Gideon takes 12 to 25.
+-- The six bosses: placeholder names from the 2025 theme (its evil exes, the
+-- Katayanagi twins fought as one boss) until the 2026 names and art are
+-- decided. HP: 25, 100, 250, 510, 900, 1500 (3,285 in all). A 2026 cast deals
+-- 25-36 (line), 64-75 (triangle), 195-278 (quadrilateral), 395-403
+-- (pentagon) or 1200 (hexagon) at multiplier 1, so one quadrilateral
+-- defeats boss 1, 2 or 3, and Gideon falls to 6-8 of them (or 2 hexagons).
 -- How bosses attack is in config.toml ([game.boss_attack]), not here.
 -- Idempotent; it
 -- removes bosses past the sixth, so an older seed's boss 7 doesn't stop the

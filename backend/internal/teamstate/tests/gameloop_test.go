@@ -114,8 +114,8 @@ type league struct {
 	// simStep, and downtime adds its length.
 	elapsed time.Duration
 	// big are the patterns of at least game.locked_pattern_points
-	// waypoints (the league adds a pentagon and a hexagon: the seed has
-	// none), locked until a team has defeated game.unlock_after_bosses.
+	// waypoints (the 2026 seed's pentagons and hexagons), locked until a
+	// team has defeated game.unlock_after_bosses.
 	big []int
 	// board is the leaderboard over the league, checked against the models.
 	board *leaderboard.Leaderboard
@@ -124,14 +124,10 @@ type league struct {
 	hookErr atomic.Value
 }
 
-// simBigPatterns adds a 5-point pentagon and a 6-point hexagon, each a shape
-// of its own: the locked patterns the simulation unlocks.
-const simBigPatterns = `
-	INSERT INTO shape (id, name) VALUES ('pentagon', 'Pentagon'), ('hexagon', 'Hexagon');
-	INSERT INTO pattern (id, shape_id, damage, spell_class_id) VALUES (2001, 'pentagon', 150, 'class_5'), (2002, 'hexagon', 170, 'class_6');
-	INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
-		(2001, '1003'), (2001, '1004'), (2001, '1005'), (2001, '1006'), (2001, '1009'),
-		(2002, '1003'), (2002, '1004'), (2002, '1005'), (2002, '1006'), (2002, '1009'), (2002, '1010');`
+// simNowhere adds a waypoint in no pattern: in the 2026 content every
+// combination of the 10 checkpoints is a pattern, so every scan fits its
+// shape; scanning this one is the sloppy teams' wrong scan.
+const simNowhere = `INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2099', 'Nowhere', 0, 0);`
 
 // simTeam is one team in the simulation: its configuration, members, model
 // and the last team_state its watcher received.
@@ -168,15 +164,15 @@ func newLeague(t testing.TB, attacks bool) *league {
 	ctx := context.Background()
 	set := configtest.Settings(t)
 	if set.Game.MaxPatternPoints < seedMaxPoints || set.Game.Bosses != seedBosses || set.Teams.Size < minTestTeam {
-		t.Skipf("the simulation needs the 2025 seed's limits (%d points, %d bosses) and teams.size >= %d",
+		t.Skipf("the simulation needs the 2026 seed's limits (%d points, %d bosses) and teams.size >= %d",
 			seedMaxPoints, seedBosses, minTestTeam)
 	}
 	dbURL := pgtest.URL(t, "teamstate_sim")
 	db := pgtest.Open(t, dbURL)
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Pool().Exec(ctx, simBigPatterns); err != nil {
+	if _, err := db.Pool().Exec(ctx, simNowhere); err != nil {
 		t.Fatal(err)
 	}
 	l := &league{db: db, dbURL: dbURL, hub: live.NewHub(set.Live.HubShards, set.Live.SubscriberBuffer), clock: &clock{t: start}}
@@ -668,7 +664,7 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	// A deleted team is gone: its members have no team.
 	if st.model.deleted {
 		if every(3) {
-			if _, err := l.state.Select(context.Background(), st.members[0], "square"); !errors.Is(err, teamstate.ErrNotInTeam) {
+			if _, err := l.state.Select(context.Background(), st.members[0], "quadrilateral"); !errors.Is(err, teamstate.ErrNotInTeam) {
 				t.Errorf("team %d: a deleted team's select: %v, want not_in_team", st.i, err)
 			}
 			counts.deletedRefused.Add(1)
@@ -678,7 +674,7 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	// A finished team plays no more: every game write is not_in_game.
 	if st.model.finished(l.bosses) {
 		if every(3) {
-			if _, err := l.state.Select(context.Background(), st.members[rotate(st)(0)], "square"); !errors.Is(err, teamstate.ErrNotInGame) {
+			if _, err := l.state.Select(context.Background(), st.members[rotate(st)(0)], "quadrilateral"); !errors.Is(err, teamstate.ErrNotInGame) {
 				t.Errorf("team %d (%s): a finished team's select: %v, want not_in_game", st.i, st.strategy, err)
 			}
 			counts.finishedRefused.Add(1)
@@ -768,7 +764,7 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 			l.remove(t, st, counts)
 		}
 		if st.gone && every(5) {
-			if _, err := l.state.Scan(context.Background(), st.members[st.removed], "1001"); !errors.Is(err, teamstate.ErrNotInTeam) {
+			if _, err := l.state.Scan(context.Background(), st.members[st.removed], "2001"); !errors.Is(err, teamstate.ErrNotInTeam) {
 				t.Errorf("team %d: the removed member's scan: %v, want not_in_team", st.i, err)
 			}
 			counts.refusedRemoved.Add(1)

@@ -119,7 +119,7 @@ func TestAdminRemoveFromLobby(t *testing.T) {
 // stack), the removed player can join a lobby team, and a restart keeps it.
 func TestAdminRemoveFromStartedTeam(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -130,8 +130,8 @@ func TestAdminRemoveFromStartedTeam(t *testing.T) {
 		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())})
 	}
 
-	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
-	expect(t, "removed player's scan, before", scan(ps[1], "1001"), http.StatusOK, "")
+	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "quadrilateral"}), http.StatusOK, "")
+	expect(t, "removed player's scan, before", scan(ps[1], "2001"), http.StatusOK, "")
 
 	removed := e.openStream(ps[1])
 	removed.next(t, "connect")
@@ -144,15 +144,15 @@ func TestAdminRemoveFromStartedTeam(t *testing.T) {
 	expectNoTeam(t, "removed player", removed.next(t, "removal"))
 	expectTeam(t, "member sees it", stay.next(t, "removal"), len(ps)-1)
 
-	expect(t, "removed scans", scan(ps[1], "1002"), http.StatusNotFound, "not_in_team")
-	expect(t, "removed selects", e.call("PUT", "/api/teams/me/state/selection", ps[1], map[string]string{"shape": "square"}),
+	expect(t, "removed scans", scan(ps[1], "2002"), http.StatusNotFound, "not_in_team")
+	expect(t, "removed selects", e.call("PUT", "/api/teams/me/state/selection", ps[1], map[string]string{"shape": "quadrilateral"}),
 		http.StatusNotFound, "not_in_team")
 	expect(t, "removed reads state", e.call("GET", "/api/teams/me/state", ps[1], nil), http.StatusNotFound, "not_in_team")
 
 	// The team plays on; the removed player's scan still counts.
-	expect(t, "scan 2", scan(ps[2], "1002"), http.StatusOK, "")
-	expect(t, "scan 3", scan(ps[3], "1007"), http.StatusOK, "")
-	r := scan(ps[0], "1008")
+	expect(t, "scan 2", scan(ps[2], "2002"), http.StatusOK, "")
+	expect(t, "scan 3", scan(ps[3], "2007"), http.StatusOK, "")
+	r := scan(ps[0], "2008")
 	if r.payload["outcome"] != "pattern_completed" {
 		t.Fatalf("completion with the removed player's scan: %v", r.payload)
 	}
@@ -174,7 +174,7 @@ func TestAdminRemoveFromStartedTeam(t *testing.T) {
 	if got := members(e.call("GET", "/api/teams/me", ps[0], nil)); len(got) != len(ps)-1 {
 		t.Fatalf("after restart: %d members", len(got))
 	}
-	expect(t, "removed after restart", e.call("POST", "/api/teams/me/state/scans", ps[1], map[string]string{"qr": qrToken("1003", time.Now().Unix())}),
+	expect(t, "removed after restart", e.call("POST", "/api/teams/me/state/scans", ps[1], map[string]string{"qr": qrToken("2003", time.Now().Unix())}),
 		http.StatusConflict, "not_in_game")
 }
 
@@ -186,7 +186,7 @@ func TestAdminRemoveFromStartedTeam(t *testing.T) {
 // path is checked deterministically in TestAdminRemoveFromStartedTeam.
 func TestAdminRemoveRacesScan(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -195,13 +195,13 @@ func TestAdminRemoveRacesScan(t *testing.T) {
 	teamID := e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)
 	accepted := 0
 	for i, p := range ps[1:] {
-		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
+		expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "quadrilateral"}), http.StatusOK, "")
 		var scanRes, removeRes apiResult
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			scanRes = e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken("1001", time.Now().Unix())})
+			scanRes = e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken("2001", time.Now().Unix())})
 		}()
 		go func() { defer wg.Done(); removeRes = e.call("DELETE", removePath(teamID, p.id, ""), admin, nil) }()
 		wg.Wait()
@@ -225,7 +225,7 @@ func TestAdminRemoveRacesScan(t *testing.T) {
 // attack clock, and play.
 func TestAdminRevive(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -251,9 +251,9 @@ func TestAdminRevive(t *testing.T) {
 	if r.payload["health"] != float64(0) || r.payload["knocked_out"] != true || r.payload["boss"].(map[string]any)["next_attack_at"] != nil {
 		t.Fatalf("knocked out: %v", r.payload)
 	}
-	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}),
+	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "quadrilateral"}),
 		http.StatusConflict, "knocked_out")
-	expect(t, "scan", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix())}),
+	expect(t, "scan", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("2001", time.Now().Unix())}),
 		http.StatusConflict, "knocked_out")
 
 	expect(t, "player revives", revive(ps[0], teamID), http.StatusForbidden, "not_admin")
@@ -273,7 +273,7 @@ func TestAdminRevive(t *testing.T) {
 	if ev := s.nextState(t, "revive"); ev.typ != "revived" || ev.data["health"] != float64(e.cfg.Settings.Game.Health) {
 		t.Fatalf("revive event: %s %v", ev.typ, ev.data)
 	}
-	expect(t, "select after revive", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}),
+	expect(t, "select after revive", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "quadrilateral"}),
 		http.StatusOK, "")
 }
 
@@ -312,14 +312,14 @@ func (e *env) castOver(leader player, shape string, ids []string) apiResult {
 // null; a started team's has its health, boss, cooldowns and cast count.
 func TestAdminTeamsOverview(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
 	admin := e.newAdmin("admin")
 	ps := e.startedTeam("o")
 	e.call("POST", "/api/teams", e.newPlayer("lobby"), map[string]string{"name": "Lobby"})
-	e.castOver(ps[0], "square", []string{"1001", "1002", "1007", "1008"})
+	e.castOver(ps[0], "quadrilateral", []string{"2001", "2002", "2007", "2008"})
 
 	status, list := e.callList("GET", "/api/admin/teams", admin)
 	if status != http.StatusOK || len(list) != 2 {
@@ -350,7 +350,7 @@ func TestAdminTeamsOverview(t *testing.T) {
 // team_not_found.
 func TestAdminDeleteTeam(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -381,7 +381,7 @@ func TestAdminDeleteTeam(t *testing.T) {
 // errors.
 func TestAdminResetCooldownsOverHTTP(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if e.cfg.Settings.Game.QRCooldown.Duration <= 0 {
@@ -394,9 +394,9 @@ func TestAdminResetCooldownsOverHTTP(t *testing.T) {
 	reset := func(p player, id string) apiResult {
 		return e.call("POST", "/api/admin/teams/"+id+"/cooldowns/reset", p, nil)
 	}
-	e.castOver(ps[0], "square", []string{"1001", "1002", "1007", "1008"})
+	e.castOver(ps[0], "quadrilateral", []string{"2001", "2002", "2007", "2008"})
 	expect(t, "select the triangle", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "triangle"}), http.StatusOK, "")
-	expect(t, "a cooled waypoint", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix())}),
+	expect(t, "a cooled waypoint", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("2001", time.Now().Unix())}),
 		http.StatusConflict, "waypoint_on_cooldown")
 
 	expect(t, "player resets", reset(ps[0], teamID), http.StatusForbidden, "not_admin")
@@ -416,7 +416,7 @@ func TestAdminResetCooldownsOverHTTP(t *testing.T) {
 	if ev := s.nextState(t, "reset"); ev.typ != "cooldowns_reset" {
 		t.Fatalf("reset event: %s", ev.typ)
 	}
-	expect(t, "the waypoint after the reset", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix())}),
+	expect(t, "the waypoint after the reset", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("2001", time.Now().Unix())}),
 		http.StatusOK, "")
 }
 
@@ -460,7 +460,7 @@ func TestAdminUsersAndRoles(t *testing.T) {
 // snapshot, and a refresh broadcasts the change as updated.
 func TestLeaderboardAndFinish(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.db.Pool().Exec(context.Background(), "UPDATE boss SET hp = 1"); err != nil {
@@ -479,9 +479,9 @@ func TestLeaderboardAndFinish(t *testing.T) {
 
 	for i := range e.cfg.Settings.Game.Bosses {
 		if i%2 == 0 {
-			e.castOver(winners[0], "square", []string{"1001", "1002", "1007", "1008"})
+			e.castOver(winners[0], "quadrilateral", []string{"2001", "2002", "2007", "2008"})
 		} else {
-			e.castOver(winners[0], "triangle", []string{"1001", "1002", "1003"})
+			e.castOver(winners[0], "triangle", []string{"2001", "2002", "2003"})
 		}
 	}
 	eventually(t, "the team is finished", func() bool {
@@ -493,7 +493,7 @@ func TestLeaderboardAndFinish(t *testing.T) {
 			break
 		}
 	}
-	expect(t, "select after finishing", e.call("PUT", "/api/teams/me/state/selection", winners[0], map[string]string{"shape": "square"}),
+	expect(t, "select after finishing", e.call("PUT", "/api/teams/me/state/selection", winners[0], map[string]string{"shape": "quadrilateral"}),
 		http.StatusConflict, "not_in_game")
 
 	r := e.call("GET", "/api/leaderboard", others[0], nil)
@@ -515,5 +515,41 @@ func TestLeaderboardAndFinish(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no leaderboard broadcast")
+	}
+}
+
+// TestRateLimitOverHTTP runs the server with a tiny bucket (3 requests,
+// refilling once a minute): a user's 4th request is 429 rate_limited with
+// Retry-After, whatever the route (an admin route and the event stream
+// included); another user is unaffected; /healthz, unauthenticated, is
+// never limited.
+func TestRateLimitOverHTTP(t *testing.T) {
+	e := setup(t)
+	e.cfg.Settings.RateLimit.PerSecond = 1.0 / 60
+	e.cfg.Settings.RateLimit.Burst = 3
+	e = e.restart()
+	p, other := e.newPlayer("busy"), e.newPlayer("calm")
+	for range 3 {
+		expect(t, "within the burst", e.call("GET", "/api/teams/me", p, nil), http.StatusNotFound, "not_in_team")
+	}
+	r := e.call("GET", "/api/me", p, nil)
+	expect(t, "past the burst", r, http.StatusTooManyRequests, "rate_limited")
+	req, _ := http.NewRequest("GET", e.backend.URL+"/api/events", nil)
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	res := e.do(req)
+	res.Body.Close()
+	if res.StatusCode != http.StatusTooManyRequests || res.Header.Get("Retry-After") == "" {
+		t.Fatalf("the stream past the burst: %d, Retry-After %q", res.StatusCode, res.Header.Get("Retry-After"))
+	}
+	expect(t, "another user", e.call("GET", "/api/me", other, nil), http.StatusOK, "")
+	admin := e.newAdmin("admin")
+	for range 3 {
+		e.call("GET", "/api/admin/teams", admin, nil)
+	}
+	expect(t, "an admin past the burst", e.call("GET", "/api/admin/teams", admin, nil), http.StatusTooManyRequests, "rate_limited")
+	for range 10 {
+		if res := e.get("/healthz"); res.StatusCode != http.StatusOK {
+			t.Fatalf("healthz: %d", res.StatusCode)
+		}
 	}
 }

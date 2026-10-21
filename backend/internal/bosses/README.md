@@ -39,7 +39,7 @@ Every number below that comes from `config.toml` is shown with its current value
 | **Multiplier** | Per team, default **1**. Nothing changes it yet; it's stored so a future power-up can. |
 
 ## The flow
-1. **Content is loaded.** `go run . seed` (the 2025 dev seed) writes 6 placeholder bosses; real content would be a migration or a seed of its own. The backend is stopped while content changes.
+1. **Content is loaded.** `go run . seed` (`seeds/2026_bosses.sql`, the last of the 2026 seeds) writes 6 bosses, still with placeholder 2025-theme names; real content would be a migration or a seed of its own. The backend is stopped while content changes.
 2. **Startup.** `server.Build` calls `bosses.Load` right after `atlas.Load`, with `Rules{Count: game.bosses, AttackInterval: game.boss_attack.interval, AttackDamage: game.boss_attack.damage}` (`BossDamage()` turns the config's string keys into serials). It reads the table in serial order, runs `New`'s checks and fills each boss's attack from the rules. Any bad content or rule stops the backend.
 3. **teamstate loads** with the `*Bosses` as its `Bosses` interface, and refuses a team whose stored progress has more bosses defeated than exist.
 4. **Clients fetch the list once.** `GET /api/game/bosses` returns all bosses in serial order. Each team's `team_state` carries only its progress (`boss: {serial, damage, phase_started_at, attacks, next_attack_at}`, `bosses_defeated`, `damage_multiplier`, `health`, `knocked_out`); the client joins the two by serial.
@@ -113,7 +113,7 @@ Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack 
 
 0009 also adds `team_boss` and three `team_cast` columns, and 0010 adds `team_boss.phase_health` and `phase_started_at`; those belong to teamstate: see its README.
 
-**Seed** `seeds/dev_2025_bosses.sql`, applied last by `SeedDev2025` (after `dev_2025.sql` and `dev_2025_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The 2025 theme's evil exes, the Katayanagi twins fought as one boss. The attack columns come from `config.toml`, not the seed:
+**Seed** `seeds/2026_bosses.sql` (was `dev_2025_bosses.sql`), applied last by `Seed2026` (after `2026.sql` and `2026_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1), one quadrilateral defeats boss 1, 2 or 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
 
 | Serial | Name | Asset | HP | Attacks every (`game.boss_attack.interval`) | Attack damage (`game.boss_attack.damage`) | Full health lasts |
 |---|---|---|---|---|---|---|
@@ -137,9 +137,9 @@ Nothing is written at runtime, so a restart rebuilds the list exactly from the s
 Applied by `teamstate` (`deal` in `read.go`, called by `Scan` when a scan completes a pattern). Stated here because they define what a boss is for.
 
 1. A team fights the boss at index `Defeated` (serial `Defeated+1`), starting at boss 1 with 0 damage and multiplier 1.
-2. Each cast deals **`round(pattern damage × multiplier)`** (`math.Round`: halves round away from zero, e.g. 205 × 1.5 = 307.5 → **308**).
+2. Each cast deals **`round(pattern damage × multiplier)`** (`math.Round`: halves round away from zero, e.g. 27 × 1.5 = 40.5 → **41**).
 3. Damage adds to the current boss's total. When the total reaches the boss's **HP** (≥), the boss is defeated: `Defeated` goes up by one and the total resets to 0.
-4. **Overkill is lost.** A cast never carries damage over to the next boss: a cast of 205 on a boss with 7 HP left defeats it, and the next boss starts at 0.
+4. **Overkill is lost.** A cast never carries damage over to the next boss: a cast of 274 on a boss with 7 HP left defeats it, and the next boss starts at 0.
 5. **One cast defeats at most one boss**, by rule 4.
 6. **After the last boss**, `Defeated` = `game.bosses`: `boss` is `null` in `team_state`, and casts still count toward patterns, shapes and the cast log but deal **0** and hit no boss (`dealt: 0`, `boss: null`).
 7. **The multiplier** is per team, stored in `team_boss.multiplier`, default 1. **Nothing sets it yet**: it's there for a future power-up. Casts never change it.
@@ -162,17 +162,21 @@ Applied by `teamstate` (`BossProgress.at`, `catchUp`, the attack timer). Health 
 ### 1. Loading the seed
 `game.bosses` = 6. `selectBosses` returns 6 rows, serials 1…6. `New` checks count (6 = 6), then each row: serial = index+1, name, asset, HP > 0; then the rules: the interval is whole seconds and at least 1 s (600 s), the boss has a damage entry, ≥ 0. `list[0]` is Matthew Patel (25 HP, attacks every 600 s for 1). Log: `loaded bosses bosses=6`.
 
-### 2. A team fights bosses 1–3 (square, damage 205, multiplier 1)
+### 2. A team fights bosses 1–4 (quadrilateral 188 deals 274, triangle 46 deals 68, multiplier 1)
+The spell cooldown forbids two quadrilaterals in a row (teamstate's README), so the team alternates:
+
 | Cast | Before | Dealt | After | `last_cast` | Event type |
 |---|---|---|---|---|---|
-| 1 | boss 1, 0/25 | 205 | 205 ≥ 25: boss 2, 0/100, `bosses_defeated 1` | `dealt 205, boss 1, defeated_boss true` | `boss_defeated` |
-| 2 | boss 2, 0/100 | 205 | 205 ≥ 100: boss 3, 0/250, `bosses_defeated 2` | `dealt 205, boss 2, defeated_boss true` | `boss_defeated` |
-| 3 | boss 3, 0/250 | 205 | boss 3, 205/250 | `dealt 205, boss 3, defeated_boss false` | `spell_cast` |
+| 1 quadrilateral | boss 1, 0/25 | 274 | 274 ≥ 25: boss 2, 0/100, `bosses_defeated 1` | `dealt 274, boss 1, defeated_boss true` | `boss_defeated` |
+| 2 triangle | boss 2, 0/100 | 68 | boss 2, 68/100 | `dealt 68, boss 2, defeated_boss false` | `spell_cast` |
+| 3 quadrilateral | boss 2, 68/100 | 274 | 342 ≥ 100: boss 3, 0/250, `bosses_defeated 2` | `dealt 274, boss 2, defeated_boss true` | `boss_defeated` |
+| 4 triangle | boss 3, 0/250 | 68 | boss 3, 68/250 | `dealt 68, boss 3, defeated_boss false` | `spell_cast` |
+| 5 quadrilateral | boss 3, 68/250 | 274 | 342 ≥ 250: boss 4, 0/510, `bosses_defeated 3` | `dealt 274, boss 3, defeated_boss true` | `boss_defeated` |
 
-The 180 points past boss 1's 25 HP, and the 105 past boss 2's 100, are lost (rule 4). `team_boss` after cast 3: `defeated 2, damage 205, multiplier 1`.
+The 249 points past boss 1's 25 HP, 242 past boss 2's, and 92 past boss 3's are lost (rule 4). `team_boss` after cast 5: `defeated 3, damage 0, multiplier 1`.
 
 ### 3. Multiplier 1.5
-An admin (by SQL, for now) sets `team_boss.multiplier = 1.5`, then the backend restarts. The square now deals `round(205 × 1.5)` = `round(307.5)` = **308**; `last_cast.damage` is still 205, `last_cast.dealt` is 308. The cast's upsert writes `defeated` and `damage` only, so the multiplier stays 1.5.
+An admin (by SQL, for now) sets `team_boss.multiplier = 1.5`, then the backend restarts. The line `2001 2002` (pattern 1, damage 27) now deals `round(27 × 1.5)` = `round(40.5)` = **41** (halves away from zero); `last_cast.damage` is still 27, `last_cast.dealt` is 41. The quadrilateral deals 411. The cast's upsert writes `defeated` and `damage` only, so the multiplier stays 1.5.
 
 ### 4. Every boss defeated
 After the sixth defeat (Gideon): `bosses_defeated 6`, `boss null`. The next cast: pattern counted, `cast_count` up, `dealt 0`, `boss null`, `defeated_boss false`, type `spell_cast`.
@@ -286,6 +290,6 @@ No races: the list is built before `Load` returns and never modified, so every g
 | Test | Covers |
 |---|---|
 | `TestNew` | a valid three-boss list with `threeRules` (every 5 min; damage 1, 0, 5): `Count`, `At`, `All`, `AttackInterval`, attack damage filled from the rules; an empty list loads with `Count` 0; each rules refusal by its message: zero interval, part of a second, no damage for a boss, negative damage; each content refusal: too few, too many, a gap, starting at 0, no name, no asset, zero HP, negative HP, a duplicate serial |
-| `TestLoad` | with `seedRules` (config.toml's `[game.boss_attack]`): an empty table loads (`Count` 0); the 2025 seed with `game.bosses`: every boss in serial order with name, asset, positive HP, a positive attack interval and non-negative attack damage, HP rising; one fewer in config is refused. Skips unless `game.bosses` is the seed's **6** (`seedBosses`) |
+| `TestLoad` | with `seedRules` (config.toml's `[game.boss_attack]`): an empty table loads (`Count` 0); the 2026 seed with `game.bosses`: every boss in serial order with name, asset, positive HP, a positive attack interval and non-negative attack damage, HP rising; one fewer in config is refused. Skips unless `game.bosses` is the seed's **6** (`seedBosses`) |
 
 Boss damage and attacks are tested in teamstate (`tests/boss_test.go`, `tests/attack_test.go`) and over HTTP in `internal/server/tests` (`TestGameBosses`, `TestAdminRevive`).

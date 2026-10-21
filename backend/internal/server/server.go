@@ -141,28 +141,42 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	mux.HandleFunc("GET /openapi.yaml", openAPI)
 	mux.HandleFunc("GET /docs", docs)
 	authAPI.Routes(mux)
+	// Every signed-in request goes through the user's token bucket
+	// ([ratelimit]), after authentication so it's keyed by user: per user,
+	// not per IP, since campus Wi-Fi puts thousands of phones behind a few
+	// addresses.
+	limiter := httpx.NewLimiter(set.RateLimit.PerSecond, set.RateLimit.Burst, set.RateLimit.Idle.Duration, nil)
+	perUser := func(h http.Handler) http.Handler {
+		return limiter.Middleware(func(r *http.Request) string { return identity.UserID(r).String() }, h)
+	}
+	authed := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(perUser(h)) }
 	userAPI := user.NewAPI(users, log)
-	userAPI.Routes(mux, authAPI.Authed)
+	userAPI.Routes(mux, authed)
 	// Admin routes: signed in, and ADMIN by the role in the database (never
 	// the token's, which can be stale).
-	adminOnly := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }
+	adminOnly := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(perUser(userAPI.RequireAdmin(h))) }
 	// Staff routes: signed in, and HELPER or ADMIN by the role in the database.
-	staff := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireStaff(h)) }
-	teams.NewAPI(teamStore, log).Routes(mux, authAPI.Authed)
-	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
-	leaderboard.NewAPI(board).Routes(mux, authAPI.Authed)
+	staff := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(perUser(userAPI.RequireStaff(h))) }
+	teams.NewAPI(teamStore, log).Routes(mux, authed)
+	teamstate.NewAPI(stateStore, log).Routes(mux, authed)
+	leaderboard.NewAPI(board).Routes(mux, authed)
 	// Every /api/admin/… route lives in the admin use case.
 	admin.NewAPI(admin.New(teamStore, stateStore, users, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
 		Routes(mux, adminOnly)
-	bosses.NewAPI(theBosses).Routes(mux, authAPI.Authed)
+	bosses.NewAPI(theBosses).Routes(mux, authed)
 	qrAPI := qr.NewAPI(qrVerifier, log)
-	qrAPI.Routes(mux, authAPI.Authed)
+	qrAPI.Routes(mux, authed)
 	qrAPI.StaffRoutes(mux, staff)
 	// The one event stream. Browsers open it on the shared domain with the
 	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.
-	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(http.HandlerFunc(app.events)))
+	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(perUser(http.HandlerFunc(app.events))))
 
-	app.Handler = http.MaxBytesHandler(envelopeUnrouted(mux), set.Server.MaxBodyBytes)
+	// Outermost first: the body limit, one access-log line per request (the
+	// monitor's /healthz polls aside), then panic recovery, so a recovered
+	// panic is logged as the 500 it became.
+	app.Handler = http.MaxBytesHandler(
+		httpx.AccessLog(log, httpx.Recover(log, envelopeUnrouted(mux)), "/healthz"),
+		set.Server.MaxBodyBytes)
 	return app, nil
 }
 

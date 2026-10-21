@@ -20,7 +20,7 @@ Every number below that comes from `config.toml` is shown with its current value
 |---|---|---|---|
 | `config` | `config.go`, `settings.go` | Reads `.env` variables and `config.toml`, validates both, reports every problem at once. Parses, generates and prints the Ed25519 signing key and the QR signing secret. | `main`, `server`, `auth`, `teamstate` (`MaxTeamSize`) |
 | `config/configtest` | `configtest.go` | Loads the repository's `config.toml` for tests. | tests |
-| `httpx` | `respond.go` | The response envelope `{"success", "code", "message", "payload"}` and `DecodeJSON`. | every `api.go`, `server` |
+| `httpx` | `respond.go`, `middleware.go`, `ratelimit.go` | The response envelope `{"success", "code", "message", "payload"}` and `DecodeJSON`; the access log, panic recovery and the per-user rate limiter (`Limiter`). | every `api.go`, `server` |
 | `identity` | `identity.go` | Carries the signed-in user through a request, so use cases don't import `auth`. | `auth` (sets), everyone else (reads) |
 | `live` | `event.go`, `hub.go`, `stream.go` | `Event`: one event, encoded once. `Hub`: fans events out to one user's streams or to all. `Streamer`: writes one stream as server-sent events. | `server`, `teams`, `teamstate` |
 | `postgres` | `database.go`, `migrate.go`, `instance_lock.go` | The pool, migrations, the single-instance lock, the dev seed, `ErrNotFound`. | `main`, every `db.go`, `server` |
@@ -125,6 +125,9 @@ Both are read **once at startup**. A change needs a restart.
 | `leaderboard.size` | `int` | `10` | ≥ 1 (`leaderboard.size must be at least 1`) | How many teams the leaderboard event and `GET /api/leaderboard` carry |
 | `leaderboard.publish_every` | `Duration` | `"5s"` | ≥ 1 s (`leaderboard.publish_every must be at least 1s`) | How often the server checks whether the top changed, and so the most often it broadcasts it |
 | `admin.user_search_limit` | `int` | `20` | ≥ 1 (`admin.user_search_limit must be at least 1`) | Most users an admin's user search returns |
+| `ratelimit.per_second` | `float64` | `10` | > 0 (`ratelimit.per_second must be positive`) | Average requests a second each signed-in user may make |
+| `ratelimit.burst` | `int` | `40` | ≥ 1 (`ratelimit.burst must be at least 1`) | Requests a user may make at once before the average applies |
+| `ratelimit.idle` | `Duration` | `"10m"` | ≥ 1 s (`ratelimit.idle must be at least 1s`) | How long an unused user's bucket is kept |
 
 Where each value is passed in is in `internal/server/README.md`. Use cases never read the file; they get values through their `Rules` or constructor.
 
@@ -155,8 +158,8 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | Test | Covers |
 |---|---|
 | `TestRepositoryConfigLoads` | The committed `backend/config.toml` is valid |
-| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `bosses`, `health`, `locked_pattern_points`, `unlock_after_bosses`, `qr_cooldown` (5 min), `game.boss_attack.interval` (10 min), `game.boss_attack.damage` (6 entries, `BossDamage()[6]` = 6), `qr.rotate`, `qr.tolerance`, `walkability`, `per_100m` (0.8), `spell.base` (6 entries, `BaseDamage()[4]` = 186), `spell.bonus.concave_quad` (75), `token_ttl`, `subscriber_buffer`, `write_timeout`; and `leaderboard.size` (10), `leaderboard.publish_every` (5 s), `admin.user_search_limit` (20) |
-| `TestLoadSettingsRejects` | Each is refused, naming the problem: a missing `game.boss_attack.interval` (`missing key game.boss_attack.interval`, through the nested-table recursion), a zero attack interval, a boss with no damage entry, a damage entry for serial 7, a damage key that isn't a serial, a negative damage, a negative `qr_cooldown`, unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero bosses, zero health, `locked_pattern_points` 8 and 0, `unlock_after_bosses` 7 and −1, negative `per_100m`, walkability under 1.0, a missing `spell.base` size, a size past `game.max_pattern_points`, a key that isn't a size, a zero base damage, a negative `concave_quad` bonus; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `qr.rotate`, `qr.tolerance`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML`; a zero `leaderboard.size`, a `leaderboard.publish_every` of 500 ms, a zero `admin.user_search_limit` |
+| `TestLoadSettings` | A complete `validTOML` decodes `size`, `max_pattern_points`, `bosses`, `health`, `locked_pattern_points`, `unlock_after_bosses`, `qr_cooldown` (5 min), `game.boss_attack.interval` (10 min), `game.boss_attack.damage` (6 entries, `BossDamage()[6]` = 6), `qr.rotate`, `qr.tolerance`, `walkability`, `per_100m` (0.8), `spell.base` (6 entries, `BaseDamage()[4]` = 186), `spell.bonus.concave_quad` (75), `token_ttl`, `subscriber_buffer`, `write_timeout`; and `leaderboard.size` (10), `leaderboard.publish_every` (5 s), `admin.user_search_limit` (20), `ratelimit.per_second` (10), `ratelimit.burst` (40), `ratelimit.idle` (10 min) |
+| `TestLoadSettingsRejects` | Each is refused, naming the problem: a missing `game.boss_attack.interval` (`missing key game.boss_attack.interval`, through the nested-table recursion), a zero attack interval, a boss with no damage entry, a damage entry for serial 7, a damage key that isn't a serial, a negative damage, a negative `qr_cooldown`, unknown key, missing `live.heartbeat`, bad duration (`heartbeat`), missing `per_100m` (`missing key spell.per_100m`), `oauth_state_ttl` of 500 ms, `read_timeout` 1 s under a 10 s header timeout, zero body limit, team of 17, name length 33, 16 pattern points (over the stack's array), zero bosses, zero health, `locked_pattern_points` 8 and 0, `unlock_after_bosses` 7 and −1, negative `per_100m`, walkability under 1.0, a missing `spell.base` size, a size past `game.max_pattern_points`, a key that isn't a size, a zero base damage, a negative `concave_quad` bonus; and one case per other key `validate` can reject, each with its exact message: zero `code_attempts`, `token_ttl`, `login_code_ttl`, `login_code_sweep`, `qr.rotate`, `qr.tolerance`, `heartbeat`, `subscriber_buffer`, `hub_shards`, live `write_timeout`, `retry_min`, a `retry_max` below `retry_min`, `read_header_timeout`, `idle_timeout`, `shutdown_timeout`, `write_timeout`, `instance_lock_check`. Each replaced line must appear exactly once in `validTOML`; a zero `leaderboard.size`, a `leaderboard.publish_every` of 500 ms, a zero `admin.user_search_limit`, a zero `ratelimit.per_second`, a zero `ratelimit.burst`, a `ratelimit.idle` of 10 ms |
 
 Not tested: `Load()` and the environment variables, and the key functions. A missing `per_100m` is a case in `TestLoadSettingsRejects`.
 
@@ -213,21 +216,36 @@ So a client never sees a truncated body or a `200` with a broken payload.
 
 | Body | Result |
 |---|---|
-| `{"shape":"square"}` into `struct{Shape string}` | `nil`; `Shape` set |
-| `{"shape":"square","x":1}` | error: `json: unknown field "x"` |
+| `{"shape":"quadrilateral"}` into `struct{Shape string}` | `nil`; `Shape` set |
+| `{"shape":"quadrilateral","x":1}` | error: `json: unknown field "x"` |
 | `{"shape":1}` | error (type mismatch) |
 | empty | error `EOF` |
 | `null` or `{}` | `nil`; `dst` left zero. Callers check required fields (`req.Shape == ""`), and use pointer fields for required booleans (`Ready *bool`) |
-| `{"shape":"square"} trailing` | `nil`: only the first value is read |
+| `{"shape":"quadrilateral"} trailing` | `nil`: only the first value is read |
 | over 1,048,576 bytes | error (`http: request body too large`) |
 
 Each caller maps any error to its own response: `400 invalid_body` in teams, teamstate and `POST /auth/token`.
 
-### Tests (`httpx/tests/respond_test.go`)
+### Middleware (`middleware.go`)
+- **`AccessLog(log, next, skip...)`**: after `next` returns, one `INFO` `request` line: `route` (`r.Pattern`, the mux pattern; method and path if none matched), `status` (200 if the handler wrote nothing), `bytes`, `ms`. Requests to a path in `skip` aren't logged.
+- **`Recover(log, next)`**: a panic in `next` is logged at `ERROR` (`panic serving request`, with the stack) and answered `500 internal error` in the envelope, unless the handler had already written a status. `http.ErrAbortHandler` is re-panicked.
+- Both wrap the writer in a `statusRecorder` with `Unwrap`, so `http.ResponseController` (`Flush`, `SetWriteDeadline`) still reaches the connection.
+
+### Rate limiter (`ratelimit.go`)
+- **`NewLimiter(perSecond, burst, idle, now)`**: a token bucket per key (`golang.org/x/time/rate`), `perSecond` on average in bursts of up to `burst`. `now` is the clock (`nil` = `time.Now`).
+- **`Allow(key)`** takes a token: `(true, 0)`, or `(false, wait)` with how long until one is back (nothing is taken). At most once per `idle` period, a call first drops every bucket unused for longer than `idle` (a new bucket starts full, so this never limits anyone more).
+- **`Middleware(key, next)`**: over the limit → `429 rate_limited` (`too many requests; slow down and retry`) with `Retry-After` in whole seconds, at least 1; `next` isn't called. `key(r)` must identify the caller, so it runs after authentication.
+- **`Len()`**: how many buckets exist. Safe for concurrent use (one mutex).
+
+### Tests (`httpx/tests/`)
 | Test | Covers |
 |---|---|
 | `TestJSONEncodeFailureIs500` | A payload with a channel gives `500` and exactly the `internal error` body |
 | `TestJSONWritesEnvelope` | `ErrorCode(w, 409, "team_full", …)`: status, `Content-Type`, `Cache-Control` and the body with its newline |
+| `TestLimiter` | 2/s, bursts of 3, fake clock: the burst passes, the 4th is refused with a 500 ms wait; another key is independent; one token back after 500 ms; idle buckets swept; a swept key starts full |
+| `TestLimiterMiddleware` | `429`, `rate_limited`, `Retry-After: 4` at one token per 4 s; `next` called once |
+| `TestRecover` | A panic → `500` envelope, logged with `stack=`; a panic after writing leaves the response alone; `ErrAbortHandler` is re-panicked |
+| `TestAccessLog` | The line has the mux pattern (`GET /api/things/{id}`), `status=409`, `bytes`; `/healthz` skipped; `ResponseController.Flush` works through it |
 
 ## identity
 - **`Identity{UserID uuid.UUID, Email, Name, Role string}`**: who made the request, from their verified token. `Role` is as of sign-in, so a role change shows here only after the next sign-in (at most **12 h**, `auth.token_ttl`).
@@ -414,7 +432,7 @@ The fan-out benchmark runs the 10,000 clients on the same machine as the server,
 - **`Ping(ctx)`**: used by `/healthz`.
 - **`Close()`**: closes the pool.
 - **`ErrNotFound`** (`"not found"`): the sentinel every `db.go` returns for a missing row, so use cases don't depend on `pgx.ErrNoRows`. Returned by `user`, `auth` (unknown or expired login code) and `teams`.
-- **`SeedDev2025(ctx)`**: runs the embedded `seeds/dev_2025.sql` in one `Exec`. The file wraps everything in `BEGIN … COMMIT` and every insert is `ON CONFLICT DO NOTHING`, so it's idempotent. It inserts 11 waypoints (`1001`–`1011`), 5 shapes (`collinear`, `lightning`, `square`, `tree`, `triangle`) and 359 patterns with their waypoints. It never updates or deletes, so an edited row in the database stays edited. Then it runs `seeds/dev_2025_spell_classes.sql` (spell classes `class_1`–`class_15`, inserted `ON CONFLICT DO NOTHING`, and each pattern's `spell_class_id` set to the class of its waypoint count, only where it differs), `seeds/dev_2025_spells.sql` (each pattern's `damage`, generated by `cmd/spells`) and `seeds/dev_2025_bosses.sql` (6 placeholder bosses, serials 1–6, HP 25, 100, 250, 510, 900, 1500, attacking every 300 s for 1 down to every 120 s for 2; it first deletes any boss past serial 6, which fails if a cast already hit one, then `ON CONFLICT (serial) DO UPDATE`, so re-seeding resets their name, asset, description, HP and attacks). Content is read at startup: run `go run . seed` while the backend is stopped, then start it. `seed` takes the instance lock first, so it refuses (`ErrAnotherInstance`) while a backend serves the same database.
+- **`Seed2026(ctx)`**: runs the embedded seeds in order, one `Exec` each, wrapping an error with the file's name: **`seeds/2026.sql`** inserts the 10 checkpoints (`2001` G Block Junc … `2010` CnD Atrium, `damage_lookup.json`'s names and coordinates), 5 shapes (`line`, `triangle`, `quadrilateral`, `pentagon`, `hexagon`), spell classes `class_1`–`class_15`, and every combination of 2 to 6 checkpoints as a pattern (837, generated in SQL by a recursive CTE; stable IDs, by size then sorted waypoint IDs: `1` is `2001 2002`, `837` is `2005`…`2010`), each with the shape and class of its size. It **replaces** other content: it upserts its rows (`ON CONFLICT … DO UPDATE`), rebuilds `pattern_waypoint`, and deletes patterns, shapes and waypoints not in the file (the 2025 placeholders included). A guard refuses first, with `the database has team progress on other content; reset it (docker compose down -v) before seeding 2026`, when teams have scans, casts or selections and waypoints outside 2001–2010 exist, since that progress would point at deleted content. Then **`seeds/2026_spells.sql`** (each pattern's `damage`, generated by `cmd/spells`, equal to `damage_lookup.json`) and **`seeds/2026_bosses.sql`** (6 placeholder bosses, serials 1–6, HP 25, 100, 250, 510, 900, 1500, attacking every 300 s for 1 down to every 120 s for 2; it first deletes any boss past serial 6, which fails if a cast already hit one, then `ON CONFLICT (serial) DO UPDATE`, so re-seeding resets their name, asset, description, HP and attacks). Idempotent. Content is read at startup: run `go run . seed` while the backend is stopped, then start it. `seed` takes the instance lock first, so it refuses (`ErrAnotherInstance`) while a backend serves the same database. (2025's `SeedDev2025` loaded `dev_2025.sql`'s 11 waypoints and 359 drawn patterns, insert-only.)
 
 ### `migrate.go`: the migration runner
 **`Migrate(ctx, log)`**, run on every start (and by `migrate` and `seed`), always **after** `main` has taken the instance lock:
@@ -459,7 +477,7 @@ The migrations:
 | `0005_scan_cleanup.sql` | Drops `team_scan_team_idx` (`team_id`, from 0003), redundant with 0004's index. Adds `COMMENT ON TABLE team_scan` correcting 0003's SQL comment ("every scan, including repeats"): one row per **accepted** scan; rejected scans are never written. Never edit 0003 to fix it: its checksum would change |
 | `0006_wrong_scans.sql` | Adds `team_scan.wrong BOOLEAN NOT NULL DEFAULT false`: a scan that didn't fit the selected shape, so a restart rebuilds a poisoned attempt as poisoned |
 | `0007_team_cast.sql` | `team_cast` (`id` identity PK, `team_id` → `team` `ON DELETE CASCADE`, `pattern_id` → `pattern`, `cast_by` → `userprofile`, `cast_at`, `already_completed`): every cast, repeats included; the newest row per team is `last_cast` after a restart. Index `team_cast_team_id_idx` on `(team_id, id DESC)` |
-| `0008_pattern_damage.sql` | `pattern.damage INTEGER CHECK (damage > 0)`: each pattern's precomputed spell damage, loaded by the atlas (written by `seeds/dev_2025_spells.sql`, generated by `cmd/spells`) |
+| `0008_pattern_damage.sql` | `pattern.damage INTEGER CHECK (damage > 0)`: each pattern's precomputed spell damage, loaded by the atlas (written by the spells seed, `seeds/2026_spells.sql` now, generated by `cmd/spells`) |
 | `0009_bosses.sql` | `boss` (`serial` PK ≥ 1, `name` 1–64 chars, `asset` non-empty, `description`, `hp` > 0): the boss sequence, read by the bosses use case. `team_boss` (`team_id` PK → `team` `ON DELETE CASCADE`, `defeated` ≥ 0, `damage` ≥ 0, `multiplier` > 0, defaults 0, 0, 1): each team's boss progress, written by teamstate with each cast. `team_cast` gains `dealt` (≥ 0, default 0), `boss_serial` (nullable → `boss`) and `defeated_boss` (default false): what each cast did to the bosses |
 | `0010_boss_attacks.sql` | `boss` gains `attack_interval_s` (> 0) and `attack_damage` (≥ 0), added with defaults 300 and 1 to fill existing rows, then the defaults dropped so new bosses must give both: every `attack_interval_s` of a team's phase, the boss takes `attack_damage` off the team's health. `team_boss` gains `phase_health` (nullable, ≥ 0; `NULL` = full `game.health`) and `phase_started_at` (nullable; `NULL` = the team's `started_at`): where the current boss phase began. Health itself isn't stored: teamstate derives it from the phase and the clock, so attacks write nothing |
 | `0011_boss_attacks_in_config.sql` | Drops `boss.attack_interval_s` and `boss.attack_damage`: boss attacks are in `config.toml` (`[game.boss_attack]`). 0010's comments still name the columns (an applied migration isn't edited) |
@@ -514,7 +532,7 @@ InstanceLock
 | `TestEditedMigrationIsRefused` | A NULL checksum is backfilled with a 64-character hash; a changed checksum gives `ErrMigrationEdited` |
 | `TestMigrationsAreIdempotent` | Migrating an up-to-date schema is a no-op |
 
-Not tested: a failing migration and `SeedDev2025` (exercised by atlas's `TestDevSeedLoads`, teamstate's and server's tests).
+Not tested here: a failing migration and `Seed2026` (exercised by atlas's `TestSeedLoads`, spells' `TestSeedMatchesDamageLookup`, teamstate's and server's tests).
 
 ## postgres/pgtest
 - **`URL(t, schema)`**:

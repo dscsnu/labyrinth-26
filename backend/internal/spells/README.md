@@ -12,15 +12,15 @@ Tunables appear with their `config.toml` key: **1.5** (`spell.walkability`), **0
 
 | Term | Meaning |
 |---|---|
-| `Waypoint` | A physical QR location identified by its 4-digit ID (`1001`–`1011`) and GPS coordinates (`latitude`, `longitude`). |
-| `Pattern` | A valid set of 1–6 waypoints forming a shape type (e.g. square, triangle). |
+| `Waypoint` | A physical QR location identified by its 4-digit ID (`2001`–`2010` in 2026) and GPS coordinates (`latitude`, `longitude`). |
+| `Pattern` | A valid set of 1–6 waypoints forming a shape type. In 2026 every combination of 2–6 checkpoints is one, shaped by its size (line, triangle, quadrilateral, pentagon, hexagon). |
 | `Coordination Count (k)` | The number of distinct waypoints in a pattern ($k \in [1, 6]$), corresponding to the number of teammates who had to be in position. |
 | `Projection` | Equirectangular projection from WGS 84 GPS coordinates to local planar metric coordinates (metres east $X$ and north $Y$) centered on the waypoints' mean origin. |
 | `TourM` ($P_{\text{tour}}$) | Shortest closed Euclidean loop connecting all waypoints in the pattern (0 for 1 point, out-and-back for 2 points, Traveling Salesperson closed loop for $\ge 3$ points). |
 | `WalkM` ($P_{\text{adj}}$) | Realistic campus walking distance in metres: $P_{\text{tour}} \times \text{walkability}$ (`spell.walkability`). |
 | `Damage` | Integer score dealt by casting the spell. Stored in `pattern.damage`. |
 | `DamageRules` | The formula's coefficients, built from `config.toml` (`spell.base`, `spell.bonus.concave_quad`, `spell.per_100m`, `spell.walkability`, and `game.max_pattern_points` as `MaxPoints`). `DamageRules.Damage(pts)` returns a pattern's damage, or an error for a size outside 1–`MaxPoints` or one with no `spell.base` entry (never a silent 0). |
-| `Generator` | The offline CLI tool `cmd/spells` that reads coordinates and patterns and writes `seeds/dev_2025_spells.sql`. |
+| `Generator` | The offline CLI tool `cmd/spells` that reads coordinates and patterns from Postgres and writes `seeds/2026_spells.sql`. |
 | `Drift Test` | The automated test in `internal/spells/tests/` that verifies stored damage in Postgres matches recomputed damage from current coordinates and config. |
 
 ---
@@ -45,7 +45,7 @@ $$D(\sigma) = \text{Base}(k) \quad \text{for } k = \texttt{game.max\_pattern\_po
 | $\alpha$ | `spell.walkability` | **1.5** | Campus detour index ($\frac{\text{Walking Distance}}{\text{Euclidean Distance}}$). Real footpaths require walking $\approx 1.5\times$ straight-line distance due to buildings and terrain. |
 
 ### Anti-Exploit Design
-1. **Distance Exploitation Prevention:** If damage scaled only with distance, two runners could sprint back and forth between two distant buildings repeatedly ($1010 \leftrightarrow 1002$), ignoring team coordination. The $\text{Base}(k)$ term ensures multi-player shapes are strictly more rewarding.
+1. **Distance Exploitation Prevention:** If damage scaled only with distance, two runners could sprint back and forth between two distant checkpoints repeatedly (Arcade $\leftrightarrow$ Lake, $2002 \leftrightarrow 2007$), ignoring team coordination. The $\text{Base}(k)$ term ensures multi-player shapes are strictly more rewarding.
 2. **Corner Camping Prevention:** If damage scaled only with player count $k$, teams would cluster in a single building or lawn, scanning 4 or 5 points 10 metres apart. The $b \cdot \frac{\alpha \cdot P_{\text{tour}}}{100}$ term demands real campus coverage to maximize damage.
 3. **Concavity Reward:** Concave quadrilaterals require positioning a team member deep in an interior building surrounded by hull vertices; the $+75$ bonus recognizes this coordination challenge.
 
@@ -71,52 +71,52 @@ where:
 - **$k \in [3, 6]$:** The shortest closed loop visiting every point once and returning to the start. Since $k \le 6$, all $(k-1)!$ cyclic orderings are evaluated (at most $5! = 120$ permutations).
 
 ### C. Convex Hull
-Strict convex hull vertices are computed using Andrew's Monotone Chain algorithm. All 11 campus checkpoints are non-collinear (minimum triangle cross-product is $1,980.47\text{ m}^2$). Out of the 11 checkpoints, only three (`1003` A, `1004` CnD, `1008` C1) ever appear as interior points in concave subsets; the other 8 always lie on the outer boundary.
+Strict convex hull vertices are computed using Andrew's Monotone Chain algorithm. No three of the 10 2026 checkpoints are collinear (minimum triangle cross-product $310.98\text{ m}^2$, from `damage_lookup.json`'s projected coordinates). Only three (`2006` AIC, `2008` Canopies, `2010` CnD Atrium) ever appear as interior points in concave subsets; the other 7 always lie on the outer boundary.
 
 ---
 
-## 4. Worked Example: Square Pattern 87
+## 4. Worked Example: Quadrilateral Pattern 188
 
-Pattern `87` in `dev_2025.sql` is a `square` composed of four waypoints:
-- `1001` Tower 6 FruitShop (T6): `(28.52836141567019, 77.57777379378554)` $\to X = 340.428\text{ m}, Y = 309.178\text{ m}$
-- `1002` Research Block (R): `(28.527471246410833, 77.57890336254033)` $\to X = 450.779\text{ m}, Y = 210.196\text{ m}$
-- `1007` UAC (SARC): `(28.523582249548888, 77.57437275274097)` $\to X = 8.155\text{ m}, Y = -222.241\text{ m}$
-- `1008` Cluster 1 (C1): `(28.52440905859402, 77.57308311017349)` $\to X = -117.838\text{ m}, Y = -130.304\text{ m}$
+Pattern `188` in the 2026 seed is a `quadrilateral` of four checkpoints, a **concave** one (`damage_lookup.json`'s `concave_quad`): Canopies lies inside the triangle of the other three. Projected coordinates are `damage_lookup.json`'s `local_xy_m` (centred on the 10 checkpoints' mean):
+- `2001` G Block Junc: `(28.5275017, 77.5748206)` $\to X = 42.082\text{ m}, Y = 207.137\text{ m}$
+- `2002` Arcade: `(28.5274593, 77.5728646)` $\to X = -149.012\text{ m}, Y = 202.423\text{ m}$
+- `2007` Lake: `(28.524414, 77.5768289)` $\to X = 238.285\text{ m}, Y = -136.199\text{ m}$
+- `2008` Canopies: `(28.5263552, 77.5743113)` $\to X = -7.675\text{ m}, Y = 79.652\text{ m}$
 
 ### Steps:
-1. **$k = 4$ waypoints**, convex $\implies \text{Base} = 186$, $\text{Bonus} = 0$.
-2. **Shortest closed tour loop:** $1001 \to 1002 \to 1007 \to 1008 \to 1001$:
-   - $1001 \to 1002 = 148.01\text{ m}$
-   - $1002 \to 1007 = 618.91\text{ m}$
-   - $1007 \to 1008 = 155.80\text{ m}$
-   - $1008 \to 1001 = 635.24\text{ m}$
-   - $P_{\text{tour}} = 148.01 + 618.91 + 155.80 + 635.24 = \mathbf{1,557.96\text{ m}}$.
+1. **$k = 4$ waypoints**; the convex hull is Arcade, Lake, G Block Junc (3 points: Canopies is interior), so concave $\implies \text{Base} = 186$, $\text{Bonus} = 75$ (`spell.bonus.concave_quad`).
+2. **Shortest closed tour loop:** G Block Junc $\to$ Arcade $\to$ Canopies $\to$ Lake $\to$ G Block Junc:
+   - $2001 \to 2002 = 191.15\text{ m}$
+   - $2002 \to 2008 = 187.21\text{ m}$
+   - $2008 \to 2007 = 327.24\text{ m}$
+   - $2007 \to 2001 = 395.44\text{ m}$
+   - $P_{\text{tour}} = 191.15 + 187.21 + 327.24 + 395.44 = \mathbf{1,101.05\text{ m}}$.
 3. **Adjusted walking distance:**
-   - $P_{\text{adj}} = 1.5 \times 1,557.96 = \mathbf{2,336.93\text{ m}}$.
+   - $P_{\text{adj}} = 1.5 \times 1,101.05 = \mathbf{1,651.58\text{ m}}$.
 4. **Damage calculation:**
-   - $\text{Damage} = \operatorname{round}\left(186 + 0 + 0.8 \times \frac{2,336.93}{100}\right) = \operatorname{round}(204.695) = \mathbf{205}$.
+   - $\text{Damage} = \operatorname{round}\left(186 + 75 + 0.8 \times \frac{1,651.58}{100}\right) = \operatorname{round}(274.21) = \mathbf{274}$, `damage_lookup.json`'s value.
 
 Stored in Postgres as:
 ```sql
-UPDATE pattern SET damage = 205 WHERE id = 87;
+UPDATE pattern SET damage = 274 WHERE id = 188;
 ```
 
 ---
 
 ## 5. Combinatorics and Damage Ranges
 
-Across all 1,474 possible subsets of the 11 campus checkpoints ($\sum_{k=2}^{6} \binom{11}{k} = 1,474$):
+Across every subset of the 10 2026 checkpoints of size 2 to 6 ($\sum_{k=2}^{6} \binom{10}{k} = 837$), from `damage_lookup.json`:
 
 | $k$ | Shape Classification | Total Combinations | Convex | Concave | Actual Damage Range | Target Range |
 |:---:|---|:---:|:---:|:---:|:---:|:---:|
-| **2** | Line Segment | 55 | 55 | 0 | 26 – 47 (median 32) | $30 \pm 5$ |
-| **3** | Triangle | 165 | 165 | 0 | 64 – 85 (median 75) | $70 \pm 15$ |
-| **4** | Convex Quad | 262 | 262 | 0 | 196 – 215 (median 208) | $200 \pm 25$ |
-| **4** | Concave Quad | 68 | 0 | 68 | 272 – 288 (median 282) | $275 \pm 30$ |
-| **5** | Pentagon | 462 | 235 | 227 | 397 – 413 (median 408) | $400 \pm 40$ |
-| **6** | Hexagon | 462 | 123 | 339 | 1200 (fixed) | 1200 |
+| **2** | Line Segment | 45 | 45 | 0 | 25 – 36 (median 29) | $30 \pm 5$ |
+| **3** | Triangle | 120 | 120 | 0 | 64 – 75 (median 70) | $70 \pm 15$ |
+| **4** | Convex Quad | 156 | 156 | 0 | 195 – 205 (median 200) | $200 \pm 25$ |
+| **4** | Concave Quad | 54 | 0 | 54 | 270 – 278 (median 275) | $275 \pm 30$ |
+| **5** | Pentagon | 252 | 101 | 151 | 395 – 403 (median 400) | $400 \pm 40$ |
+| **6** | Hexagon | 210 | 28 | 182 | 1200 (fixed) | 1200 |
 
-*(Note: The 2025 dev seed implements 359 hand-reviewed patterns across sizes 3–4).*
+These are the 2026 seed's patterns exactly: `seeds/2026.sql` makes every combination a pattern (837), shaped by size alone (the game's `quadrilateral` shape holds both the convex and the concave quads; concavity changes only the damage). Every stored damage equals `damage_lookup.json`'s (`TestSeedMatchesDamageLookup`). *(2025's seed had 359 hand-reviewed patterns of sizes 3–4 over 11 other waypoints.)*
 
 ---
 
@@ -133,24 +133,25 @@ The offline generator lives in `backend/cmd/spells/main.go`.
 Run it from `backend/` (it refuses anywhere else), with the backend stopped. It reads `DATABASE_URL` from the environment or `.env`, and `config.toml` (or `$CONFIG_FILE`) for `[spell]`:
 ```bash
 cd backend
-go run ./cmd/spells        # rewrites internal/platform/postgres/seeds/dev_2025_spells.sql
-go run . seed              # applies it to the database
+go run . seed              # the content (seeds/2026.sql); damage may still be stale
+go run ./cmd/spells        # rewrites internal/platform/postgres/seeds/2026_spells.sql from it
+go run . seed              # applies the new damage
 ```
 Commit the regenerated seed file: the drift test compares it against a fresh computation.
 
 ### What it does:
-1. Reads every waypoint (`id`, `latitude`, `longitude`) and pattern from Postgres at `DATABASE_URL`. Without `DATABASE_URL`, it parses them from `seeds/dev_2025.sql` instead (and logs that it did); both give the same patterns for the committed seed.
+1. Reads every waypoint (`id`, `latitude`, `longitude`) and pattern from Postgres at `DATABASE_URL`, which is **required**: the 2026 patterns are generated by the seed's SQL (every combination), so a seeded database is the one source. (The earlier fallback that parsed `dev_2025.sql`'s explicit rows is gone.)
 2. Builds one `DamageRules` from `config.toml`.
 3. Computes every pattern's damage with `DamageRules.Damage`; a pattern it can't score stops the run with its ID, writing nothing.
-4. Overwrites `backend/internal/platform/postgres/seeds/dev_2025_spells.sql` with deterministic `UPDATE pattern SET damage = ... WHERE id = ...;` statements.
-5. `SeedDev2025` applies this file right after `dev_2025.sql`, ensuring fresh databases have damage populated.
+4. Overwrites `backend/internal/platform/postgres/seeds/2026_spells.sql` with deterministic `UPDATE pattern SET damage = ... WHERE id = ...;` statements (837 of them).
+5. `Seed2026` applies this file right after `2026.sql`, ensuring fresh databases have damage populated.
 
 ---
 
 ## 7. The Drift Test
 
 The test `TestPatternDamageDrift` in `internal/spells/tests/spells_test.go`:
-1. Connects to test Postgres via `pgtest.Open` and seeds it with `SeedDev2025`.
+1. Connects to test Postgres via `pgtest.Open` and seeds it with `Seed2026`.
 2. Loads all waypoints and patterns.
 3. Recomputes every pattern's damage using `internal/spells` and `configtest.Settings(t)`.
 4. Compares computed damage to the stored `pattern.damage` column.
@@ -170,6 +171,7 @@ Retuning means changing both together: edit `[spell]` and regenerate the JSON (o
 | Test | Covers |
 |---|---|
 | `TestPureMathGeometry` | No database: a 1-point pattern deals `spell.base.1`; a 2-point tour is out and back; a 100 m square's tour; the convex hull drops an interior point; a concave quad gets exactly `spell.bonus.concave_quad` more; doubling `spell.per_100m` adds the formula's distance term; the biggest size (`game.max_pattern_points`) deals `spell.base` flat; an empty pattern, one past `MaxPoints`, and a size missing from `spell.base` are errors |
-| `TestSeedPatternGeometryProperties` | The 2025 seed: 359 patterns, positive damage, hull no bigger than the pattern, square 87's tour within 1 m of 1,557.96 m, every stored damage equal to `DamageRules.Damage` |
+| `TestSeedPatternGeometryProperties` | The 2026 seed: 837 patterns, positive damage, hull no bigger than the pattern, pattern 1's (the line G Block Junc – Arcade) tour within 1 m of `damage_lookup.json`'s 382.30 m, every stored damage equal to `DamageRules.Damage` |
 | `TestPatternDamageDrift` | Every stored `pattern.damage` equals a fresh computation from the seed's coordinates and `config.toml`; lists each drifted pattern and says to re-run `go run ./cmd/spells` |
 | `TestDamageLookupMatchesConfig` | `damage_lookup.json`'s coefficients equal `[spell]`, and all 837 of its combinations recompute to its damage |
+| `TestSeedMatchesDamageLookup` | The 2026 seed is `damage_lookup.json`: its waypoints are the JSON's checkpoints (by name, same coordinates), and every one of the 837 seeded patterns has the JSON's damage for the same set of checkpoints |

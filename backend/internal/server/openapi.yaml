@@ -164,6 +164,7 @@ paths:
                   - $ref: "#/components/schemas/Success"
                   - properties:
                       payload: { $ref: "#/components/schemas/User" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401":
           $ref: "#/components/responses/Error"
           description: "Codes: `missing_token`, `invalid_token`, `user_not_found`"
@@ -174,6 +175,7 @@ paths:
       summary: Your team
       responses:
         "200": { $ref: "#/components/responses/Team" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
 
@@ -195,6 +197,7 @@ paths:
       responses:
         "201": { $ref: "#/components/responses/Team" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_team_name`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `already_in_team`" }
 
@@ -215,6 +218,7 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Team" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_team_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `already_in_team`, `team_full`, `team_locked`" }
@@ -230,6 +234,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Success" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`" }
@@ -251,6 +256,7 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Team" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `team_locked`, `leader_cannot_ready`" }
@@ -262,6 +268,7 @@ paths:
       description: Any size from 1 to `teams.size` (6) may start, once every non-leader is ready. `LOBBY` → `IN_GAME`; the roster is then frozen. Every member's event stream gets the `IN_GAME` `team`, then the team's empty `team_state`.
       responses:
         "200": { $ref: "#/components/responses/Team" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
@@ -287,6 +294,7 @@ paths:
                       payload:
                         type: array
                         items: { $ref: "#/components/schemas/TeamOverview" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
 
@@ -307,6 +315,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Success" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
@@ -325,6 +334,7 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
@@ -349,6 +359,7 @@ paths:
                       payload:
                         type: array
                         items: { $ref: "#/components/schemas/User" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
 
@@ -383,6 +394,7 @@ paths:
                   - properties:
                       payload: { $ref: "#/components/schemas/User" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_user_id`, `invalid_body`, `invalid_role`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `user_not_found`" }
@@ -407,6 +419,7 @@ paths:
                   - $ref: "#/components/schemas/Success"
                   - properties:
                       payload: { $ref: "#/components/schemas/LeaderboardMine" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
   /api/admin/teams/{team_id}/members/{user_id}:
@@ -430,6 +443,7 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Team" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`, `invalid_user_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`, `not_a_member`" }
@@ -451,6 +465,7 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
@@ -471,6 +486,7 @@ paths:
                   - $ref: "#/components/schemas/Success"
                   - properties:
                       payload: { $ref: "#/components/schemas/Game" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
   /api/game/bosses:
@@ -493,6 +509,7 @@ paths:
                       payload:
                         type: array
                         items: { $ref: "#/components/schemas/Boss" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
   /api/teams/me/state:
@@ -501,6 +518,7 @@ paths:
       summary: Your team's game state
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
 
@@ -524,6 +542,7 @@ paths:
                       payload:
                         type: array
                         items: { $ref: "#/components/schemas/Cast" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
 
@@ -549,10 +568,11 @@ paths:
               required: [shape]
               additionalProperties: false
               properties:
-                shape: { type: string, example: square }
+                shape: { type: string, example: quadrilateral }
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_shape`, `not_in_team`" }
@@ -565,6 +585,7 @@ paths:
         nothing is selected. Allowed when knocked out.
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `not_in_team`" }
@@ -595,7 +616,7 @@ paths:
               required: [qr]
               additionalProperties: false
               properties:
-                qr: { type: string, description: The signed token read off the waypoint's QR code., example: "1001:1760000000.nR5…" }
+                qr: { type: string, description: The signed token read off the waypoint's QR code., example: "2001:1760000000.nR5…" }
       responses:
         "200":
           description: Accepted.
@@ -607,6 +628,7 @@ paths:
                   - properties:
                       payload: { $ref: "#/components/schemas/ScanResult" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_qr`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `not_in_team`" }
         "409":
@@ -622,7 +644,7 @@ paths:
         HMAC key and the timing rules; the `/qr` display signs its own rotating tokens locally (no
         polling), one per `qr.rotate`. Each token is valid for `qr.rotate` + `qr.tolerance` (10 s).
       parameters:
-        - { name: waypoint_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{4}$" }, example: "1001" }
+        - { name: waypoint_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{4}$" }, example: "2001" }
       responses:
         "200":
           description: The signing key and timing rules.
@@ -634,6 +656,7 @@ paths:
                   - properties:
                       payload: { $ref: "#/components/schemas/SigningKey" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_waypoint_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_staff`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`" }
@@ -654,7 +677,7 @@ paths:
               required: [qr]
               additionalProperties: false
               properties:
-                qr: { type: string, description: The token read off the QR., example: "1001:1760000000.nR5…" }
+                qr: { type: string, description: The token read off the QR., example: "2001:1760000000.nR5…" }
       responses:
         "200":
           description: The waypoint.
@@ -666,6 +689,7 @@ paths:
                   - properties:
                       payload: { $ref: "#/components/schemas/QRVerify" }
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_qr`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `qr_expired`" }
 
@@ -736,6 +760,7 @@ paths:
           content:
             text/event-stream:
               schema: { type: string }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
 components:
@@ -754,6 +779,16 @@ components:
     Error:
       description: |
         A rule or input error. Each use lists the `code`s it can carry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: >-
+        Too many requests from this user (`rate_limited`): each signed-in user has a token bucket of
+        `ratelimit.per_second` (10) requests a second in bursts of up to `ratelimit.burst` (40). Wait
+        `Retry-After` seconds and retry; nothing was done.
+      headers:
+        Retry-After: { schema: { type: integer, minimum: 1 }, description: Whole seconds until a request will be allowed. }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -838,7 +873,7 @@ components:
       description: A waypoint on the team's QR cooldown.
       required: [waypoint_id, until]
       properties:
-        waypoint_id: { type: string, description: The waypoint's 4-digit ID., example: "1001" }
+        waypoint_id: { type: string, description: The waypoint's 4-digit ID., example: "2001" }
         until:
           type: string
           format: date-time
@@ -1024,17 +1059,17 @@ components:
       type: object
       required: [id, name, patterns, points, damage, patterns_by_points, classes]
       properties:
-        id: { type: string, description: What PUT …/selection takes., example: square }
-        name: { type: string, example: Square }
-        patterns: { type: integer, description: How many valid patterns the type has., example: 18 }
+        id: { type: string, description: What PUT …/selection takes., example: quadrilateral }
+        name: { type: string, example: Quadrilateral }
+        patterns: { type: integer, description: How many valid patterns the type has., example: 210 }
         points: { type: array, items: { type: integer }, description: Distinct pattern sizes, ascending., example: [4] }
         damage:
           type: object
           required: [min, max]
           description: Minimum and maximum damage across the type's patterns.
           properties:
-            min: { type: integer, example: 87 }
-            max: { type: integer, example: 125 }
+            min: { type: integer, example: 195 }
+            max: { type: integer, example: 278 }
         patterns_by_points:
           type: object
           additionalProperties: { type: integer }
@@ -1053,13 +1088,13 @@ components:
       required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, version]
       properties:
         team_id: { type: string, example: "482913" }
-        waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["1001", "1002"] }
+        waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["2001", "2002"] }
         patterns:
           type: array
           description: Completed patterns, each as its sorted waypoint IDs.
           items: { type: array, items: { type: string } }
-          example: [["1001", "1002", "1007", "1008"]]
-        shapes: { type: array, items: { type: string }, description: Completed types., example: [square] }
+          example: [["2001", "2002", "2007", "2008"]]
+        shapes: { type: array, items: { type: string }, description: Completed types., example: [quadrilateral] }
         selection:
           oneOf:
             - type: "null"
@@ -1141,7 +1176,7 @@ components:
           type: array
           items: { type: string }
           description: "Types the team can't select because of the cooldown (`shape_on_cooldown`): every one of their unlocked patterns is of `cooldown_class`. Never also in `locked_shapes`."
-          example: [lightning, square, tree]
+          example: [quadrilateral]
         qr_cooldowns:
           type: array
           items: { $ref: "#/components/schemas/QRCooldown" }
@@ -1176,13 +1211,13 @@ components:
       type: object
       required: [pattern, shape, class, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss]
       properties:
-        pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["1001", "1002", "1007", "1008"] }
-        shape: { type: string, description: The pattern's type., example: square }
+        pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["2001", "2002", "2007", "2008"] }
+        shape: { type: string, description: The pattern's type., example: quadrilateral }
         class: { type: string, description: "The pattern's spell class ID: the class of its waypoint count (`SpellClass`).", example: class_4 }
         cast_by: { type: string, format: uuid, description: The member whose scan completed the pattern. }
         cast_at: { type: string, format: date-time, description: When (the completing scan's time). }
         already_completed: { type: boolean, description: The team had cast this pattern before, so its progress didn't grow. }
-        damage: { type: integer, description: "What the cast spell deals: the pattern's damage.", example: 205 }
+        damage: { type: integer, description: "What the cast spell deals: the pattern's damage.", example: 274 }
         dealt:
           type: integer
           minimum: 0
@@ -1190,7 +1225,7 @@ components:
             The damage it dealt to a boss: `damage` × the team's multiplier at the time, rounded. 0 if every boss
             was already defeated (or for casts from before bosses existed). A cast that defeats a boss loses the
             rest: it never carries to the next boss.
-          example: 205
+          example: 274
         boss: { type: ["integer", "null"], description: The serial of the boss it hit, or null if none., example: 1 }
         defeated_boss: { type: boolean, description: This cast defeated that boss. }
     Boss:
@@ -1220,7 +1255,7 @@ components:
       type: object
       required: [waypoint_id, user_id, scanned_at, wrong]
       properties:
-        waypoint_id: { type: string, example: "1001" }
+        waypoint_id: { type: string, example: "2001" }
         user_id: { type: string, format: uuid }
         scanned_at: { type: string, format: date-time }
         wrong: { type: boolean, description: "The waypoint, with the scans below it, can't be part of any pattern of the selected type: it poisons the attempt." }
@@ -1233,7 +1268,7 @@ components:
           type: string
           enum: [scan_added, wrong_scan, pattern_completed]
           description: "`wrong_scan`: pushed, but it doesn't match any pattern of the selected type; tell the player and offer a restart."
-        pattern: { type: array, items: { type: string }, description: Set on pattern_completed., example: ["1001", "1002", "1007", "1008"] }
+        pattern: { type: array, items: { type: string }, description: Set on pattern_completed., example: ["2001", "2002", "2007", "2008"] }
         already_completed: { type: boolean, description: The pattern had been completed before, so progress didn't grow. }
         state: { $ref: "#/components/schemas/TeamState" }
 
@@ -1241,7 +1276,7 @@ components:
       type: object
       required: [waypoint_id, key, rotate_ms, window_ms, server_time]
       properties:
-        waypoint_id: { type: string, pattern: "^[0-9]{4}$", example: "1001" }
+        waypoint_id: { type: string, pattern: "^[0-9]{4}$", example: "2001" }
         key: { type: string, description: "The waypoint-scoped HMAC key, hex-encoded (32 bytes)." }
         rotate_ms: { type: integer, description: How often the display signs a fresh token (qr.rotate), in milliseconds., example: 5000 }
         window_ms: { type: integer, description: "How long each token is valid: qr.rotate + qr.tolerance, in milliseconds.", example: 10000 }
@@ -1250,4 +1285,4 @@ components:
       type: object
       required: [waypoint_id]
       properties:
-        waypoint_id: { type: string, pattern: "^[0-9]{4}$", description: The waypoint the verified token stands for., example: "1001" }
+        waypoint_id: { type: string, pattern: "^[0-9]{4}$", description: The waypoint the verified token stands for., example: "2001" }

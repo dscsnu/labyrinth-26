@@ -1,5 +1,7 @@
 // Package httpx writes and reads JSON in the response envelope every route
-// uses: {"success", "code", "message", "payload"}.
+// uses: {"success", "code", "message", "payload"}, and holds the middleware
+// that answers in it: the access log, panic recovery and the per-user rate
+// limiter.
 package httpx
 
 import (

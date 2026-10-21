@@ -394,7 +394,7 @@ Checked in this order:
 - `internal/server/tests/admin_test.go`:
   - `TestAdminGuard`: no token `401`; a player `403 not_admin`; promoted in the database (token still says `PLAYER`) is let in; demoted is refused on the next request
   - `TestAdminRemoveFromLobby`: every code in the table above in order; the removed player gets `no_team` and a member gets the smaller `team`; removing the leader with a new leader; the list route; `last_member`; the removed player creates a team
-  - `TestAdminRemoveFromStartedTeam`: the removed player's stream gets `no_team` and no further `team_state`; their scan, selection and state read get `not_in_team`; the rest complete a square with the removed player's earlier scan; the removed player joins a lobby team; a restart keeps the smaller roster
+  - `TestAdminRemoveFromStartedTeam`: the removed player's stream gets `no_team` and no further `team_state`; their scan, selection and state read get `not_in_team`; the rest complete a quadrilateral with the removed player's earlier scan; the removed player joins a lobby team; a restart keeps the smaller roster
   - `TestAdminRemoveRacesScan`: a member's scan racing their removal, for every non-leader: the removal always succeeds, and the scan is accepted (stays in the stack) or refused with `not_in_team`, never accepted after
   - `TestAdminDeleteTeam`: the guard and a bad ID; a member's stream gets `no_team` (`team_deleted`); their state is `not_in_team`; the team leaves the admin's list; a member creates a team at once; deleting again is `team_not_found`
   - `TestLeaderboardAndFinish`: a team through every boss becomes `FINISHED` (`team` of type `finished`) and its selection is `not_in_game`

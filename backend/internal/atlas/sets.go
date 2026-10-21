@@ -8,7 +8,7 @@ import "math/bits"
 // lookup keyed by the set itself. Indexes exist only in memory and may differ
 // between restarts; Postgres and the API always use IDs.
 //
-// Example with the 2025 seed: waypoints 1001, 1002, 1007, 1008 are indexes
+// Example with the 2026 seed: waypoints 2001, 2002, 2007, 2008 are indexes
 // 0, 1, 6, 7, so their WaypointSet is 0b11000011 = 195.
 
 // Set capacities: Go type sizes, not tunables (AGENTS.md §10). Raising one

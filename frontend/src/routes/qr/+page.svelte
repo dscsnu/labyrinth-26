@@ -100,7 +100,7 @@
 <p><small>Enter a waypoint's 4-digit ID to show its rotating QR.</small></p>
 
 <form onsubmit={start}>
-    <input bind:value={waypoint} inputmode="numeric" maxlength="4" placeholder="1001" />
+    <input bind:value={waypoint} inputmode="numeric" maxlength="4" placeholder="2001" />
     <button>Show</button>
 </form>
 

@@ -29,12 +29,12 @@ func (e *env) startedTeam(prefix string) []player {
 // wrong scan poisoning the attempt until a reselect, and clearing.
 func TestSelectAndScanRoutes(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// 1012 is in no pattern, so it's wrong for every shape.
 	if _, err := e.db.Pool().Exec(context.Background(),
-		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('1012', 'Nowhere', 0, 0)"); err != nil {
+		"INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2099', 'Nowhere', 0, 0)"); err != nil {
 		t.Fatal(err)
 	}
 	// Casts here reuse waypoints: TestQRCooldownOverHTTP covers the QR cooldown.
@@ -51,14 +51,14 @@ func TestSelectAndScanRoutes(t *testing.T) {
 		return e.call("POST", "/api/teams/me/state/scans", p, map[string]string{"qr": qrToken(w, time.Now().Unix())})
 	}
 
-	expect(t, "lobby select", sel(lobby, map[string]string{"shape": "square"}), http.StatusConflict, "not_in_game")
-	expect(t, "no team", scan(e.newPlayer("x"), "1001"), http.StatusNotFound, "not_in_team")
+	expect(t, "lobby select", sel(lobby, map[string]string{"shape": "quadrilateral"}), http.StatusConflict, "not_in_game")
+	expect(t, "no team", scan(e.newPlayer("x"), "2001"), http.StatusNotFound, "not_in_team")
 	expect(t, "bad body", sel(ps[0], map[string]int{"shape": 1}), http.StatusBadRequest, "invalid_body")
 	expect(t, "empty scan body", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{}), http.StatusBadRequest, "invalid_body")
 
 	// QR verification: a tampered token and a stale one are refused before
 	// the waypoint or the team is even looked up.
-	fresh := qrToken("1001", time.Now().Unix())
+	fresh := qrToken("2001", time.Now().Unix())
 	last := fresh[len(fresh)-1]
 	replacement := byte('A')
 	if last == 'A' {
@@ -66,33 +66,33 @@ func TestSelectAndScanRoutes(t *testing.T) {
 	}
 	expect(t, "tampered token", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": fresh[:len(fresh)-1] + string(replacement)}),
 		http.StatusBadRequest, "invalid_qr")
-	expect(t, "expired token", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix()-100)}),
+	expect(t, "expired token", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("2001", time.Now().Unix()-100)}),
 		http.StatusConflict, "qr_expired")
 
-	expect(t, "unknown shape", sel(ps[0], map[string]string{"shape": "hexagon"}), http.StatusNotFound, "unknown_shape")
+	expect(t, "unknown shape", sel(ps[0], map[string]string{"shape": "dodecagon"}), http.StatusNotFound, "unknown_shape")
 	expect(t, "unknown waypoint", scan(ps[0], "9999"), http.StatusNotFound, "unknown_waypoint")
-	expect(t, "scan before select", scan(ps[0], "1001"), http.StatusConflict, "no_shape_selected")
+	expect(t, "scan before select", scan(ps[0], "2001"), http.StatusConflict, "no_shape_selected")
 	huge := strings.Repeat("x", int(e.cfg.Settings.Server.MaxBodyBytes))
 	expect(t, "body over server.max_body_bytes", sel(ps[0], map[string]string{"shape": huge}), http.StatusBadRequest, "invalid_body")
 
-	expect(t, "select by a non-leader", sel(ps[1], map[string]string{"shape": "square"}), http.StatusForbidden, "not_leader")
+	expect(t, "select by a non-leader", sel(ps[1], map[string]string{"shape": "quadrilateral"}), http.StatusForbidden, "not_leader")
 	expect(t, "clear by a non-leader", e.call("DELETE", "/api/teams/me/state/selection", ps[1], nil), http.StatusForbidden, "not_leader")
-	r := sel(ps[0], map[string]string{"shape": "square"})
+	r := sel(ps[0], map[string]string{"shape": "quadrilateral"})
 	expect(t, "select", r, http.StatusOK, "")
-	if r.payload["selection"].(map[string]any)["shape"] != "square" {
+	if r.payload["selection"].(map[string]any)["shape"] != "quadrilateral" {
 		t.Fatalf("selection: %v", r.payload)
 	}
 
-	r = scan(ps[0], "1001")
+	r = scan(ps[0], "2001")
 	expect(t, "first scan", r, http.StatusOK, "")
 	if r.payload["outcome"] != "scan_added" {
 		t.Fatalf("first scan: %v", r.payload)
 	}
-	expect(t, "rescan", scan(ps[0], "1001"), http.StatusConflict, "waypoint_already_scanned")
-	expect(t, "same waypoint", scan(ps[1], "1001"), http.StatusConflict, "waypoint_already_scanned")
-	expect(t, "same member, another waypoint", scan(ps[0], "1002"), http.StatusOK, "")
-	expect(t, "scan 3", scan(ps[2], "1007"), http.StatusOK, "")
-	r = scan(ps[3], "1008")
+	expect(t, "rescan", scan(ps[0], "2001"), http.StatusConflict, "waypoint_already_scanned")
+	expect(t, "same waypoint", scan(ps[1], "2001"), http.StatusConflict, "waypoint_already_scanned")
+	expect(t, "same member, another waypoint", scan(ps[0], "2002"), http.StatusOK, "")
+	expect(t, "scan 3", scan(ps[2], "2007"), http.StatusOK, "")
+	r = scan(ps[3], "2008")
 	expect(t, "scan 4", r, http.StatusOK, "")
 	if r.payload["outcome"] != "pattern_completed" {
 		t.Fatalf("fourth scan: %v", r.payload)
@@ -100,7 +100,7 @@ func TestSelectAndScanRoutes(t *testing.T) {
 
 	r = e.call("GET", "/api/teams/me/state", ps[len(ps)-1], nil)
 	expect(t, "get state", r, http.StatusOK, "")
-	if shapes := r.payload["shapes"].([]any); len(shapes) != 1 || shapes[0] != "square" || r.payload["selection"] != nil {
+	if shapes := r.payload["shapes"].([]any); len(shapes) != 1 || shapes[0] != "quadrilateral" || r.payload["selection"] != nil {
 		t.Fatalf("state: %v", r.payload)
 	}
 
@@ -113,20 +113,20 @@ func TestSelectAndScanRoutes(t *testing.T) {
 
 	// The square was the last cast, so its class (class_4) is on cooldown:
 	// every square is class_4, so the shape can't be selected.
-	expect(t, "square on cooldown", sel(ps[0], map[string]string{"shape": "square"}), http.StatusConflict, "shape_on_cooldown")
+	expect(t, "square on cooldown", sel(ps[0], map[string]string{"shape": "quadrilateral"}), http.StatusConflict, "shape_on_cooldown")
 
 	// A wrong scan is pushed and reported (wrong_scan, marked wrong, the
 	// attempt poisoned); every later scan is refused until a reselect.
 	expect(t, "reselect", sel(ps[0], map[string]string{"shape": "triangle"}), http.StatusOK, "")
-	r = scan(ps[0], "1012")
+	r = scan(ps[0], "2099")
 	expect(t, "wrong scan", r, http.StatusOK, "")
 	st := r.payload["state"].(map[string]any)
 	if r.payload["outcome"] != "wrong_scan" || st["poisoned"] != true || st["stack"].([]any)[0].(map[string]any)["wrong"] != true {
 		t.Fatalf("wrong scan: %v", r.payload)
 	}
-	expect(t, "poisoned attempt", scan(ps[1], "1001"), http.StatusConflict, "selection_poisoned")
+	expect(t, "poisoned attempt", scan(ps[1], "2001"), http.StatusConflict, "selection_poisoned")
 	expect(t, "reselect clears it", sel(ps[0], map[string]string{"shape": "triangle"}), http.StatusOK, "")
-	expect(t, "scan after reselect", scan(ps[1], "1001"), http.StatusOK, "")
+	expect(t, "scan after reselect", scan(ps[1], "2001"), http.StatusOK, "")
 }
 
 // TestCastLogRoute checks GET /api/teams/me/casts: 404 without a team, an
@@ -135,7 +135,7 @@ func TestSelectAndScanRoutes(t *testing.T) {
 // a row), the square again.
 func TestCastLogRoute(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e.cfg.Settings.Game.QRCooldown.Duration = 0 // casts reuse waypoints: TestQRCooldownOverHTTP covers it
@@ -161,7 +161,7 @@ func TestCastLogRoute(t *testing.T) {
 	for _, c := range []struct {
 		shape string
 		ids   []string
-	}{{"square", []string{"1001", "1002", "1007", "1008"}}, {"triangle", []string{"1001", "1002", "1003"}}, {"square", []string{"1001", "1002", "1007", "1008"}}} {
+	}{{"quadrilateral", []string{"2001", "2002", "2007", "2008"}}, {"triangle", []string{"2001", "2002", "2003"}}, {"quadrilateral", []string{"2001", "2002", "2007", "2008"}}} {
 		expect(t, "select "+c.shape, e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": c.shape}), http.StatusOK, "")
 		for _, w := range c.ids {
 			expect(t, "scan "+w, e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken(w, time.Now().Unix())}), http.StatusOK, "")
@@ -170,7 +170,7 @@ func TestCastLogRoute(t *testing.T) {
 	got := casts()
 	cast := func(i int) map[string]any { return got[i].(map[string]any) }
 	if len(got) != 3 || cast(0)["already_completed"] != true || cast(1)["already_completed"] != false || cast(2)["already_completed"] != false ||
-		cast(0)["shape"] != "square" || cast(0)["class"] != "class_4" || cast(1)["class"] != "class_3" || cast(0)["damage"].(float64) <= 0 {
+		cast(0)["shape"] != "quadrilateral" || cast(0)["class"] != "class_4" || cast(1)["class"] != "class_3" || cast(0)["damage"].(float64) <= 0 {
 		t.Fatalf("cast log: %v", got)
 	}
 }
@@ -181,7 +181,7 @@ func TestCastLogRoute(t *testing.T) {
 // class ascending by points (and no timing rules: there's no time limit).
 func TestGameShapes(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -199,8 +199,8 @@ func TestGameShapes(t *testing.T) {
 		m := s.(map[string]any)
 		byID[m["id"].(string)] = m
 	}
-	sq := byID["square"]
-	if len(shapes) != 5 || sq["patterns"] != float64(18) || len(sq["points"].([]any)) != 1 || sq["points"].([]any)[0] != float64(4) {
+	sq := byID["quadrilateral"]
+	if len(shapes) != 5 || sq["patterns"] != float64(210) || len(sq["points"].([]any)) != 1 || sq["points"].([]any)[0] != float64(4) {
 		t.Fatalf("shapes: %v", shapes)
 	}
 	for id, s := range byID {
@@ -255,7 +255,7 @@ func TestGameBosses(t *testing.T) {
 	if got := list(); len(got) != 0 {
 		t.Fatalf("before seeding: %v", got)
 	}
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart() // content is read at startup
@@ -276,8 +276,8 @@ func TestGameBosses(t *testing.T) {
 		r.payload["bosses_defeated"] != float64(0) || r.payload["damage_multiplier"] != float64(1) {
 		t.Fatalf("before a cast: %v", r.payload)
 	}
-	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}), http.StatusOK, "")
-	for _, w := range []string{"1001", "1002", "1007", "1008"} {
+	expect(t, "select", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "quadrilateral"}), http.StatusOK, "")
+	for _, w := range []string{"2001", "2002", "2007", "2008"} {
 		r = e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken(w, time.Now().Unix())})
 	}
 	st := r.payload["state"].(map[string]any)
@@ -303,7 +303,7 @@ func TestGameBosses(t *testing.T) {
 // a restart keeps A's cooldown; A's triangle cast moves it to class_3.
 func TestSpellCooldownOverHTTP(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e.cfg.Settings.Game.QRCooldown.Duration = 0 // casts reuse waypoints: TestQRCooldownOverHTTP covers it
@@ -342,40 +342,39 @@ func TestSpellCooldownOverHTTP(t *testing.T) {
 	if c, shapes := cooldown(e.call("GET", "/api/teams/me/state", a[0], nil).payload); c != nil || len(shapes) != 0 {
 		t.Fatalf("before any cast: cooldown %v, shapes %v", c, shapes)
 	}
-	st := castAs(a[0], "square", []string{"1001", "1002", "1007", "1008"})
-	if c, shapes := cooldown(st); c != "class_4" || !same(shapes, "lightning", "square", "tree") {
+	st := castAs(a[0], "quadrilateral", []string{"2001", "2002", "2007", "2008"})
+	if c, shapes := cooldown(st); c != "class_4" || !same(shapes, "quadrilateral") {
 		t.Fatalf("A's cast response: cooldown %v, shapes %v", c, shapes)
 	}
 	var ev sseEvent
 	for ev.typ != "spell_cast" && ev.typ != "boss_defeated" {
 		ev = s.nextState(t, "the cast's event")
 	}
-	if c, shapes := cooldown(ev.data); c != "class_4" || !same(shapes, "lightning", "square", "tree") {
+	if c, shapes := cooldown(ev.data); c != "class_4" || !same(shapes, "quadrilateral") {
 		t.Fatalf("A's cast event (%s): cooldown %v, shapes %v", ev.typ, c, shapes)
 	}
 
-	expect(t, "A reselects the square", sel(a[0], "square"), http.StatusConflict, "shape_on_cooldown")
-	expect(t, "A selects the tree", sel(a[0], "tree"), http.StatusConflict, "shape_on_cooldown")
+	expect(t, "A reselects the square", sel(a[0], "quadrilateral"), http.StatusConflict, "shape_on_cooldown")
 	select {
 	case ev := <-s.states:
 		t.Fatalf("a refused selection published %s", ev.typ)
 	case <-time.After(100 * time.Millisecond):
 	}
-	expect(t, "B selects the square (its own cooldown is empty)", sel(b[0], "square"), http.StatusOK, "")
+	expect(t, "B selects the square (its own cooldown is empty)", sel(b[0], "quadrilateral"), http.StatusOK, "")
 	if c, _ := cooldown(e.call("GET", "/api/teams/me/state", b[0], nil).payload); c != nil {
 		t.Fatalf("B's cooldown %v after A's cast", c)
 	}
 
 	e = e.restart()
-	if c, shapes := cooldown(e.call("GET", "/api/teams/me/state", a[0], nil).payload); c != "class_4" || !same(shapes, "lightning", "square", "tree") {
+	if c, shapes := cooldown(e.call("GET", "/api/teams/me/state", a[0], nil).payload); c != "class_4" || !same(shapes, "quadrilateral") {
 		t.Fatalf("A after a restart: cooldown %v, shapes %v", c, shapes)
 	}
-	expect(t, "A reselects the square after a restart", sel(a[0], "square"), http.StatusConflict, "shape_on_cooldown")
-	st = castAs(a[0], "triangle", []string{"1001", "1002", "1003"})
-	if c, shapes := cooldown(st); c != "class_3" || !same(shapes, "collinear", "triangle") {
+	expect(t, "A reselects the square after a restart", sel(a[0], "quadrilateral"), http.StatusConflict, "shape_on_cooldown")
+	st = castAs(a[0], "triangle", []string{"2001", "2002", "2003"})
+	if c, shapes := cooldown(st); c != "class_3" || !same(shapes, "triangle") {
 		t.Fatalf("A after a triangle: cooldown %v, shapes %v", c, shapes)
 	}
-	castAs(a[0], "square", []string{"1001", "1002", "1007", "1008"})
+	castAs(a[0], "quadrilateral", []string{"2001", "2002", "2007", "2008"})
 }
 
 // TestQRCooldownOverHTTP checks the QR cooldown end to end, with two started
@@ -387,7 +386,7 @@ func TestSpellCooldownOverHTTP(t *testing.T) {
 // keeps A's qr_cooldowns, rebuilt from the cast log.
 func TestQRCooldownOverHTTP(t *testing.T) {
 	e := setup(t)
-	if err := e.db.SeedDev2025(context.Background()); err != nil {
+	if err := e.db.Seed2026(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	e = e.restart()
@@ -395,7 +394,7 @@ func TestQRCooldownOverHTTP(t *testing.T) {
 	if cd < time.Minute {
 		t.Skipf("test assumes game.qr_cooldown >= 1m, longer than it runs (got %v)", cd)
 	}
-	square := []string{"1001", "1002", "1007", "1008"}
+	square := []string{"2001", "2002", "2007", "2008"}
 	a, b := e.startedTeam("qra"), e.startedTeam("qrb")
 	sel := func(p player, shape string) {
 		expect(t, "select "+shape, e.call("PUT", "/api/teams/me/state/selection", p, map[string]string{"shape": shape}), http.StatusOK, "")
@@ -426,7 +425,7 @@ func TestQRCooldownOverHTTP(t *testing.T) {
 	if ev := s.nextState(t, "snapshot"); len(ev.data["qr_cooldowns"].([]any)) != 0 {
 		t.Fatalf("before any cast: qr_cooldowns %v", ev.data["qr_cooldowns"])
 	}
-	sel(a[0], "square")
+	sel(a[0], "quadrilateral")
 	var r apiResult
 	for _, w := range square {
 		r = scan(a[0], w)
@@ -445,19 +444,19 @@ func TestQRCooldownOverHTTP(t *testing.T) {
 
 	sel(a[0], "triangle")
 	s.nextState(t, "select")
-	expect(t, "A scans 1001 on cooldown", scan(a[1], "1001"), http.StatusConflict, "waypoint_on_cooldown")
+	expect(t, "A scans 1001 on cooldown", scan(a[1], "2001"), http.StatusConflict, "waypoint_on_cooldown")
 	select {
 	case ev := <-s.states:
 		t.Fatalf("a refused scan published %s", ev.typ)
 	case <-time.After(100 * time.Millisecond):
 	}
-	expect(t, "A scans 1003, not in the square", scan(a[1], "1003"), http.StatusOK, "")
-	sel(b[0], "square")
-	expect(t, "B scans 1001 (its own cooldowns are empty)", scan(b[0], "1001"), http.StatusOK, "")
+	expect(t, "A scans 1003, not in the square", scan(a[1], "2003"), http.StatusOK, "")
+	sel(b[0], "quadrilateral")
+	expect(t, "B scans 1001 (its own cooldowns are empty)", scan(b[0], "2001"), http.StatusOK, "")
 
 	e = e.restart()
 	if got := cooling("A after a restart", e.call("GET", "/api/teams/me/state", a[0], nil).payload); !slices.Equal(got, square) {
 		t.Fatalf("A after a restart: qr_cooldowns %v, want %v", got, square)
 	}
-	expect(t, "A scans 1002 after a restart", scan(a[0], "1002"), http.StatusConflict, "waypoint_on_cooldown")
+	expect(t, "A scans 1002 after a restart", scan(a[0], "2002"), http.StatusConflict, "waypoint_on_cooldown")
 }

@@ -119,7 +119,7 @@ Every route: `401 missing_token` / `invalid_token` / `user_not_found` (the calle
   {"team": {"id": "482913", "name": "Scanners", "status": "IN_GAME", "leader_id": "…", "members": […], "version": {…}},
    "game": {"health": 0, "knocked_out": true, "bosses_defeated": 2,
             "boss": {"serial": 3, "damage": 107, "phase_started_at": "2026-10-21T12:00:00Z", "attacks": 4, "next_attack_at": null},
-            "cooldown_class": "class_4", "qr_cooldowns": [{"waypoint_id": "1001", "until": "2026-10-21T12:44:00Z"}], "cast_count": 7}}
+            "cooldown_class": "class_4", "qr_cooldowns": [{"waypoint_id": "2001", "until": "2026-10-21T12:44:00Z"}], "cast_count": 7}}
 ]}
 ```
 

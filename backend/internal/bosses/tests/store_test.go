@@ -91,23 +91,23 @@ func seedRules(t *testing.T, count int) bosses.Rules {
 	return bosses.Rules{Count: count, AttackInterval: set.Game.BossAttack.Interval.Duration, AttackDamage: set.Game.BossAttack.BossDamage()}
 }
 
-// seedBosses is how many bosses the 2025 dev seed has.
+// seedBosses is how many bosses the 2026 seed has.
 const seedBosses = 6
 
-// TestLoad loads an empty table (Count 0), then the 2025 dev seed's bosses
+// TestLoad loads an empty table (Count 0), then the 2026 seed's bosses
 // with config.toml's game.bosses: all of them, in serial order, HP rising.
 // With game.bosses one lower, startup is refused, naming both numbers.
 func TestLoad(t *testing.T) {
 	n := configtest.Settings(t).Game.Bosses
 	if n != seedBosses {
-		t.Skipf("the 2025 seed has %d bosses; game.bosses is %d", seedBosses, n)
+		t.Skipf("the 2026 seed has %d bosses; game.bosses is %d", seedBosses, n)
 	}
 	ctx := context.Background()
 	db := pgtest.Open(t, pgtest.URL(t, "bosses_test"))
 	if b := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, seedRules(t, 7))); b.Count() != 0 {
 		t.Fatalf("before seeding: %d bosses", b.Count())
 	}
-	if err := db.SeedDev2025(ctx); err != nil {
+	if err := db.Seed2026(ctx); err != nil {
 		t.Fatal(err)
 	}
 	b, err := bosses.Load(ctx, db, pgtest.Quiet, seedRules(t, n))

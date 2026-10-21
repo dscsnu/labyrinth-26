@@ -27,7 +27,7 @@ import (
 //
 //	labyrinth          run migrations, then serve
 //	labyrinth migrate  run migrations and exit
-//	labyrinth seed     run migrations, load the 2025 placeholder content, and exit
+//	labyrinth seed     run migrations, load the 2026 content, and exit
 //
 // Serving, migrate and seed all take the single-instance lock first, so they
 // refuse to run while a backend is serving from the same database.
@@ -113,10 +113,10 @@ func run(log *slog.Logger, args []string) error {
 	}
 	if len(args) > 0 && args[0] == "seed" {
 		// Content is read at startup, which is why seeding needs the lock.
-		if err := db.SeedDev2025(ctx); err != nil {
+		if err := db.Seed2026(ctx); err != nil {
 			return fmt.Errorf("seed: %w", err)
 		}
-		log.Info("seeded 2025 placeholder content")
+		log.Info("seeded 2026 content")
 		return nil
 	}
 

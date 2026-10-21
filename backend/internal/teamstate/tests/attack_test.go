@@ -70,7 +70,7 @@ func TestBossAttacks(t *testing.T) {
 	// Defeat boss 1, casting right after its first attack.
 	t0 := f.interval(1)
 	for round := 0; f.view(t).BossesDefeated == 0; round++ {
-		f.selectAt(t, t0+f.tick(float64(10*round)), 0, "square")
+		f.selectAt(t, t0+f.tick(float64(10*round)), 0, "quadrilateral")
 		for i, w := range square {
 			f.scanAt(t, t0+f.tick(float64(10*round+i+1)), i, w)
 		}
@@ -101,10 +101,10 @@ func TestBossAttacks(t *testing.T) {
 	expectNoEvent(t, sub, "no attacks once knocked out")
 
 	now := defeatedAt.Sub(start) + time.Duration(attacks+5)*f.interval(2)
-	if _, err := f.state.Select(context.Background(), f.users[0], "square"); !errors.Is(err, teamstate.ErrKnockedOut) {
+	if _, err := f.state.Select(context.Background(), f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrKnockedOut) {
 		t.Fatalf("select while knocked out: %v", err)
 	}
-	if err := f.scanErrAt(now, 0, "1001"); !errors.Is(err, teamstate.ErrKnockedOut) {
+	if err := f.scanErrAt(now, 0, "2001"); !errors.Is(err, teamstate.ErrKnockedOut) {
 		t.Fatalf("scan while knocked out: %v", err)
 	}
 	if _, err := f.state.ClearSelection(context.Background(), f.users[0]); err != nil {
@@ -166,13 +166,13 @@ func TestWriteCatchesUpAttacks(t *testing.T) {
 	f := started(t, fixtureOptions{attacks: true, bossRules: func(r *bosses.Rules) { r.AttackDamage[1] = 4 }})
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
-	f.selectAt(t, 0, 0, "square")
+	f.selectAt(t, 0, 0, "quadrilateral")
 	expectType(t, sub, "select", teamstate.ShapeSelected)
 	f.state.Close() // timers off: only writes catch up
 
 	f.clock.at(f.interval(1))
 	expectNoEvent(t, sub, "no timer")
-	res := f.scanAt(t, f.interval(1)+f.tick(1), 0, "1001")
+	res := f.scanAt(t, f.interval(1)+f.tick(1), 0, "2001")
 	expectType(t, sub, "caught-up attack", teamstate.BossAttacked)
 	expectType(t, sub, "the scan", teamstate.ScanAdded)
 	if res.State.Health != f.rules.Health-4 || res.State.Boss.Attacks != 1 {
@@ -182,7 +182,7 @@ func TestWriteCatchesUpAttacks(t *testing.T) {
 	// game.health 10 at 4 a hit: the third attack knocks the team out.
 	knockout := (f.rules.Health + 3) / 4
 	f.clock.at(time.Duration(knockout) * f.interval(1))
-	if _, err := f.state.Select(context.Background(), f.users[0], "square"); !errors.Is(err, teamstate.ErrKnockedOut) {
+	if _, err := f.state.Select(context.Background(), f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrKnockedOut) {
 		t.Fatalf("select after a knockout's worth of attacks: %v", err)
 	}
 	expectType(t, sub, "caught-up knockout", teamstate.KnockedOut)

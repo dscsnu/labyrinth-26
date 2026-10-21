@@ -29,7 +29,7 @@ func (f *fixtureEnv) squareDamage(t *testing.T) int {
 // cooldown refuses it right after another class_4 cast.
 func (f *fixtureEnv) castSquare(t *testing.T, round int) teamstate.ScanResult {
 	t.Helper()
-	return f.cast(t, round, "square", square)
+	return f.cast(t, round, "quadrilateral", square)
 }
 
 // castTriangle casts the triangle (class_3) the same way: what a test casts
