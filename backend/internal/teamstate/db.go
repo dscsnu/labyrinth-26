@@ -2,6 +2,7 @@ package teamstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -367,20 +368,31 @@ func holdPowerup(ctx context.Context, q execer, teamID, kind string) error {
 		ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT team_powerup.held`, teamID, kind)
 }
 
+// errAnswerAfterEnd is insertQTEAnswer's refusal of an answer at or after
+// the QTE's stored ends_at: an admin's End committed while memory still
+// had it open. AnswerQTE answers it with ErrQTEClosed.
+var errAnswerAfterEnd = errors.New("answer after the qte's stored ends_at")
+
 // insertQTEAnswer records teamID's answer a to a QTE, in one transaction:
 //  1. INSERT INTO team_qte_answer … SELECT … FROM qte WHERE the QTE has
-//     started and a.Option is one of its options: exactly one row (memory
-//     checked both; the primary key backs one answer per team)
+//     started, a.Option is one of its options and a.At is before its
+//     stored ends_at. No row means the last (memory checked the others,
+//     which never change back): errAnswerAfterEnd. The primary key backs
+//     one answer per team
 //  2. if grant isn't "": holdPowerup(grant), the QTE's powerup, in the
 //     same transaction, so a right answer is never saved without it
 func (d db) insertQTEAnswer(ctx context.Context, teamID string, a QTEAnswer, grant string) error {
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
-		if err := execOne(ctx, tx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO team_qte_answer (team_id, qte_id, option, correct, granted, answered_by, answered_at)
 			SELECT $1, id, $3, $4, $5, $6, $7 FROM qte
-			WHERE id = $2 AND started_at IS NOT NULL AND $3 < cardinality(options)`,
-			teamID, a.QTE, a.Option, a.Correct, a.Granted, a.By, a.At); err != nil {
+			WHERE id = $2 AND started_at IS NOT NULL AND $3 < cardinality(options) AND $7 < ends_at`,
+			teamID, a.QTE, a.Option, a.Correct, a.Granted, a.By, a.At)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errAnswerAfterEnd
 		}
 		if grant == "" {
 			return nil

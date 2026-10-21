@@ -241,3 +241,34 @@ func TestQTEStats(t *testing.T) {
 		t.Fatalf("stats JSON %s", js)
 	}
 }
+
+// TestAnswerAfterEndInPostgres checks an answer landing after an admin's End
+// committed but before memory caught up (Postgres closed, memory open, set up
+// by hand): the stored ends_at refuses it, qte_closed, with nothing stored,
+// granted or published, and no reload.
+func TestAnswerAfterEndInPostgres(t *testing.T) {
+	f := started(t)
+	ctx := context.Background()
+	sub := f.hub.Subscribe(f.users[0])
+	defer sub.Close()
+	q := f.quiz(t, "heart")
+	nextQTE(t, sub)
+	if _, err := f.db.Pool().Exec(ctx, "UPDATE qte SET ends_at = started_at WHERE id = $1", q.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.state.AnswerQTE(ctx, f.users[0], q.ID, 2); !errors.Is(err, teamstate.ErrQTEClosed) {
+		t.Fatalf("an answer after the stored ends_at: %v", err)
+	}
+	expectNoEvent(t, sub, "a refused late answer")
+	var n int
+	if err := f.db.Pool().QueryRow(ctx, "SELECT count(*) FROM team_qte_answer").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("answers stored: %d (%v)", n, err)
+	}
+	if v := f.view(t); v.QTE != nil || len(v.Powerups.Held) != 0 {
+		t.Fatalf("after the refused answer: qte %+v, held %v", v.QTE, v.Powerups.Held)
+	}
+	f.restart(t)
+	if v := f.view(t); len(v.Powerups.Held) != 0 {
+		t.Fatalf("a powerup stored for the refused answer: %v", v.Powerups.Held)
+	}
+}

@@ -170,7 +170,7 @@ The admin routes (write, start, end, list with answers and stats) are in [`inter
 - **Two admins start QTEs at once:** `mu` decides; the second gets `ErrQTEOpen` from memory. The exclusion constraint is the backstop.
 - **End racing the timer:** whichever takes `mu` first broadcasts `closed`; `armedFor` keeps the other from sending a second.
 - **qte never calls another use case**, only the hub; teamstate reads qte lock-free while holding a team's lock. So there's no lock order to get wrong.
-- **An answer racing an admin's End:** an answer whose check ran before End took effect is accepted (its `answered_at` can be microseconds past the new `ends_at`): the player chose before the reveal. A constraint can't express this; teamstate's README covers it.
+- **An answer racing an admin's End:** `End` writes Postgres before memory, so an answer can see the QTE open in memory after `End` committed. teamstate's insert checks the stored `ends_at` and refuses it (`409 qte_closed`): the stored `ends_at` is final. See teamstate's README.
 
 ## Failure and recovery
 | Case | Result |

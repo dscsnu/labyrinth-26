@@ -972,6 +972,9 @@ func (s *Store) AnswerQTE(ctx context.Context, userID uuid.UUID, qteID int64, op
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		return s.db.insertQTEAnswer(ctx, t.ID, a, grant)
 	}); err != nil {
+		if errors.Is(err, errAnswerAfterEnd) {
+			return View{}, ErrQTEClosed // nothing written or applied
+		}
 		return View{}, s.reconcile(e, t.ID, err)
 	}
 
