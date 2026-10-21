@@ -20,11 +20,12 @@
 # Exactly one backend: never scale this service. A deploy (up -d --build)
 # stops the old container before starting the new one, as it must.
 #
-# Nothing is published on the host: both live on the "labyrinth" network,
-# where the backend is http://backend:3000 and Postgres postgres:5432. A
-# reverse proxy or the frontend joins that network to reach the backend
-# (as a service in this file, or from another compose file: networks:
-# { labyrinth: { external: true } }).
+# Nothing is published on the host. Two networks: "labyrinth", where the
+# backend is http://backend:3000 and which a reverse proxy or the frontend
+# joins to reach it (as a service in this file, or from another compose
+# file: networks: { labyrinth: { external: true } }); and "db", internal,
+# where only the backend reaches Postgres (postgres:5432). Nothing on
+# "labyrinth" can reach Postgres, and Postgres has no route out.
 # psql and pg_dump run inside the Postgres container:
 #   docker compose -f compose.prod.yaml --env-file backend/.env exec postgres psql -U labyrinth
 name: labyrinth-26-prod
@@ -47,6 +48,8 @@ x-logging: &logging
 networks:
   labyrinth:
     name: labyrinth
+  db:
+    internal: true # no route out, and only the services below on it
 
 services:
   postgres:
@@ -57,7 +60,7 @@ services:
       POSTGRES_USER: labyrinth
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in backend/.env and pass --env-file backend/.env}
       POSTGRES_DB: labyrinth
-    networks: [labyrinth]
+    networks: [db]
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -80,7 +83,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    networks: [labyrinth]
+    networks: [labyrinth, db]
     depends_on:
       postgres:
         condition: service_healthy
