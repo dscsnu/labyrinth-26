@@ -94,19 +94,20 @@ The load generator and the backend share the machine's CPUs, so results are cons
 
 ## Deploying
 
-The backend and its Postgres run with Docker Compose on one host: `compose.prod.yaml`.
+The backend and its Postgres run with Docker Compose on one host: `compose.prod.yaml` at the repository root. Run these from the root; `--env-file backend/.env` is what fills in `${POSTGRES_PASSWORD}` in the file (without it, compose stops: `set POSTGRES_PASSWORD in backend/.env and pass --env-file backend/.env`).
 
 ```bash
-# once: .env with the production secrets (see .env.example), POSTGRES_PASSWORD included
-docker compose -f compose.prod.yaml up -d --build               # start; also how to deploy a new version
-docker compose -f compose.prod.yaml stop backend                # seed (refused while serving), then start again:
-docker compose -f compose.prod.yaml run --rm backend seed
-docker compose -f compose.prod.yaml start backend
-docker compose -f compose.prod.yaml ps                          # both should say (healthy)
-docker compose -f compose.prod.yaml logs -f backend             # one line per request; panics at level=ERROR
+# once: backend/.env with the production secrets (see .env.example), POSTGRES_PASSWORD included
+dc() { docker compose -f compose.prod.yaml --env-file backend/.env "$@"; }   # shorthand for the lines below
+dc up -d --build               # start; also how to deploy a new version
+dc stop backend                # seed (refused while serving), then start again:
+dc run --rm backend seed
+dc start backend
+dc ps                          # both should say (healthy)
+dc logs -f backend             # one line per request; panics at level=ERROR
 ```
 
-**Logs** are rotated per container (`x-logging` in `compose.prod.yaml`): 100 MB files, at most 50, so at most **5 GB** each, the oldest lines deleted past it. A new container (a deploy, or `down`) starts a fresh log; a crash and restart keeps it. Logging is non-blocking: if writing falls behind, lines are dropped rather than requests slowed.
+**Logs** are rotated per container (`x-logging` in the root `compose.prod.yaml`): 100 MB files, at most 50, so at most **5 GB** each, the oldest lines deleted past it. A new container (a deploy, or `down`) starts a fresh log; a crash and restart keeps it. Logging is non-blocking: if writing falls behind, lines are dropped rather than requests slowed.
 
 What it handles on its own (each tested on 2026-10-21):
 
@@ -117,7 +118,7 @@ What it handles on its own (each tested on 2026-10-21):
 | A deploy (`up -d --build`) | The old container stops before the new one starts, so the single-instance lock never clashes. Never `--scale backend` above 1. |
 | The host reboots | Both containers start again with Docker. |
 
-`DATABASE_URL` and `PORT` in `.env` are ignored there (the file sets them for the container). Nothing is published on the host: both containers are on the Docker network `labyrinth`, where the backend is `http://backend:3000` and Postgres `postgres:5432`. The reverse proxy (or the frontend) joins that network to reach the backend; from another compose file, `networks: { labyrinth: { external: true } }`. Run `psql` and `pg_dump` inside the container: `docker compose -f compose.prod.yaml exec postgres psql -U labyrinth`. The backend has a 65,536 open-file limit (one per event stream) and 20 s to shut down. Its healthcheck marks it unhealthy when `/health` fails (Postgres unreachable included) but doesn't restart it: watch `/health` from outside and alert. `.dockerignore` keeps `.env` out of the image build. `config.toml` is baked into the image (`/config.toml`), so a change to it needs `up -d --build`, not just a restart.
+`DATABASE_URL` and `PORT` in `backend/.env` are ignored there (the file sets them for the container). Nothing is published on the host: both containers are on the Docker network `labyrinth`, where the backend is `http://backend:3000` and Postgres `postgres:5432`. The reverse proxy (or the frontend) joins that network to reach the backend: as a service in the same root file, or from another compose file with `networks: { labyrinth: { external: true } }`. Run `psql` and `pg_dump` inside the container: `dc exec postgres psql -U labyrinth`. The backend has a 65,536 open-file limit (one per event stream) and 20 s to shut down. Its healthcheck marks it unhealthy when `/health` fails (Postgres unreachable included) but doesn't restart it: watch `/health` from outside and alert. `.dockerignore` keeps `.env` out of the image build. `config.toml` is baked into the image (`/config.toml`), so a change to it needs `up -d --build`, not just a restart.
 
 Whatever reverse proxy sits in front of the backend (nginx, Caddy, a tunnel) must:
 

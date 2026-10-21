@@ -1,12 +1,15 @@
-# Production: the backend and its Postgres on one Docker host.
+# Production: the backend and its Postgres on one Docker host. Run from the
+# repository root:
 #
-#   docker compose -f compose.prod.yaml up -d --build     # start, or deploy a new version
-#   docker compose -f compose.prod.yaml logs -f backend   # one line per request
-#   docker compose -f compose.prod.yaml ps                # health of both
+#   docker compose -f compose.prod.yaml --env-file backend/.env up -d --build   # start, or deploy a new version
+#   docker compose -f compose.prod.yaml --env-file backend/.env logs -f backend # one line per request
+#   docker compose -f compose.prod.yaml --env-file backend/.env ps              # health of both
 #
-# Secrets come from .env next to this file (see .env.example), plus
-# POSTGRES_PASSWORD (URL-safe: openssl rand -hex 24). DATABASE_URL and PORT in
-# .env are ignored: they're set below for the container.
+# Secrets come from backend/.env (see backend/.env.example), plus
+# POSTGRES_PASSWORD (URL-safe: openssl rand -hex 24). --env-file is what fills
+# in ${POSTGRES_PASSWORD} below; without it compose stops with "set
+# POSTGRES_PASSWORD". DATABASE_URL and PORT in backend/.env are ignored:
+# they're set below for the container.
 #
 # Both services restart whenever they exit (a crash, a lost instance lock, the
 # host rebooting), with no retry cap: a backend that starts while the old
@@ -20,9 +23,10 @@
 # Nothing is published on the host: both live on the "labyrinth" network,
 # where the backend is http://backend:3000 and Postgres postgres:5432. A
 # reverse proxy or the frontend joins that network to reach the backend
-# (another compose file: networks: { labyrinth: { external: true } }).
+# (as a service in this file, or from another compose file: networks:
+# { labyrinth: { external: true } }).
 # psql and pg_dump run inside the Postgres container:
-#   docker compose -f compose.prod.yaml exec postgres psql -U labyrinth
+#   docker compose -f compose.prod.yaml --env-file backend/.env exec postgres psql -U labyrinth
 name: labyrinth-26-prod
 
 # Every container's logs, rotated: 100 MB files, the oldest deleted once there
@@ -51,7 +55,7 @@ services:
     logging: *logging
     environment:
       POSTGRES_USER: labyrinth
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in backend/.env and pass --env-file backend/.env}
       POSTGRES_DB: labyrinth
     networks: [labyrinth]
     volumes:
@@ -63,10 +67,10 @@ services:
       retries: 15
 
   backend:
-    build: .
+    build: ./backend
     restart: unless-stopped
     logging: *logging
-    env_file: .env
+    env_file: backend/.env
     environment:
       DATABASE_URL: postgres://labyrinth:${POSTGRES_PASSWORD}@postgres:5432/labyrinth?sslmode=disable
       PORT: "3000"

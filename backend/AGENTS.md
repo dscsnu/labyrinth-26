@@ -82,8 +82,7 @@ backend/
   main.go                   entry point: subcommands, startup and shutdown order
   config.toml               every tunable value (§10)
   AGENTS.md, README.md
-  compose.yaml              dev Postgres
-  compose.prod.yaml         production: backend + Postgres, restart policy (README, "Deploying")
+  compose.yaml              dev Postgres (production's compose.prod.yaml is at the repository root: README, "Deploying")
   Dockerfile, .dockerignore the backend image (.env never enters the build)
   cmd/docaudit/             checks every declaration has a doc comment (§11)
   cmd/loadtest/             10k-player load test against a bench database
