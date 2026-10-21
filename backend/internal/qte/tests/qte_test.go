@@ -444,3 +444,43 @@ func TestConcurrentStarts(t *testing.T) {
 		t.Fatalf("%d of %d concurrent starts opened a QTE, want 1", ok, n)
 	}
 }
+
+// TestSeededDrafts checks the dev seed's quizzes: drafts 1–4, one per
+// powerup, each valid; an admin's next QTE gets id 5 (the sequence moved
+// past them); and a rerun of the seed refreshes a seeded draft but leaves
+// one that has run alone.
+func TestSeededDrafts(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	pgtest.Must(0, f.db.Seed2026(ctx))
+	f.restart(t)
+	all := f.store.List()
+	if len(all) != 4 {
+		t.Fatalf("%d seeded QTEs, want 4", len(all))
+	}
+	kinds := map[string]bool{}
+	for _, q := range all {
+		if q.Status(start) != qte.StatusDraft || q.CreatedBy != nil || q.ID < 1 || q.ID > 4 {
+			t.Fatalf("seeded QTE %+v", q)
+		}
+		kinds[q.Powerup] = true
+	}
+	if len(kinds) != 4 {
+		t.Fatalf("seeded powerups %v, want one of each", kinds)
+	}
+	if q := pgtest.Must(f.store.Create(ctx, f.admin, draft(), false)); q.ID != 5 {
+		t.Fatalf("the first admin QTE got id %d, want 5", q.ID)
+	}
+
+	pgtest.Must(f.store.Start(ctx, 1))
+	if _, err := f.db.Pool().Exec(ctx, "UPDATE qte SET question = 'Changed' WHERE id IN (1, 2)"); err != nil {
+		t.Fatal(err)
+	}
+	pgtest.Must(0, f.db.Seed2026(ctx))
+	f.restart(t)
+	ran, _ := f.store.ByID(1)
+	fresh, _ := f.store.ByID(2)
+	if ran.Quiz.Question != "Changed" || ran.StartedAt == nil || fresh.Quiz.Question == "Changed" {
+		t.Fatalf("after a rerun: run %q (started %v), draft %q", ran.Quiz.Question, ran.StartedAt, fresh.Quiz.Question)
+	}
+}

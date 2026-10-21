@@ -32,7 +32,7 @@ Config values appear with their key: **30 s** (`qte.answer_window`), **5 min** (
 | **Public view** | A QTE as players see it (`View`): without its answer while open; with it (`correct_option`) only in the closing event. Built in one place, `publicView`. |
 
 ## The flow
-1. **Write.** An admin writes a quiz (`POST /api/admin/qtes`, the admin use case calling `Create`): a draft to launch later, or started at once. Placeholder drafts are also seeded (`seeds/dev_2025_qtes.sql`).
+1. **Write.** An admin writes a quiz (`POST /api/admin/qtes`, the admin use case calling `Create`): a draft to launch later, or started at once. Placeholder drafts are also seeded (`seeds/2026_qtes.sql`, run by `Seed2026`: ids 1–4, one per powerup, which a rerun refreshes only while still unstarted seeded drafts).
 2. **Start.** Starting a draft (`Start`) or creating one started sets `started_at` = now and `ends_at` = now + its window. Every stream gets the game-wide `qte` event, type `started`: the quiz without its answer.
 3. **Answer.** Teams answer through teamstate (`POST /api/teams/me/state/qte/{qte_id}/answer`).
 4. **Close.** At `ends_at` the server closes it with nobody acting: the timer broadcasts `closed`, the quiz with its answer revealed. An admin may end it sooner (`End`: `ends_at` = now, same event). From then on the resource is `null` (on connect and `GET /api/qte`) until the next QTE starts.
@@ -208,3 +208,4 @@ The admin routes (write, start, end, list with answers and stats) are in [`inter
 | `TestReadsWithDatabaseClosed` | `List`, `ByID`, `Public`, `Snapshot` with the database closed; a write fails |
 | `TestReconcile` | a draft started by hand in Postgres: `Start` fails, memory reloads, `resync` with it open |
 | `TestConcurrentStarts` | 8 drafts started at once: exactly one opens |
+| `TestSeededDrafts` | the dev seed: drafts 1–4, one per powerup; an admin's next QTE is id 5; a rerun refreshes a seeded draft, not one that has run |
