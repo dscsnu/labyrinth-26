@@ -28,7 +28,7 @@ Config values appear with their key: **20** (`admin.user_search_limit`).
 
 ## The flow
 1. **Look:** `GET /api/admin/teams` lists every team with its game at a glance (`/admin` filters to knocked-out teams).
-2. **Act on a team:** revive it (health back, a fresh attack clock), reset its cooldowns, remove a member (naming a new leader when removing the leader), or delete it with all its progress.
+2. **Act on a team:** revive it (health back, a fresh attack clock), reset its cooldowns, grant it a powerup, remove a member (naming a new leader when removing the leader), or delete it with all its progress.
 3. **Act on a user:** find them by email (`GET /api/admin/users?email=`), then give them `PLAYER`, `HELPER` or `ADMIN`.
 
 **Why one use case for every admin route.** The routes were spread over `teams` and `teamstate` (each had an `AdminRoutes`). One place makes the admin surface easy to audit, gives it one error table and one log line shape, and lets a route combine use cases (the overview joins teams with team state) without either importing the other (AGENTS.md §4).
@@ -42,7 +42,7 @@ The package comment.
 ### `read.go`
 - **Interfaces** (AGENTS.md §4), filled by `server.Build` with the real stores:
   - `Teams`: `All`, `ByID`, `RemoveMember`, `Delete` (`*teams.Store`)
-  - `TeamState`: `TeamView`, `Revive`, `ResetCooldowns` (`*teamstate.Store`)
+  - `TeamState`: `TeamView`, `Revive`, `ResetCooldowns`, `GrantPowerup` (`*teamstate.Store`)
   - `Users`: `Search`, `SetRole` (`*user.Users`)
 - **`Rules`**: `UserSearchLimit` (`admin.user_search_limit`).
 - **`Admin`**, **`New(t, st, u, rules)`**.
@@ -59,6 +59,7 @@ Each write is one call to the owner:
 | `DeleteTeam(ctx, teamID)` | `teams.Delete` | nothing |
 | `Revive(ctx, teamID)` | `teamstate.Revive` | nothing |
 | `ResetCooldowns(ctx, teamID)` | `teamstate.ResetCooldowns` | nothing |
+| `GrantPowerup(ctx, teamID, kind)` | `teamstate.GrantPowerup` | nothing |
 | `SetRole(ctx, adminID, userID, role)` | `user.SetRole` | `ErrCannotChangeOwnRole` when `adminID == userID`, checked first (the user use case isn't called) |
 
 ### `api.go`
@@ -73,13 +74,14 @@ Each write is one call to the owner:
   | `teams.ErrNewLeaderRequired` | 409 | `new_leader_required` |
   | `teams.ErrInvalidNewLeader` | 409 | `invalid_new_leader` |
   | `teamstate.ErrNotInGame` | 409 | `not_in_game` |
+  | `teamstate.ErrUnknownPowerup` | 404 | `unknown_powerup` |
   | `user.ErrUserNotFound` | 404 | `user_not_found` (401 on `GET /api/me`, where it's the caller's own token) |
   | `user.ErrInvalidRole` | 400 | `invalid_role` |
   | `ErrCannotChangeOwnRole` | 409 | `cannot_change_own_role` |
 
 - **`teamID(w, r)`**: `{team_id}` must match `teamIDPattern` (6 digits, teams' format), else `400 invalid_team_id`. Every team route checks it first.
 - **`userID(w, raw, what)`**: a UUID, else `400 invalid_user_id` naming the field.
-- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
+- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `grantPowerup` (`{kind}` through `teamstate.PowerupByID`, else `404 unknown_powerup`), `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
 
 ## Data model
 **Memory:** none. **Postgres:** none of its own; the owners' tables (see their READMEs).
@@ -95,6 +97,7 @@ Each write is one call to the owner:
 | `cooldown_class` | string or null | the spell class it can't cast now |
 | `qr_cooldowns` | array | the waypoints it can't scan yet, each with `until` |
 | `cast_count` | int | how many spells it has cast |
+| `powerups` | object | the powerups it holds and the ones running, as `team_state.powerups` |
 
 ## The write-through
 Doesn't apply: admin persists nothing. Each owner runs its own write-through (teams' `RemoveMember` and `Delete`, teamstate's `Revive` and `ResetCooldowns`; user's `SetRole` writes Postgres directly).
@@ -107,6 +110,7 @@ Doesn't apply: admin persists nothing. Each owner runs its own write-through (te
 | DELETE | `/api/admin/teams/{team_id}/members/{user_id}[?new_leader=<user id>]` | none | `200` the team after the removal |
 | POST | `/api/admin/teams/{team_id}/revive` | none | `200` the team's state |
 | POST | `/api/admin/teams/{team_id}/cooldowns/reset` | none | `200` the team's state |
+| POST | `/api/admin/teams/{team_id}/powerups/{kind}` | none; `kind` is `damage_multiplier`, `heart`, `short_qr_cooldown` or `instant_cast` | `200` `{"granted", "state"}`: `granted` false when the team already held one (wasted, nothing changes) |
 | GET | `/api/admin/users[?email=<part>]` | none | `200` `[User]`, at most **20** (`admin.user_search_limit`), by email |
 | PUT | `/api/admin/users/{user_id}/role` | `{"role": "PLAYER" \| "HELPER" \| "ADMIN"}` | `200` the user |
 
@@ -130,14 +134,17 @@ Events: whatever the owner publishes (see [`internal/server/README.md`, "What pu
 ## Rules and cases
 In validation order, per route (after the guard: `401`, then `403 not_admin`).
 
-**Team routes** (`DELETE …/{team_id}`, `…/members/{user_id}`, `…/revive`, `…/cooldowns/reset`):
+**Team routes** (`DELETE …/{team_id}`, `…/members/{user_id}`, `…/revive`, `…/cooldowns/reset`, `…/powerups/{kind}`):
 
 | Case | Result |
 |---|---|
 | `team_id` isn't 6 digits | `400 invalid_team_id` |
 | member route: `user_id` or `new_leader` isn't a UUID | `400 invalid_user_id` |
+| powerup route: `kind` isn't one of the four | `404 unknown_powerup` |
 | no such team | `404 team_not_found` |
-| revive / reset on a team not `IN_GAME` | `409 not_in_game` |
+| revive / reset / powerup on a team not `IN_GAME` | `409 not_in_game` |
+| powerup: the team already holds one of that kind | `200`, `granted: false`: wasted, nothing changed or published |
+| powerup: granted | `200`, `granted: true`; the members get `team_state` (`powerup_granted`). Allowed while knocked out |
 | removal rules | as `teams.RemoveMember`: `not_a_member`, `last_member`, `new_leader_required`, `invalid_new_leader` |
 | delete | always allowed, any status; the members get `no_team` (`team_deleted`) |
 
@@ -173,8 +180,8 @@ Nothing to recover: a failed owner write reconciles in the owner. Postgres down:
 ## Tests
 | Test | File | Covers |
 |---|---|---|
-| `TestTeamsOverview` | `tests/admin_test.go` | a lobby team's game is null; a started team's comes from its team view (fakes) |
+| `TestTeamsOverview` | `tests/admin_test.go` | a lobby team's game is null; a started team's comes from its team view (fakes), powerups included |
 | `TestSetRoleNotOwn` | `tests/admin_test.go` | an admin's own role is refused without calling the user use case; someone else's is set |
 | `TestSearchLimit` | `tests/admin_test.go` | a search passes `admin.user_search_limit` |
 
-End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles` (see the server README's Tests).
+End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestPowerupsOverHTTP`, `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles` (see the server README's Tests).
