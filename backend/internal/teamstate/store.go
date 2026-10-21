@@ -407,6 +407,9 @@ func (s *Store) schedule(e *entry, teamID string, st *State) {
 	if len(st.QRCooldowns) > 0 && (!ok || st.QRCooldowns[0].Until.Before(next)) {
 		next, ok = st.QRCooldowns[0].Until, true // the soonest QR cooldown to end
 	}
+	if w := st.Powerups.ShortQRUntil; !w.IsZero() && (!ok || w.Before(next)) {
+		next, ok = w, true // a short_qr_cooldown powerup's window ends
+	}
 	if !ok {
 		return
 	}
@@ -524,4 +527,13 @@ const (
 	// Revived: an admin revived the team: health is back to game.health and
 	// the current boss's attack clock starts again.
 	Revived live.EventType = "revived"
+	// PowerupGranted: the team earned a powerup (powerups.held gained it).
+	PowerupGranted live.EventType = "powerup_granted"
+	// PowerupActivated: the leader activated a damage_multiplier, heart or
+	// short_qr_cooldown (powerups.held lost it; powerups.active gained it,
+	// or health went up). An instant cast is a spell_cast or boss_defeated.
+	PowerupActivated live.EventType = "powerup_activated"
+	// PowerupEnded: by itself, with nobody acting, a short_qr_cooldown
+	// powerup's window ended (powerups.active lost it).
+	PowerupEnded live.EventType = "powerup_ended"
 )

@@ -87,7 +87,39 @@ var (
 	// ErrExpiredQR means the scan's token is signed and well-formed but
 	// outside its validity window, so the scan is refused.
 	ErrExpiredQR = errors.New("qr token expired")
+	// ErrUnknownPowerup means no powerup kind has that name.
+	ErrUnknownPowerup = errors.New("unknown powerup")
+	// ErrPowerupNotHeld means the team doesn't hold a powerup of that kind
+	// (never earned, or already used: a resent activation lands here).
+	ErrPowerupNotHeld = errors.New("your team doesn't hold this powerup")
+	// ErrPowerupActive means a powerup of that kind is still active (an
+	// armed damage multiplier, a running short QR cooldown): it can't be
+	// activated again until it ends.
+	ErrPowerupActive = errors.New("this powerup is already active")
+	// ErrFullHealth means the team's health is at game.health: a heart
+	// would do nothing.
+	ErrFullHealth = errors.New("your team is at full health")
+	// ErrUnknownPattern means the waypoints of an instant cast make up no
+	// pattern.
+	ErrUnknownPattern = errors.New("those waypoints make no pattern")
+	// ErrPatternLocked means an instant cast's pattern is bigger than the
+	// team has unlocked (game.locked_pattern_points, until it has defeated
+	// game.unlock_after_bosses bosses).
+	ErrPatternLocked = errors.New("this pattern is locked until your team defeats more bosses")
+	// errNeedsPattern means Activate was asked for an instant_cast, which
+	// needs a pattern: InstantCast casts it. The API never does this.
+	errNeedsPattern = errors.New("an instant_cast is activated by InstantCast, with a pattern")
 )
+
+// GrantResult is what GrantPowerup did: whether the team got the powerup
+// (false: it already held one, so this one is wasted) and its state.
+type GrantResult struct {
+	// Granted reports that the team now holds the powerup because of this
+	// grant; false means it already held one of that kind.
+	Granted bool `json:"granted"`
+	// State is the team's state after the grant.
+	State View `json:"state"`
+}
 
 // Scan outcomes, reported in ScanResult.Outcome.
 const (
@@ -339,7 +371,7 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	if isComplete {
 		res.Outcome = OutcomePatternCompleted
 		res.Pattern = s.atlas.WaypointIDs(set)
-		cast, typ, finished = s.applyCast(cur, &next, completed, userID, now)
+		cast, typ, finished = s.applyCast(cur, &next, completed, userID, now, false)
 		res.AlreadyCompleted = cast.AlreadyCompleted
 	}
 
@@ -369,17 +401,25 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 // of a write's build step: the pattern and its shape are completed, the
 // selection and stack purged, its damage dealt to the current boss (deal),
 // the cast appended to the log (copy-on-write: never to cur's slice) and its
-// waypoints put on QR cooldown. It returns the cast, the event type
-// (SpellCast, or BossDefeated) and whether it defeated the last boss (the
-// caller then calls Rules.OnFinished once unlocked).
-func (s *Store) applyCast(cur, next *State, p int, by uuid.UUID, now time.Time) (Cast, live.EventType, bool) {
+// waypoints put on QR cooldown. An armed damage_multiplier multiplies its
+// damage and is used up; a running short_qr_cooldown shortens its QR
+// cooldown. instant marks a cast by an instant_cast powerup. It returns the
+// cast, the event type (SpellCast, or BossDefeated) and whether it defeated
+// the last boss (the caller then calls Rules.OnFinished once unlocked).
+func (s *Store) applyCast(cur, next *State, p int, by uuid.UUID, now time.Time, instant bool) (Cast, live.EventType, bool) {
 	pat := s.atlas.Pattern(p)
 	next.Patterns = cur.Patterns.With(p)
 	next.Shapes = cur.Shapes.With(pat.Shape)
 	next.Selection = Selection{}
 	next.Stack = NewStack(s.rules.MaxPatternPoints)
-	c := Cast{Pattern: p, By: by, At: now, AlreadyCompleted: cur.Patterns.Has(p)}
-	next.Boss, c.Dealt, c.Boss, c.DefeatedBoss = deal(cur.Boss, pat.Spell.Damage, 1, now, s.bosses)
+	c := Cast{Pattern: p, By: by, At: now, AlreadyCompleted: cur.Patterns.Has(p), Instant: instant,
+		ShortQR: now.Before(cur.Powerups.ShortQRUntil)}
+	factor := 1.0
+	if cur.Powerups.MultiplierArmed {
+		factor, c.Boosted = s.rules.PowerupMultiplier, true
+		next.Powerups.MultiplierArmed = false // the log grows past its activation length
+	}
+	next.Boss, c.Dealt, c.Boss, c.DefeatedBoss = deal(cur.Boss, pat.Spell.Damage, factor, now, s.bosses)
 	typ := SpellCast
 	if c.DefeatedBoss {
 		typ = BossDefeated
@@ -444,17 +484,19 @@ func (s *Store) PublishTeam(teamID string) {
 }
 
 // catchUp applies whatever has fallen due on teamID's state by itself, and
-// returns the current state: boss attacks, and QR cooldowns that have ended.
+// returns the current state: boss attacks, QR cooldowns that have ended, and
+// the end of a short_qr_cooldown powerup's window.
 // The caller holds e.mu. Every write calls it before validating, and so does
 // the timer, so a change is never lost to a late timer or a write that got
 // the lock first.
 //
-// Both are memory-only changes (AGENTS.md §6): health is derived from the
-// stored phase (PhaseStart, PhaseHealth) and the clock, and QR cooldowns
-// from the cast log and the clock, so there's nothing to persist, and Load
-// reproduces them exactly. It still bumps the version and publishes one
-// event: boss_attacked (knocked_out when health reaches 0) if an attack fell
-// due, else qr_cooldown_ended.
+// All are memory-only changes (AGENTS.md §6): health is derived from the
+// stored phase (PhaseStart, PhaseHealth) and the clock, QR cooldowns from the
+// cast log and the clock, and the window from team_powerup.activated_at and
+// the clock, so there's nothing to persist, and Load reproduces them
+// exactly. It still bumps the version and publishes one event, the first
+// that applies of: knocked_out (an attack brought health to 0),
+// boss_attacked, powerup_ended, qr_cooldown_ended.
 func (s *Store) catchUp(e *entry, teamID string) *State {
 	cur := e.cur.Load()
 	now := s.now()
@@ -462,7 +504,9 @@ func (s *Store) catchUp(e *entry, teamID string) *State {
 	attacked := p.Attacks != cur.Boss.Attacks || p.Health != cur.Boss.Health
 	cooldowns := cur.QRCooldowns
 	ended := len(cooldowns) > 0 && !now.Before(cooldowns[0].Until) // soonest first
-	if !attacked && !ended {
+	window := cur.Powerups.ShortQRUntil
+	windowEnded := !window.IsZero() && !now.Before(window)
+	if !attacked && !ended && !windowEnded {
 		return cur // nothing fell due
 	}
 
@@ -471,6 +515,9 @@ func (s *Store) catchUp(e *entry, teamID string) *State {
 	next.Boss = p
 	if ended {
 		next.QRCooldowns = s.qrCooldowns(cur.Casts, cur.CooldownsReset, now)
+	}
+	if windowEnded {
+		next.Powerups.ShortQRUntil = time.Time{}
 	}
 	next.Version = cur.Version.Next(s.rules.Epoch)
 	// 4. persist: none, memory-only (see above)
@@ -483,6 +530,8 @@ func (s *Store) catchUp(e *entry, teamID string) *State {
 		typ = KnockedOut
 	case attacked:
 		typ = BossAttacked
+	case windowEnded:
+		typ = PowerupEnded
 	}
 	s.publish(e, teamID, &next, typ)
 	return &next
@@ -615,4 +664,221 @@ func (s *Store) TeamDeleted(teamID string) {
 		e.stopTimer = nil
 	}
 	e.closed = true
+}
+
+// GrantPowerup gives teamID a powerup of kind: what an admin does now, and a
+// quiz will do. A team holds at most one of each kind, so if it already holds
+// one the grant is wasted: Granted false, and nothing written or published.
+// ErrUnknownPowerup for an unknown kind, ErrTeamNotFound if there's no such
+// team, ErrNotInGame unless it's IN_GAME. A knocked-out team can be granted
+// one.
+func (s *Store) GrantPowerup(ctx context.Context, teamID string, kind Powerup) (GrantResult, error) {
+	// 2. validate, before 1. lock: an IN_GAME team's status never goes back
+	if kind >= powerupKinds {
+		return GrantResult{}, ErrUnknownPowerup
+	}
+	t, ok := s.teams.ByID(teamID)
+	if !ok {
+		return GrantResult{}, ErrTeamNotFound
+	}
+	if t.Status != teams.InGame {
+		return GrantResult{}, ErrNotInGame
+	}
+
+	// 1. lock
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+	cur := s.catchUp(e, teamID)
+
+	// 2. validate (state): already held is a no-op, not an error
+	if cur.Powerups.Held.Has(kind) {
+		return GrantResult{State: s.view(teamID, *cur)}, nil
+	}
+
+	// 3. build
+	next := *cur
+	next.Powerups.Held = cur.Powerups.Held.With(kind)
+	next.Version = cur.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.upsertPowerupHeld(ctx, teamID, kind.ID())
+	}); err != nil {
+		return GrantResult{}, s.reconcile(e, teamID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish
+	s.publish(e, teamID, &next, PowerupGranted)
+	return GrantResult{Granted: true, State: s.view(teamID, next)}, nil
+}
+
+// Activate uses userID's team's held powerup of kind: a damage_multiplier
+// arms the next cast, a heart gives back Rules.PowerupHeart health (never
+// above Rules.Health; the attack clock doesn't move), a short_qr_cooldown
+// starts its Rules.ShortQRWindow. Only the leader activates. Refused, in
+// order: ErrUnknownPowerup, ErrNotInTeam, ErrNotInGame, ErrNotLeader,
+// ErrKnockedOut, ErrPowerupNotHeld, ErrPowerupActive (the same kind still
+// running), ErrFullHealth (a heart at full health). An instant_cast is
+// InstantCast's.
+func (s *Store) Activate(ctx context.Context, userID uuid.UUID, kind Powerup) (View, error) {
+	// 2. validate, before 1. lock: the kind and the team need no lock
+	if kind >= powerupKinds {
+		return View{}, ErrUnknownPowerup
+	}
+	if kind == PowerupInstantCast {
+		return View{}, errNeedsPattern
+	}
+	t, err := s.inGameTeam(userID)
+	if err != nil {
+		return View{}, err
+	}
+
+	// 1. lock, then 2. validate membership again under it: an admin may
+	// have removed the user since the lookup.
+	e := s.lockTeam(t.ID)
+	defer e.mu.Unlock()
+	if !s.isMember(t.ID, userID) {
+		return View{}, ErrNotInTeam
+	}
+	cur := s.catchUp(e, t.ID)
+	now := s.now()
+
+	// 2. validate (state)
+	if !s.isLeader(t.ID, userID) {
+		return View{}, ErrNotLeader
+	}
+	if cur.Boss.KnockedOut() {
+		return View{}, ErrKnockedOut
+	}
+	if !cur.Powerups.Held.Has(kind) {
+		return View{}, ErrPowerupNotHeld
+	}
+	switch {
+	case kind == PowerupDamageMultiplier && cur.Powerups.MultiplierArmed,
+		kind == PowerupShortQRCooldown && now.Before(cur.Powerups.ShortQRUntil):
+		return View{}, ErrPowerupActive
+	case kind == PowerupHeart && cur.Boss.Health >= s.rules.Health:
+		return View{}, ErrFullHealth
+	}
+
+	// 3. build
+	next := *cur
+	next.Powerups.Held = cur.Powerups.Held.Without(kind)
+	var activatedCasts *int
+	switch kind {
+	case PowerupDamageMultiplier:
+		next.Powerups.MultiplierArmed = true
+		n := len(cur.Casts) // armed while the log stays this long
+		activatedCasts = &n
+	case PowerupHeart:
+		// More phase health, from the same phase start: the attacks so far
+		// still count, so health rises by heal and the clock doesn't move.
+		// Safe for the knockout cap: the team isn't knocked out, so fewer
+		// attacks than the cap have happened, and a higher PhaseHealth only
+		// raises it.
+		heal := min(s.rules.PowerupHeart, s.rules.Health-cur.Boss.Health)
+		next.Boss.PhaseHealth += heal
+		next.Boss.Health += heal
+	case PowerupShortQRCooldown:
+		next.Powerups.ShortQRUntil = now.Add(s.rules.ShortQRWindow)
+	}
+	next.Version = cur.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		if kind == PowerupHeart {
+			return s.db.useHeart(ctx, t.ID, now, next.Boss)
+		}
+		return s.db.updatePowerupActivated(ctx, t.ID, kind.ID(), now, activatedCasts)
+	}); err != nil {
+		return View{}, s.reconcile(e, t.ID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish, and re-arm the timer: a short_qr_cooldown's window ends
+	// at its own time
+	s.publish(e, t.ID, &next, PowerupActivated)
+	s.schedule(e, t.ID, &next)
+	return s.view(t.ID, next), nil
+}
+
+// InstantCast uses userID's team's held instant_cast powerup: the pattern
+// made of waypointIDs is cast at once, with no scans, whatever the class and
+// QR cooldowns; then it's a cast like any other (applyCast: damage, × an
+// armed multiplier, last_cast, cooldowns, a boss defeat or the team
+// finishing; the selection and stack are purged). Only the leader casts.
+// Refused, in order: ErrUnknownWaypoint, ErrUnknownPattern, ErrNotInTeam,
+// ErrNotInGame, ErrNotLeader, ErrKnockedOut, ErrPowerupNotHeld,
+// ErrPatternLocked (bigger than the team has unlocked).
+func (s *Store) InstantCast(ctx context.Context, userID uuid.UUID, waypointIDs []string) (View, error) {
+	// 2. validate, before 1. lock: content and the team need no lock
+	set, err := s.atlas.SetOf(waypointIDs)
+	if err != nil {
+		return View{}, ErrUnknownWaypoint
+	}
+	p, ok := s.atlas.PatternFor(set)
+	if !ok {
+		return View{}, ErrUnknownPattern
+	}
+	t, err := s.inGameTeam(userID)
+	if err != nil {
+		return View{}, err
+	}
+	// A cast that defeats the last boss finishes the team, once the lock
+	// below is released (Rules.OnFinished: no lock held while teams works).
+	var finished bool
+	defer func() {
+		if finished && s.rules.OnFinished != nil {
+			s.rules.OnFinished(t.ID)
+		}
+	}()
+
+	// 1. lock, then 2. validate membership again under it: an admin may
+	// have removed the user since the lookup.
+	e := s.lockTeam(t.ID)
+	defer e.mu.Unlock()
+	if !s.isMember(t.ID, userID) {
+		return View{}, ErrNotInTeam
+	}
+	cur := s.catchUp(e, t.ID)
+	now := s.now()
+
+	// 2. validate (state): deliberately no class or QR cooldown check
+	if !s.isLeader(t.ID, userID) {
+		return View{}, ErrNotLeader
+	}
+	if cur.Boss.KnockedOut() {
+		return View{}, ErrKnockedOut
+	}
+	if !cur.Powerups.Held.Has(PowerupInstantCast) {
+		return View{}, ErrPowerupNotHeld
+	}
+	if s.atlas.Pattern(p).Waypoints.Len() > s.unlockedPoints(*cur) {
+		return View{}, ErrPatternLocked
+	}
+
+	// 3. build
+	next := *cur
+	next.Powerups.Held = cur.Powerups.Held.Without(PowerupInstantCast)
+	cast, typ, last := s.applyCast(cur, &next, p, userID, now, true)
+	next.Version = cur.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.insertInstantCast(ctx, t.ID, s.atlas.Pattern(p).ID, cast, next.Boss)
+	}); err != nil {
+		return View{}, s.reconcile(e, t.ID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	finished = last
+	// 6. publish, and re-arm the timer: a defeat starts the next boss's
+	// clock, and the cast's QR cooldowns end at their own time
+	s.publish(e, t.ID, &next, typ)
+	s.schedule(e, t.ID, &next)
+	return s.view(t.ID, next), nil
 }

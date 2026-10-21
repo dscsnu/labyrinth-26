@@ -328,3 +328,75 @@ func (d db) upsertCooldownsReset(ctx context.Context, teamID string, casts int) 
 		ON CONFLICT (team_id) DO UPDATE SET cooldowns_reset_casts = EXCLUDED.cooldowns_reset_casts`, teamID, casts)
 	return err
 }
+
+// upsertPowerupHeld records that teamID now holds a powerup of kind: one
+// INSERT INTO team_powerup … ON CONFLICT (team_id, kind) DO UPDATE SET held =
+// true WHERE it wasn't held. Exactly one row (execOne): memory said the team
+// didn't hold one, so Postgres must agree.
+func (d db) upsertPowerupHeld(ctx context.Context, teamID, kind string) error {
+	return execOne(ctx, d.pool, `
+		INSERT INTO team_powerup (team_id, kind, held) VALUES ($1, $2, true)
+		ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT team_powerup.held`, teamID, kind)
+}
+
+// updatePowerupActivated uses up teamID's held powerup of kind at at: one
+// UPDATE team_powerup SET held = false, activated_at, activated_casts WHERE
+// it's held. Exactly one row (execOne): memory said it was held.
+// activatedCasts is the cast log's length for a damage_multiplier, nil for
+// any other kind.
+func (d db) updatePowerupActivated(ctx context.Context, teamID, kind string, at time.Time, activatedCasts *int) error {
+	return activatePowerup(ctx, d.pool, teamID, kind, at, activatedCasts)
+}
+
+// useHeart uses up teamID's heart at at and writes the healed progress p, in
+// one transaction, in order:
+//  1. UPDATE team_powerup (activatePowerup): exactly one row
+//  2. UPSERT team_boss (upsertBoss): the higher phase_health
+func (d db) useHeart(ctx context.Context, teamID string, at time.Time, p BossProgress) error {
+	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
+		if err := activatePowerup(ctx, tx, teamID, PowerupHeart.ID(), at, nil); err != nil {
+			return err
+		}
+		return upsertBoss(ctx, tx, teamID, p)
+	})
+}
+
+// insertInstantCast logs a cast by an instant_cast powerup, in one
+// transaction: UPDATE team_powerup (activatePowerup, exactly one row), then
+// insertCastRows. No team_scan row: nothing was scanned.
+func (d db) insertInstantCast(ctx context.Context, teamID string, patternID int, c Cast, p BossProgress) error {
+	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
+		if err := activatePowerup(ctx, tx, teamID, PowerupInstantCast.ID(), c.At, nil); err != nil {
+			return err
+		}
+		return insertCastRows(ctx, tx, teamID, patternID, c, p)
+	})
+}
+
+// activatePowerup is the one statement that uses up a held powerup, on the
+// pool or inside a transaction: UPDATE team_powerup SET held = false,
+// activated_at = at, activated_casts WHERE team_id, kind AND held. Exactly one
+// row (execOne).
+func activatePowerup(ctx context.Context, q execer, teamID, kind string, at time.Time, activatedCasts *int) error {
+	return execOne(ctx, q, `
+		UPDATE team_powerup SET held = false, activated_at = $3, activated_casts = $4
+		WHERE team_id = $1 AND kind = $2 AND held`, teamID, kind, at, activatedCasts)
+}
+
+// execer is what runs a statement: the pool or a transaction.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// execOne runs a statement that must affect exactly one row. Anything else
+// means memory and Postgres disagree, which the caller reconciles.
+func execOne(ctx context.Context, q execer, sql string, args ...any) error {
+	tag, err := q.Exec(ctx, sql, args...)
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n != 1 {
+		return fmt.Errorf("expected 1 row affected, got %d: %s", n, sql)
+	}
+	return nil
+}
