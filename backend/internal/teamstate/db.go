@@ -27,6 +27,15 @@ type teamRows struct {
 	stack     []scanRow     // the stack: newest scans after the selection, oldest first
 	casts     []castRow     // every team_cast row, oldest first
 	boss      *bossRow      // team_boss, if the team has a row
+	powerups  []powerupRow  // team_powerup rows, one per kind ever held
+}
+
+// powerupRow is a team_powerup row: one kind of powerup for one team.
+type powerupRow struct {
+	kind           string
+	held           bool
+	activatedAt    *time.Time // NULL: never activated
+	activatedCasts *int       // damage_multiplier only: the cast log's length at activation
 }
 
 // bossRow is a team_boss row: the team's progress through the bosses and
@@ -49,6 +58,9 @@ type castRow struct {
 	dealt            int
 	bossSerial       int // 0 for NULL
 	defeatedBoss     bool
+	instant          bool
+	boosted          bool
+	shortQR          bool // team_cast.short_qr_cooldown
 }
 
 // selectionRow is a team_selection row.
@@ -107,7 +119,8 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 
 	// Every cast per team, oldest first: the cast log.
 	rows, err = d.pool.Query(ctx, `
-		SELECT team_id, pattern_id, cast_by, cast_at, already_completed, dealt, COALESCE(boss_serial, 0), defeated_boss
+		SELECT team_id, pattern_id, cast_by, cast_at, already_completed, dealt, COALESCE(boss_serial, 0), defeated_boss,
+		       instant, boosted, short_qr_cooldown
 		FROM team_cast`+filter+`
 		ORDER BY team_id, id`, teamID)
 	if err != nil {
@@ -115,7 +128,7 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 	}
 	var cast castRow
 	if _, err := pgx.ForEachRow(rows, []any{&id, &cast.patternID, &cast.castBy, &cast.castAt, &cast.alreadyCompleted,
-		&cast.dealt, &cast.bossSerial, &cast.defeatedBoss}, func() error {
+		&cast.dealt, &cast.bossSerial, &cast.defeatedBoss, &cast.instant, &cast.boosted, &cast.shortQR}, func() error {
 		t := get(id)
 		t.casts = append(t.casts, cast)
 		return nil
@@ -134,6 +147,21 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 		&boss.phaseHealth, &boss.phaseStartedAt, &boss.cooldownsReset}, func() error {
 		row := boss
 		get(id).boss = &row
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// Each team's powerups: one row per kind it ever held.
+	rows, err = d.pool.Query(ctx,
+		"SELECT team_id, kind, held, activated_at, activated_casts FROM team_powerup"+filter, teamID)
+	if err != nil {
+		return nil, err
+	}
+	var pw powerupRow
+	if _, err := pgx.ForEachRow(rows, []any{&id, &pw.kind, &pw.held, &pw.activatedAt, &pw.activatedCasts}, func() error {
+		t := get(id)
+		t.powerups = append(t.powerups, pw)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -208,7 +236,8 @@ func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string,
 // tx, in order:
 //  1. INSERT team_pattern … ON CONFLICT DO NOTHING: the first completion only
 //  2. INSERT team_cast: every cast, repeats included, with what it did to the
-//     bosses (c.Dealt, c.Boss, NULL when 0, c.DefeatedBoss)
+//     bosses (c.Dealt, c.Boss, NULL when 0, c.DefeatedBoss) and what
+//     powerups did to it (c.Instant, c.Boosted, c.ShortQR)
 //  3. UPSERT team_boss: the team's progress after the cast (p.Defeated,
 //     p.Damage, and the phase: p.PhaseHealth, p.PhaseStart, which a defeat
 //     moves to the next boss). A new row takes the multiplier's default
@@ -225,9 +254,11 @@ func insertCastRows(ctx context.Context, tx pgx.Tx, teamID string, patternID int
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed, dealt, boss_serial, defeated_boss)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		teamID, patternID, c.By, c.At, c.AlreadyCompleted, c.Dealt, bossSerial, c.DefeatedBoss); err != nil {
+		INSERT INTO team_cast (team_id, pattern_id, cast_by, cast_at, already_completed, dealt, boss_serial, defeated_boss,
+		                       instant, boosted, short_qr_cooldown)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		teamID, patternID, c.By, c.At, c.AlreadyCompleted, c.Dealt, bossSerial, c.DefeatedBoss,
+		c.Instant, c.Boosted, c.ShortQR); err != nil {
 		return err
 	}
 	if err := upsertBoss(ctx, tx, teamID, p); err != nil {

@@ -272,11 +272,15 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		LockedPatternPoints: set.Game.LockedPatternPoints,
 		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
 		QRCooldown:          set.Game.QRCooldown.Duration,
+		PowerupMultiplier:   set.Powerups.DamageMultiplier,
+		PowerupHeart:        set.Powerups.Heart,
+		ShortQRCooldown:     set.Powerups.ShortQRCooldown.Duration,
+		ShortQRWindow:       set.Powerups.ShortQRWindow.Duration,
 		WriteTimeout:        set.Storage.WriteTimeout.Duration,
 		Epoch:               1, // a restart in a test passes another
 	}
 	if !o.qrCooldown {
-		rules.QRCooldown = 0
+		rules.QRCooldown, rules.ShortQRCooldown = 0, 0
 	}
 	if o.rules != nil {
 		o.rules(&rules)

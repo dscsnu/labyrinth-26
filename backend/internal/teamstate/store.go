@@ -315,7 +315,8 @@ func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
 			return st, fmt.Errorf("cast: unknown pattern %d", lc.patternID)
 		}
 		st.Casts = append(st.Casts, Cast{Pattern: p, By: lc.castBy, At: lc.castAt.UTC(), AlreadyCompleted: lc.alreadyCompleted,
-			Dealt: lc.dealt, Boss: lc.bossSerial, DefeatedBoss: lc.defeatedBoss})
+			Dealt: lc.dealt, Boss: lc.bossSerial, DefeatedBoss: lc.defeatedBoss,
+			Instant: lc.instant, Boosted: lc.boosted, ShortQR: lc.shortQR})
 	}
 	if bp := rows.boss; bp != nil {
 		// More bosses defeated than exist means game.bosses was lowered
@@ -333,6 +334,27 @@ func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
 		st.Boss.Health = st.Boss.PhaseHealth
 		st.Boss = st.Boss.at(s.now(), s.bosses)
 		st.CooldownsReset = bp.cooldownsReset
+	}
+	for _, pw := range rows.powerups {
+		k, ok := PowerupByID(pw.kind)
+		if !ok {
+			return st, fmt.Errorf("team_powerup: unknown kind %q", pw.kind)
+		}
+		if pw.held {
+			st.Powerups.Held = st.Powerups.Held.With(k)
+		}
+		switch {
+		case k == PowerupDamageMultiplier && pw.activatedCasts != nil:
+			// Armed until the cast log grows past its length at activation.
+			if *pw.activatedCasts > len(st.Casts) {
+				return st, fmt.Errorf("team_powerup: damage_multiplier activated at %d casts, but the log has %d", *pw.activatedCasts, len(st.Casts))
+			}
+			st.Powerups.MultiplierArmed = *pw.activatedCasts == len(st.Casts)
+		case k == PowerupShortQRCooldown && pw.activatedAt != nil:
+			if until := pw.activatedAt.UTC().Add(s.rules.ShortQRWindow); s.now().Before(until) {
+				st.Powerups.ShortQRUntil = until
+			}
+		}
 	}
 	st.QRCooldowns = s.qrCooldowns(st.Casts, st.CooldownsReset, s.now())
 	for _, sc := range rows.stack {
