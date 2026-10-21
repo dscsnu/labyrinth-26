@@ -63,6 +63,38 @@ services:
     networks: [db]
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # Sized for the c4-standard-4 (4 vCPU, 15 GB) it shares with the backend
+    # and frontend: a ~5 GB budget. Most are ceilings, not allocations:
+    # shared_buffers fills only as data is read, so with the game's small
+    # database Postgres should stay under ~1 GB. effective_cache_size only
+    # informs the planner. SSD-backed disk: random_page_cost and
+    # effective_io_concurrency say so. synchronous_commit stays on: the
+    # backend reloads from Postgres on restart, so a lost commit would undo
+    # players' actions. Confirm under load (docker stats) before game day.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - max_connections=50
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - max_wal_size=2GB
+    # Docker's 64 MB /dev/shm can fail parallel queries ("could not resize
+    # shared memory segment").
+    shm_size: 256mb
+    # Room for the shutdown checkpoint: Docker's default 10 s would kill it
+    # mid-checkpoint, and the next start would run crash recovery.
+    stop_grace_period: 60s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U labyrinth"]
       interval: 2s
