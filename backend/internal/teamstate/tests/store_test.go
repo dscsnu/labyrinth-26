@@ -60,6 +60,9 @@ type clock struct {
 	mu     sync.Mutex
 	t      time.Time
 	timers []*fakeTimer
+	// leaky makes stop miss: the timer still fires, as a real one whose
+	// callback was already on its way when stopped.
+	leaky bool
 }
 
 // fakeTimer is one pending AfterFunc call.
@@ -85,6 +88,9 @@ func (c *clock) AfterFunc(d time.Duration, f func()) func() bool {
 	return func() bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if c.leaky {
+			return false
+		}
 		was := !ft.stopped
 		ft.stopped = true
 		return was

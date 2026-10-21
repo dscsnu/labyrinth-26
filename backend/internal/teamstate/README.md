@@ -1151,6 +1151,13 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestDamageMultiplier` | `team_boss.multiplier = 1.5` set in Postgres, restart: `damage_multiplier` 1.5; a cast's `dealt` is `round(damage × 1.5)` while `damage` is the pattern's; the multiplier survives the cast's upsert and another restart |
   | `TestEveryBossDefeated` | every boss at 1 HP: each cast (quadrilateral and triangle in turn) defeats one; after the last, `boss` null and `bosses_defeated` = the count; one more cast counts (`cast_count`) but deals 0 and hits no boss |
   | `TestLoadRefusesTooManyDefeated` | a `team_boss` row with `defeated` above `game.bosses` stops `Load` |
+  | `TestPersistFailures` (`failure_test.go`) | every write-through failing in Postgres at each step (a trigger raising on one table): select (nothing stored yet, so the reload is the empty state), clear, a cast's `team_scan`, `team_pattern`, `team_cast` and `team_boss`, revive, cooldown reset, grant, a heart's `team_powerup` and `team_boss`, an instant cast's `team_powerup` and `team_cast`: the write returns the error, members get `resync` with the state as it was, and a restart agrees |
+  | `TestScanVerifierError` | a QR verifier error other than invalid or expired is returned as it is |
+  | `TestInstantCastNoTeam` | an instant cast by someone in no team: `not_in_team` |
+  | `TestLoadRefusesUnknownContent` | `Load` refuses stored state naming content the atlas no longer has (an atlas hiding it): a visited waypoint, a completed pattern, the selected shape, a cast's pattern, a stack scan's waypoint |
+  | `TestTimerAfterTeamDeleted` | a timer firing after `TeamDeleted` (the fake clock's `leaky` stop) finds no entry and recreates nothing; `TeamDeleted` again, or for an unknown team, is a no-op |
+  | `TestTimerAfterClose` | a timer firing after `Close` (`leaky`): nothing applied or published |
+  | `TestPublishTeamGone` | an attack applied while teams no longer has the team (deleted, hook not yet run): applied in memory, published to nobody |
   | `TestLoadReadErrors` (`load_test.go`) | with a row in every per-team table, each of `Load`'s reads failing stops it (`load team state: …`), both ways: a table (or the stack's `team_scan.wrong`) missing, refused at prepare, and a view over it dividing by zero as rows stream; mended, the state loads as before |
 
 - `tests/qrcooldown_test.go` (same fixture with `qrCooldown: true` through `qrStarted`, which skips if `game.qr_cooldown` is under 30 s, `minQRCooldown`):
