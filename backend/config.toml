@@ -80,6 +80,15 @@ short_qr_cooldown = "2m"
 # Allowed: more than 0.
 short_qr_window = "5m"
 
+[qte]
+# Quick-time events (quizzes): one at a time, broadcast to every player.
+# answer_window: how long a QTE stays open once started, unless an admin gives
+# it its own window. Allowed: more than 0.
+answer_window = "30s"
+# The longest window an admin may give one QTE. Allowed: at least
+# answer_window.
+max_answer_window = "5m"
+
 [qr]
 # How often a waypoint's rotating QR changes, and thus how often the /qr
 # display re-issues a token. Allowed: more than 0.

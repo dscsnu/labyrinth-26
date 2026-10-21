@@ -38,6 +38,8 @@ type Settings struct {
 	Spell SpellSettings `toml:"spell"`
 	// Powerups are the powerups' strengths and durations.
 	Powerups PowerupSettings `toml:"powerups"`
+	// QTE are the quick-time events' answer windows.
+	QTE QTESettings `toml:"qte"`
 	// Auth are the sign-in and token timings.
 	Auth AuthSettings `toml:"auth"`
 	// Live are the event stream settings.
@@ -147,6 +149,16 @@ type PowerupSettings struct {
 	ShortQRCooldown Duration `toml:"short_qr_cooldown"`
 	// ShortQRWindow is how long a short_qr_cooldown powerup stays active.
 	ShortQRWindow Duration `toml:"short_qr_window"`
+}
+
+// QTESettings is config.toml's [qte] table: how long quick-time events stay
+// open.
+type QTESettings struct {
+	// AnswerWindow is how long a QTE stays open once started, unless an
+	// admin gives it its own window.
+	AnswerWindow Duration `toml:"answer_window"`
+	// MaxAnswerWindow is the longest window an admin may give one QTE.
+	MaxAnswerWindow Duration `toml:"max_answer_window"`
 }
 
 // BossAttackSettings is [game.boss_attack]: every boss attacks a team every
@@ -358,6 +370,8 @@ func (s Settings) validate() []error {
 	check(s.Powerups.ShortQRCooldown.Duration >= 0 && s.Powerups.ShortQRCooldown.Duration <= s.Game.QRCooldown.Duration,
 		"powerups.short_qr_cooldown must be 0 to game.qr_cooldown")
 	check(s.Powerups.ShortQRWindow.Duration > 0, "powerups.short_qr_window must be positive")
+	check(s.QTE.AnswerWindow.Duration > 0, "qte.answer_window must be positive")
+	check(s.QTE.MaxAnswerWindow.Duration >= s.QTE.AnswerWindow.Duration, "qte.max_answer_window must be at least qte.answer_window")
 	check(s.Leaderboard.Size >= 1, "leaderboard.size must be at least 1")
 	check(s.Leaderboard.PublishEvery.Duration >= time.Second, "leaderboard.publish_every must be at least 1s")
 	check(s.Admin.UserSearchLimit >= 1, "admin.user_search_limit must be at least 1")
