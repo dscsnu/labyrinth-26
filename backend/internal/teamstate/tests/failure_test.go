@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -310,5 +311,112 @@ func TestPublishTeamGone(t *testing.T) {
 	noTeamState(t, sub, "an attack on a gone team")
 	if st := f.state.ForTeam(f.teamID); st.Boss.Attacks != 1 {
 		t.Fatalf("the attack wasn't applied: %+v", st.Boss)
+	}
+}
+
+// finishing is a team one cast from its last boss (every boss at 1 HP, all
+// but the last defeated), counting OnFinished calls; last is what the final
+// cast is: the class the previous cast didn't use.
+type finishing struct {
+	*fixtureEnv
+	calls atomic.Int32
+	last  []string
+	shape string
+}
+
+// newFinishing casts every boss but the last.
+func newFinishing(t *testing.T) *finishing {
+	t.Helper()
+	fin := &finishing{}
+	fin.fixtureEnv = started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1", rules: func(r *teamstate.Rules) {
+		r.OnFinished = func(string) { fin.calls.Add(1) }
+	}})
+	n := fin.bosses.Count()
+	for round := range n - 1 {
+		fin.castAlternating(t, round)
+	}
+	fin.last, fin.shape = quad, "quadrilateral"
+	if (n-1)%2 == 1 {
+		fin.last, fin.shape = triangle, "triangle"
+	}
+	return fin
+}
+
+// finalScan selects the last cast's shape and scans it, returning the
+// completing scan's error.
+func (f *finishing) finalScan(t *testing.T) error {
+	t.Helper()
+	t0 := f.tick(1000)
+	f.selectAt(t, t0, 0, f.shape)
+	for i, w := range f.last[:len(f.last)-1] {
+		f.scanAt(t, t0+f.tick(float64(i+1)), i, w)
+	}
+	return f.scanErrAt(t0+f.tick(10), 0, f.last[len(f.last)-1])
+}
+
+// TestFinishFailsNotFinished checks that a cast defeating the last boss
+// whose write fails doesn't finish the team: OnFinished isn't called and the
+// reload still has the last boss alive; the cast again, with the write
+// working, finishes it once. By scan and by instant cast.
+func TestFinishFailsNotFinished(t *testing.T) {
+	for name, final := range map[string]func(f *finishing) error{
+		"scan": func(f *finishing) error { return f.finalScan(t) },
+		"instant cast": func(f *finishing) error {
+			_, err := f.state.InstantCast(context.Background(), f.users[0], f.last)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFinishing(t)
+			f.grant(t, teamstate.PowerupInstantCast)
+			n := f.bosses.Count()
+			undo := f.failWrites(t, "team_cast")
+			err := final(f)
+			undo()
+			if err == nil {
+				t.Fatal("the final cast's write should fail")
+			}
+			if c, v := f.calls.Load(), f.view(t); c != 0 || v.BossesDefeated != n-1 {
+				t.Fatalf("after the failed final cast: %d OnFinished calls, %d of %d bosses", c, v.BossesDefeated, n)
+			}
+			if err := final(f); err != nil {
+				t.Fatalf("the final cast again: %v", err)
+			}
+			if c, v := f.calls.Load(), f.view(t); c != 1 || v.BossesDefeated != n {
+				t.Fatalf("after the final cast: %d OnFinished calls, %d of %d bosses", c, v.BossesDefeated, n)
+			}
+		})
+	}
+}
+
+// TestFinishCommittedThenFailed checks a final cast whose write reported an
+// error yet committed (a timeout after the commit), stood in for by every
+// boss defeated in Postgres by hand: reconcile reloads it, and the team is
+// finished once.
+func TestFinishCommittedThenFailed(t *testing.T) {
+	for name, final := range map[string]func(f *finishing) error{
+		"scan": func(f *finishing) error { return f.finalScan(t) },
+		"instant cast": func(f *finishing) error {
+			_, err := f.state.InstantCast(context.Background(), f.users[0], f.last)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFinishing(t)
+			f.grant(t, teamstate.PowerupInstantCast)
+			n := f.bosses.Count()
+			if _, err := f.db.Pool().Exec(context.Background(), "UPDATE team_boss SET defeated = $2 WHERE team_id = $1", f.teamID, n); err != nil {
+				t.Fatal(err)
+			}
+			undo := f.failWrites(t, "team_cast")
+			err := final(f)
+			undo()
+			if err == nil {
+				t.Fatal("the final cast's write should fail")
+			}
+			if c, v := f.calls.Load(), f.view(t); c != 1 || v.BossesDefeated != n {
+				t.Fatalf("after the reload: %d OnFinished calls, %d of %d bosses", c, v.BossesDefeated, n)
+			}
+		})
 	}
 }

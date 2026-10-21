@@ -379,10 +379,11 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	completed, isComplete := s.atlas.PatternFor(set)
 	isComplete = !wrong && isComplete && s.atlas.Pattern(completed).Shape == cur.Selection.Shape
 	var cast Cast
+	var last bool
 	if isComplete {
 		res.Outcome = OutcomePatternCompleted
 		res.Pattern = s.atlas.WaypointIDs(set)
-		cast, typ, finished = s.applyCast(cur, &next, completed, userID, now, false)
+		cast, typ, last = s.applyCast(cur, &next, completed, userID, now, false)
 		res.AlreadyCompleted = cast.AlreadyCompleted
 	}
 
@@ -393,11 +394,14 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 		}
 		return s.db.insertScan(ctx, t.ID, waypointID, userID, now, wrong)
 	}); err != nil {
-		return ScanResult{}, s.reconcile(e, t.ID, err)
+		err = s.reconcile(e, t.ID, err)
+		finished = s.finishedBy(cur, e.cur.Load())
+		return ScanResult{}, err
 	}
 
 	// 5. apply
 	e.cur.Store(&next)
+	finished = last
 	// 6. publish, and re-arm the timer: a defeat starts the next boss's
 	// clock, and the cast's QR cooldowns end at their own time
 	s.publish(e, t.ID, &next, typ)
@@ -445,6 +449,16 @@ func (s *Store) applyCast(cur, next *State, p int, by uuid.UUID, now time.Time, 
 func (s *Store) isMember(teamID string, userID uuid.UUID) bool {
 	t, ok := s.teams.ByID(teamID)
 	return ok && slices.ContainsFunc(t.Members, func(m teams.Member) bool { return m.ID == userID })
+}
+
+// finishedBy reports whether a failed cast finished the team after all:
+// the state reconcile reloaded (after) has every boss defeated and the one
+// before the write (before) didn't. A write that timed out may still have
+// committed; one that didn't reloads the old state, and a failed reload
+// keeps it, so neither finishes.
+func (s *Store) finishedBy(before, after *State) bool {
+	n := s.bosses.Count()
+	return n > 0 && after.Boss.Defeated >= n && before.Boss.Defeated < n
 }
 
 // isLeader reports whether userID leads teamID now, read from teams
@@ -881,7 +895,9 @@ func (s *Store) InstantCast(ctx context.Context, userID uuid.UUID, waypointIDs [
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		return s.db.insertInstantCast(ctx, t.ID, s.atlas.Pattern(p).ID, cast, next.Boss)
 	}); err != nil {
-		return View{}, s.reconcile(e, t.ID, err)
+		err = s.reconcile(e, t.ID, err)
+		finished = s.finishedBy(cur, e.cur.Load())
+		return View{}, err
 	}
 
 	// 5. apply
