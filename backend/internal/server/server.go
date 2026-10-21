@@ -185,7 +185,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	leaderboard.NewAPI(board).Routes(mux, authed)
 	qte.NewAPI(qteStore).Routes(mux, authed)
 	// Every /api/admin/… route lives in the admin use case.
-	admin.NewAPI(admin.New(teamStore, stateStore, users, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
+	admin.NewAPI(admin.New(teamStore, stateStore, qteStore, users, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
 		Routes(mux, adminOnly)
 	bosses.NewAPI(theBosses).Routes(mux, authed)
 	qrAPI := qr.NewAPI(qrVerifier, log)

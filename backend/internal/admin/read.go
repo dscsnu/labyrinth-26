@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -24,6 +25,16 @@ type TeamState interface {
 	Revive(ctx context.Context, teamID string) (teamstate.View, error)
 	ResetCooldowns(ctx context.Context, teamID string) (teamstate.View, error)
 	GrantPowerup(ctx context.Context, teamID string, kind teamstate.Powerup) (teamstate.GrantResult, error)
+	QTEStats() map[int64]teamstate.QTEStat
+}
+
+// QTEs is what admin needs from the qte use case.
+type QTEs interface {
+	List() []qte.QTE
+	Status(q qte.QTE) string
+	Create(ctx context.Context, adminID uuid.UUID, d qte.Draft, start bool) (qte.QTE, error)
+	Start(ctx context.Context, id int64) (qte.QTE, error)
+	End(ctx context.Context, id int64) (qte.QTE, error)
 }
 
 // Users is what admin needs from the user use case.
@@ -44,13 +55,14 @@ type Rules struct {
 type Admin struct {
 	teams Teams
 	state TeamState
+	qtes  QTEs
 	users Users
 	rules Rules
 }
 
 // New returns the admin use case over the given use cases.
-func New(t Teams, st TeamState, u Users, rules Rules) *Admin {
-	return &Admin{teams: t, state: st, users: u, rules: rules}
+func New(t Teams, st TeamState, q QTEs, u Users, rules Rules) *Admin {
+	return &Admin{teams: t, state: st, qtes: q, users: u, rules: rules}
 }
 
 // TeamOverview is one team as the admin's teams list shows it: the team, and
@@ -98,6 +110,38 @@ func (a *Admin) Teams() []TeamOverview {
 		}
 	}
 	return out
+}
+
+// QTEOverview is one QTE as the admin's list shows it: all of it (its
+// answer included), its status now, and how the teams answered.
+type QTEOverview struct {
+	// QTE is the QTE, flattened into the object.
+	qte.QTE
+	// Status is "draft", "open" or "closed", on the server's clock.
+	Status string `json:"status"`
+	// Stats counts the teams' answers.
+	Stats teamstate.QTEStat `json:"stats"`
+}
+
+// QTEs returns every QTE, newest first, each with its status and answers.
+// Read from memory.
+func (a *Admin) QTEs() []QTEOverview {
+	all := a.qtes.List()
+	stats := a.state.QTEStats()
+	out := make([]QTEOverview, len(all))
+	for i, q := range all {
+		out[i] = a.overview(q, stats)
+	}
+	return out
+}
+
+// overview is q's row, its answers counted from stats.
+func (a *Admin) overview(q qte.QTE, stats map[int64]teamstate.QTEStat) QTEOverview {
+	st := stats[q.ID]
+	if st.ByOption == nil {
+		st.ByOption = map[int]int{}
+	}
+	return QTEOverview{QTE: q, Status: a.qtes.Status(q), Stats: st}
 }
 
 // SearchUsers returns up to admin.user_search_limit users whose email

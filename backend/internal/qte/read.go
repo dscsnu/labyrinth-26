@@ -83,6 +83,9 @@ func (s *Store) ByID(id int64) (QTE, bool) {
 // List returns every QTE, newest first. Lock-free.
 func (s *Store) List() []QTE { return *s.all.Load() }
 
+// Status returns q's status now, on the store's clock.
+func (s *Store) Status(q QTE) string { return q.Status(s.now()) }
+
 // open returns the QTE open at now; ok is false if none is.
 func (s *Store) open(now time.Time) (QTE, bool) {
 	for _, q := range *s.all.Load() {

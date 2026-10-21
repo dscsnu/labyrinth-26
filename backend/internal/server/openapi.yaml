@@ -368,6 +368,108 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`, `unknown_powerup`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
 
+  /api/admin/qtes:
+    get:
+      tags: [admin]
+      summary: Every QTE, with its answers
+      description: Every QTE, newest first, in full (the answer included), with its status on the server's clock and how the teams answered.
+      responses:
+        "200":
+          description: The QTEs.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { type: array, items: { $ref: "#/components/schemas/AdminQTE" } }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+    post:
+      tags: [admin]
+      summary: Write a QTE, as a draft or sent out at once
+      description: >-
+        An admin-typed quiz. `start: false` saves a draft to start later; `start: true` sends it out now to every
+        stream (`qte` of type `started`), open for `window_s` seconds, or `qte.answer_window` (30 s) without one.
+        One QTE is open at a time. Logged with the admin's ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, powerup, quiz]
+              properties:
+                kind: { type: string, enum: [quiz] }
+                powerup: { $ref: "#/components/schemas/PowerupKind" }
+                quiz:
+                  type: object
+                  required: [question, options, correct_option]
+                  properties:
+                    question: { type: string, minLength: 1 }
+                    options: { type: array, minItems: 2, items: { type: string, minLength: 1 }, description: "Different from each other." }
+                    correct_option: { type: integer, minimum: 0 }
+                window_s: { type: integer, minimum: 1, description: "Its own window, at most `qte.max_answer_window` (300 s); omitted: `qte.answer_window`." }
+                start: { type: boolean, default: false }
+            example: { kind: quiz, powerup: heart, quiz: { question: "Which building has the clock tower?", options: ["A block", "B block", "Library"], correct_option: 2 }, start: true }
+      responses:
+        "200":
+          description: The QTE written (and started).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties: { payload: { $ref: "#/components/schemas/AdminQTE" } }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_kind`, `invalid_powerup`, `invalid_question`, `invalid_options`, `invalid_correct_option`, `invalid_window`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qte_open`" }
+
+  /api/admin/qtes/{qte_id}/start:
+    post:
+      tags: [admin]
+      summary: Send out a draft QTE
+      description: The draft opens now for its window; every stream gets `qte` of type `started`. Each QTE runs once. Logged with the admin's ID.
+      parameters:
+        - { name: qte_id, in: path, required: true, schema: { type: integer, minimum: 1 }, example: 7 }
+      responses:
+        "200":
+          description: Started.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties: { payload: { $ref: "#/components/schemas/AdminQTE" } }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_qte_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_qte`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qte_already_run`, `qte_open`" }
+
+  /api/admin/qtes/{qte_id}/end:
+    post:
+      tags: [admin]
+      summary: End an open QTE early
+      description: Answers stop now; every stream gets `qte` of type `closed`, the answer revealed. Logged with the admin's ID.
+      parameters:
+        - { name: qte_id, in: path, required: true, schema: { type: integer, minimum: 1 }, example: 7 }
+      responses:
+        "200":
+          description: Ended, with the answers so far.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties: { payload: { $ref: "#/components/schemas/AdminQTE" } }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_qte_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_qte`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `qte_not_started`, `qte_closed`" }
+
   /api/admin/users:
     get:
       tags: [admin]
@@ -1181,6 +1283,35 @@ components:
             question: { type: string, example: "Which building has the clock tower?" }
             options: { type: array, minItems: 2, items: { type: string }, description: "The choices, in order: answer with an index (from 0)." }
             correct_option: { type: ["integer", "null"], description: "The right choice's index in the closing event; null while open." }
+    AdminQTE:
+      type: object
+      description: A QTE in full, as only admins see it, with its status and the teams' answers.
+      required: [id, kind, powerup, quiz, window_s, created_by, created_at, started_at, ends_at, status, stats]
+      properties:
+        id: { type: integer, example: 7 }
+        kind: { type: string, enum: [quiz] }
+        powerup: { $ref: "#/components/schemas/PowerupKind" }
+        quiz:
+          type: object
+          required: [question, options, correct_option]
+          properties:
+            question: { type: string }
+            options: { type: array, items: { type: string } }
+            correct_option: { type: integer }
+        window_s: { type: ["integer", "null"], description: "Its own window; null: `qte.answer_window`." }
+        created_by: { type: ["string", "null"], format: uuid, description: "The admin who wrote it; null for a seeded one." }
+        created_at: { type: string, format: date-time }
+        started_at: { type: ["string", "null"], format: date-time, description: "Null while a draft." }
+        ends_at: { type: ["string", "null"], format: date-time, description: "Null while a draft." }
+        status: { type: string, enum: [draft, open, closed] }
+        stats:
+          type: object
+          required: [answered, correct, granted, by_option]
+          properties:
+            answered: { type: integer, description: Teams that answered. }
+            correct: { type: integer }
+            granted: { type: integer, description: Teams that got the powerup (right, and not already holding it). }
+            by_option: { type: object, additionalProperties: { type: integer }, description: "Answers per option index; {} when none." }
     User:
       type: object
       required: [id, email, name, avatar_url, role, created_at]
