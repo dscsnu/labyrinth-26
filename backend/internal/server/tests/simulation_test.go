@@ -344,7 +344,7 @@ type simPattern struct {
 
 // httpStrategies are the ways an HTTP-simulated team plays; team i plays
 // httpStrategies[i % len] at size 1 + (i / len) % teams.size.
-var httpStrategies = []string{"steady", "solo", "sloppy", "racer", "retrier", "quitter", "shrinking"}
+var httpStrategies = []string{"steady", "solo", "sloppy", "racer", "retrier", "quitter", "shrinking", "powered"}
 
 // TestSim100Teams plays simTeams teams of every size at once over real HTTP
 // and event streams, each player on their own delays (0–30 ms each way),
@@ -371,6 +371,11 @@ func TestSim100Teams(t *testing.T) {
 	}
 	e.cfg.Settings.Game.BossAttack.Interval.Duration = 10 * 365 * 24 * time.Hour // never, for this test
 	e.cfg.Settings.Game.QRCooldown.Duration = 0
+	// Nor about the per-user rate limit (TestRateLimitOverHTTP is): with
+	// config.toml's, a one-player sloppy team on a fast phone sends its six
+	// rounds' ~60 requests past the burst, and the admin's grants for every
+	// powered team come from one account.
+	e.cfg.Settings.RateLimit.PerSecond, e.cfg.Settings.RateLimit.Burst = 1000, 1000
 	e = e.restart()
 	admin := e.newAdmin("sim-admin")
 
@@ -529,6 +534,34 @@ func TestSim100Teams(t *testing.T) {
 					}
 					st.casts++
 					st.cooldown = len(p.waypoints)
+				case "powered":
+					// An admin grants an instant cast and a multiplier; the
+					// leader arms the multiplier and instant-casts p, boosted;
+					// a resend finds it used, and a member can't use one.
+					for _, kind := range []string{"instant_cast", "damage_multiplier"} {
+						r := e.call("POST", fmt.Sprintf("/api/admin/teams/%s/powerups/%s", st.id, kind), admin, nil)
+						if want("grant "+kind, r.status, r.code, http.StatusOK, "") && r.payload["granted"] != true {
+							fail("grant %s: not granted: %v", kind, r.payload["granted"])
+						}
+					}
+					status, code, _ := turns(0).call("POST", "/api/teams/me/state/powerups/damage_multiplier", nil)
+					want("arm the multiplier", status, code, http.StatusOK, "")
+					if len(active()) > 1 {
+						status, code, _ := turns(1).call("POST", "/api/teams/me/state/powerups/heart", nil)
+						want("a member uses a powerup", status, code, http.StatusForbidden, "not_leader")
+					}
+					body := map[string]any{"pattern": p.waypoints}
+					status, code, payload := turns(0).call("POST", "/api/teams/me/state/powerups/instant_cast", body)
+					if !want("instant cast", status, code, http.StatusOK, "") {
+						continue
+					}
+					if lc, _ := payload["last_cast"].(map[string]any); lc["instant"] != true || lc["boosted"] != true {
+						fail("the instant cast: %v", payload["last_cast"])
+					}
+					st.casts++
+					st.cooldown = len(p.waypoints)
+					status, code, _ = turns(0).call("POST", "/api/teams/me/state/powerups/instant_cast", body)
+					want("a resent instant cast", status, code, http.StatusConflict, "powerup_not_held")
 				case "shrinking":
 					if round == rounds/2 && len(st.clients) > 1 {
 						st.removed = len(st.clients) - 1
