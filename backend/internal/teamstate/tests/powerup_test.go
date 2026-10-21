@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -447,4 +448,33 @@ func countTrue(bs []bool) int {
 		}
 	}
 	return n
+}
+
+// TestLoadRefusesBadPowerups checks that Load refuses team_powerup rows it
+// can't rebuild: a damage_multiplier activated past the end of the cast log
+// (it would arm a cast that never happened), and a kind this code doesn't
+// have (the CHECK dropped here to plant one: code and schema out of step).
+func TestLoadRefusesBadPowerups(t *testing.T) {
+	f := started(t)
+	ctx := context.Background()
+	load := func() error {
+		_, err := teamstate.Load(ctx, pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.qtes, f.hub, pgtest.Quiet, f.rules)
+		return err
+	}
+	if _, err := f.db.Pool().Exec(ctx, `
+		INSERT INTO team_powerup (team_id, kind, activated_at, activated_casts) VALUES ($1, 'damage_multiplier', $2, 3)`, f.teamID, start); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), "damage_multiplier activated at 3 casts, but the log has 0") {
+		t.Fatalf("load with an activation past the log: %v", err)
+	}
+	if _, err := f.db.Pool().Exec(ctx, "DELETE FROM team_powerup; ALTER TABLE team_powerup DROP CONSTRAINT team_powerup_kind_check"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Pool().Exec(ctx, "INSERT INTO team_powerup (team_id, kind, held) VALUES ($1, 'shield', true)", f.teamID); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), `unknown kind "shield"`) {
+		t.Fatalf("load with a shield: %v", err)
+	}
 }

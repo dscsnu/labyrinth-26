@@ -84,6 +84,7 @@ func TestQTEsOverHTTP(t *testing.T) {
 	expect(t, "answering a draft", answer(ps[0], q1, map[string]int{"option": 1}), http.StatusNotFound, "unknown_qte")
 	expect(t, "ending a draft", e.call("POST", fmt.Sprintf("/api/admin/qtes/%v/end", q1), admin, nil), http.StatusConflict, "qte_not_started")
 	expect(t, "a bad id", e.call("POST", "/api/admin/qtes/abc/start", admin, nil), http.StatusBadRequest, "invalid_qte_id")
+	expect(t, "a bad id to end", e.call("POST", "/api/admin/qtes/0/end", admin, nil), http.StatusBadRequest, "invalid_qte_id")
 	expect(t, "no such qte", e.call("POST", "/api/admin/qtes/999999/start", admin, nil), http.StatusNotFound, "unknown_qte")
 
 	r = e.call("POST", fmt.Sprintf("/api/admin/qtes/%v/start", q1), admin, nil)

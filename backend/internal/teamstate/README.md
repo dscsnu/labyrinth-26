@@ -1178,6 +1178,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestPowerupsAcrossRestart` | held kinds, an armed multiplier and a running window survive a restart (JSON equal); a window that ended while down is gone |
   | `TestPowerupReconcile` | `held` cleared by hand: activating fails, memory reloads (`resync`) |
   | `TestConcurrentPowerups` | 8 concurrent grants grant one; 8 concurrent activations use one |
+  | `TestLoadRefusesBadPowerups` | `Load` refuses a `damage_multiplier` activated past the end of the cast log, and a kind the code doesn't have (the CHECK dropped to plant one) |
 
 - `tests/qte_test.go` (same fixture, with a qte store on its clock; `quiz`, `answer` helpers):
 

@@ -208,4 +208,7 @@ The admin routes (write, start, end, list with answers and stats) are in [`inter
 | `TestReadsWithDatabaseClosed` | `List`, `ByID`, `Public`, `Snapshot` with the database closed; a write fails |
 | `TestReconcile` | a draft started by hand in Postgres: `Start` fails, memory reloads, `resync` with it open |
 | `TestConcurrentStarts` | 8 drafts started at once: exactly one opens |
+| `TestOverlapBackstop` | a QTE open in Postgres that memory doesn't know: `Start` and `Create` with `start` pass the memory check, the exclusion constraint refuses them (`ErrQTEOpen`, nothing written), and memory reloads it (`resync`) |
+| `TestEndPersistFails` | a QTE closed by hand in Postgres: `End` fails (not `ErrQTEClosed`), memory reloads it closed (`resync` with `null`), no second reveal |
+| `TestLoadRefusesUnknown` | `Load` refuses a stored powerup the rules don't list, and a kind the code doesn't have (the CHECK dropped to plant one) |
 | `TestSeededDrafts` | the dev seed: drafts 1–4, one per powerup; an admin's next QTE is id 5; a rerun refreshes a seeded draft, not one that has run |

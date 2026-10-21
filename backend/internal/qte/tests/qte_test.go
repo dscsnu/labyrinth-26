@@ -484,3 +484,98 @@ func TestSeededDrafts(t *testing.T) {
 		t.Fatalf("after a rerun: run %q (started %v), draft %q", ran.Quiz.Question, ran.StartedAt, fresh.Quiz.Question)
 	}
 }
+
+// openByHand inserts a quiz open from start in Postgres only (memory doesn't
+// know it), returning its id.
+func (f *fixture) openByHand(t *testing.T) int64 {
+	t.Helper()
+	var id int64
+	if err := f.db.Pool().QueryRow(context.Background(), `
+		INSERT INTO qte (kind, powerup, question, options, correct_option, started_at, ends_at)
+		VALUES ('quiz', 'heart', 'By hand?', ARRAY['A', 'B'], 0, $1, $2) RETURNING id`,
+		start, start.Add(f.rules.AnswerWindow)).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestOverlapBackstop checks the exclusion constraint behind "one at a
+// time": with a QTE open in Postgres that memory doesn't know, Create with
+// start and Start both pass the memory check, are refused by Postgres
+// (ErrQTEOpen), write nothing, and reload memory (resync, the hand-made
+// QTE now open).
+func TestOverlapBackstop(t *testing.T) {
+	ctx := context.Background()
+	t.Run("start", func(t *testing.T) {
+		f := setup(t)
+		d := pgtest.Must(f.store.Create(ctx, f.admin, draft(), false))
+		hand := f.openByHand(t)
+		if _, err := f.store.Start(ctx, d.ID); !errors.Is(err, qte.ErrQTEOpen) {
+			t.Fatalf("start over a hand-made open QTE: %v", err)
+		}
+		if ev := f.next(t, "resync"); ev.typ != live.Resync || ev.view == nil || ev.view.ID != hand {
+			t.Fatalf("resync: %s", ev.raw)
+		}
+		if got, _ := f.store.ByID(d.ID); got.StartedAt != nil {
+			t.Fatalf("the refused draft started: %+v", got)
+		}
+	})
+	t.Run("create", func(t *testing.T) {
+		f := setup(t)
+		hand := f.openByHand(t)
+		if _, err := f.store.Create(ctx, f.admin, draft(), true); !errors.Is(err, qte.ErrQTEOpen) {
+			t.Fatalf("create over a hand-made open QTE: %v", err)
+		}
+		if ev := f.next(t, "resync"); ev.typ != live.Resync || ev.view == nil || ev.view.ID != hand {
+			t.Fatalf("resync: %s", ev.raw)
+		}
+		if all := f.store.List(); len(all) != 1 || all[0].ID != hand {
+			t.Fatalf("after the refused create: %+v", all)
+		}
+	})
+}
+
+// TestEndPersistFails checks a failed End: the QTE closed by hand in
+// Postgres (so no row is still open to end), End fails, and memory reloads
+// it closed (resync with null: nothing open); nothing is revealed twice.
+func TestEndPersistFails(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	q := pgtest.Must(f.store.Create(ctx, f.admin, draft(), true))
+	f.next(t, "start")
+	if _, err := f.db.Pool().Exec(ctx, "UPDATE qte SET ends_at = started_at WHERE id = $1", q.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.End(ctx, q.ID); err == nil || errors.Is(err, qte.ErrQTEClosed) {
+		t.Fatalf("ending a QTE closed by hand: %v", err)
+	}
+	if ev := f.next(t, "resync"); ev.typ != live.Resync || ev.view != nil {
+		t.Fatalf("resync: %s", ev.raw)
+	}
+	if got, _ := f.store.ByID(q.ID); got.Status(start) != qte.StatusClosed {
+		t.Fatalf("after the reconcile: %+v", got)
+	}
+	f.quiet(t, "after the failed end")
+}
+
+// TestLoadRefusesUnknown checks that Load refuses a stored QTE whose kind or
+// powerup this code doesn't have (content and code out of step): a powerup
+// teamstate no longer lists, and a kind the CHECK would refuse (dropped
+// here to plant one).
+func TestLoadRefusesUnknown(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t)
+	pgtest.Must(f.store.Create(ctx, f.admin, draft(), false)) // a heart
+	rules := f.rules
+	rules.Powerups = []string{"instant_cast"}
+	if _, err := qte.Load(ctx, pgtest.Open(t, f.dbURL), f.hub, pgtest.Quiet, rules); err == nil || !strings.Contains(err.Error(), `unknown powerup "heart"`) {
+		t.Fatalf("load with heart unknown: %v", err)
+	}
+
+	if _, err := f.db.Pool().Exec(ctx, "ALTER TABLE qte DROP CONSTRAINT qte_kind_check; UPDATE qte SET kind = 'poll'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qte.Load(ctx, pgtest.Open(t, f.dbURL), f.hub, pgtest.Quiet, f.rules); err == nil || !strings.Contains(err.Error(), `unknown kind "poll"`) {
+		t.Fatalf("load with a poll: %v", err)
+	}
+}
