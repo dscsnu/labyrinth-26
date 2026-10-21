@@ -160,7 +160,7 @@ The test `TestPatternDamageDrift` in `internal/spells/tests/spells_test.go`:
 
 ## 8. The Damage Lookup Check
 
-`damage_lookup.json` (repository root) is the source of truth for 2026 damage: every combination of 2 to 6 of the 10 2026 checkpoints, with its tour, hull and damage. Nothing reads it at runtime; the game reads `pattern.damage`. `TestDamageLookupMatchesConfig` keeps it and `config.toml` in step:
+`damage_lookup.json` (`internal/spells/testdata/`) is the source of truth for 2026 damage: every combination of 2 to 6 of the 10 2026 checkpoints, with its tour, hull and damage. Nothing reads it at runtime; the game reads `pattern.damage`. `TestDamageLookupMatchesConfig` keeps it and `config.toml` in step:
 1. Its `damage_coefficients` must equal `config.toml`'s `[spell]` values.
 2. Every combination, recomputed from the JSON's own checkpoint coordinates with `DamageRules`, must have the JSON's damage (837 of 837 today).
 

@@ -362,9 +362,10 @@ func TestPatternDamageDrift(t *testing.T) {
 	}
 }
 
-// damageLookupPath is damage_lookup.json, the 2026 damage table at the
-// repository root, relative to this package's directory (where go test runs).
-const damageLookupPath = "../../../../damage_lookup.json"
+// damageLookupPath is damage_lookup.json, the 2026 damage table in
+// internal/spells/testdata, relative to this package's directory (where go
+// test runs).
+const damageLookupPath = "../testdata/damage_lookup.json"
 
 // damageLookup is the part of damage_lookup.json this test reads.
 type damageLookup struct {

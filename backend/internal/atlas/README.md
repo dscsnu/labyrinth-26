@@ -272,7 +272,7 @@ What completing a pattern casts: the team's reward for it. **One per pattern**, 
 ### Single source of truth
 - Coordinates come **only from Postgres** (`waypoint.latitude`, `waypoint.longitude`).
 - Damage values come **only from Postgres** (`pattern.damage`) at runtime.
-- The one other file is **`damage_lookup.json`** (repository root): the 2026 damage table, every combination of the 10 2026 checkpoints. Nothing reads it at runtime. It's the reference `config.toml`'s `[spell]` values are tuned to, and `TestDamageLookupMatchesConfig` fails if the two disagree.
+- The one other file is **`damage_lookup.json`** (`internal/spells/testdata/`): the 2026 damage table, every combination of the 10 2026 checkpoints. Nothing reads it at runtime. It's the reference `config.toml`'s `[spell]` values are tuned to, and `TestDamageLookupMatchesConfig` fails if the two disagree.
 
 ### Config
 The generator's coefficients live in `config.toml` under `[spell]` (the formula: [`internal/spells/README.md`](../spells/README.md)):
