@@ -54,7 +54,7 @@ The package comment.
 - **`persist`**: a write detached from the request, bounded by **5 s** (`storage.write_timeout`).
 - **`reconcile`**: after a failed write, reloads every QTE (Postgres wins), broadcasts the open one as `resync`, re-arms the timer.
 - **`schedule`**: arms one `AfterFunc` for the open QTE's `ends_at` (`armedFor` = its ID), replacing any pending one.
-- **`due(id)`**: the timer's callback. Nothing if closed or `armedFor` isn't `id` (it was ended or replaced); re-arms if it fired early; else broadcasts `closed` with the answer. Writes nothing.
+- **`due(id)`**: the timer's callback. Nothing if `armedFor` isn't `id` (it was ended or replaced, or the store closed: `Close` clears `armedFor` and a closed store never arms); re-arms if it fired early; else broadcasts `closed` with the answer. Writes nothing.
 - **`broadcast`**: `live.NewEvent("qte", type, view)` then `Hub.Broadcast`, under `mu`, so events go out in order.
 - **Types** `Started`, `Closed` (and `live.Snapshot`, `live.Resync`).
 
@@ -211,4 +211,9 @@ The admin routes (write, start, end, list with answers and stats) are in [`inter
 | `TestOverlapBackstop` | a QTE open in Postgres that memory doesn't know: `Start` and `Create` with `start` pass the memory check, the exclusion constraint refuses them (`ErrQTEOpen`, nothing written), and memory reloads it (`resync`) |
 | `TestEndPersistFails` | a QTE closed by hand in Postgres: `End` fails (not `ErrQTEClosed`), memory reloads it closed (`resync` with `null`), no second reveal |
 | `TestLoadRefusesUnknown` | `Load` refuses a stored powerup the rules don't list, and a kind the code doesn't have (the CHECK dropped to plant one) |
+| `TestTimerFiresEarly` | a timer firing before `ends_at` (the fake clock's `fireNow`) re-arms, publishes nothing; the QTE closes once, on time |
+| `TestStaleTimer` | a stop that came too late (the fake clock's `leaky`): the ended QTE's timer fires while another is open, and does nothing |
+| `TestTimerAfterClose` | a timer firing after `Close` (`leaky`) does nothing |
+| `TestWriteAfterClose` | a write after `Close` (a request in flight at shutdown) applies and publishes, but arms no timer |
+| `TestLoadReadErrors` | `Load` fails (`load qte: …`) with the table missing (refused at prepare) and with a row failing as it streams (a view dividing by zero) |
 | `TestSeededDrafts` | the dev seed: drafts 1–4, one per powerup; an admin's next QTE is id 5; a rerun refreshes a seeded draft, not one that has run |

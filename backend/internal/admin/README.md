@@ -226,6 +226,7 @@ Nothing to recover: a failed owner write reconciles in the owner. Postgres down:
 | `TestTeamsOverview` | `tests/admin_test.go` | a lobby team's game is null; a started team's comes from its team view (fakes), powerups included |
 | `TestSetRoleNotOwn` | `tests/admin_test.go` | an admin's own role is refused without calling the user use case; someone else's is set |
 | `TestSearchLimit` | `tests/admin_test.go` | a search passes `admin.user_search_limit` |
+| `TestAPIInternalErrors` | `tests/admin_test.go` | an unmapped error (a QTE start, a user search, over failing fakes) is a logged `500`; revive's `invalid_team_id` |
 | `TestQTEsOverview` | `tests/admin_test.go` | the QTE list in the store's order, each with its status and stats; `by_option` `{}` for a QTE nobody answered |
 
 End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestPowerupsOverHTTP`, `TestQTEsOverHTTP` (`qte_test.go`), `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles` (see the server README's Tests).

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -103,14 +105,15 @@ func (fakeQTEs) End(context.Context, int64) (qte.QTE, error) { return qte.QTE{},
 
 // fakeUsers is an admin.Users recording what it was asked.
 type fakeUsers struct {
-	limit   int
-	setRole []uuid.UUID
+	limit     int
+	setRole   []uuid.UUID
+	searchErr error // what Search fails with, if set
 }
 
 // Search records the limit.
 func (f *fakeUsers) Search(_ context.Context, _ string, limit int) ([]user.User, error) {
 	f.limit = limit
-	return nil, nil
+	return nil, f.searchErr
 }
 
 // SetRole records the user.
@@ -178,5 +181,42 @@ func TestSearchLimit(t *testing.T) {
 	a := admin.New(fakeTeams{}, fakeState{}, fakeQTEs{}, fu, admin.Rules{UserSearchLimit: 7})
 	if _, err := a.SearchUsers(context.Background(), "snu"); err != nil || fu.limit != 7 {
 		t.Fatalf("search: %v, limit %d", err, fu.limit)
+	}
+}
+
+// failingQTEs is an admin.QTEs whose writes fail with an error admin
+// doesn't map (Postgres down, say).
+type failingQTEs struct{ fakeQTEs }
+
+// Start fails.
+func (failingQTEs) Start(context.Context, int64) (qte.QTE, error) {
+	return qte.QTE{}, errors.New("database down")
+}
+
+// TestAPIInternalErrors checks the admin routes' failure paths that need no
+// database: an error the error table doesn't map is a logged 500 (a QTE
+// start, a user search), and the revive route's team id is checked first.
+func TestAPIInternalErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	a := admin.New(fakeTeams{}, fakeState{}, failingQTEs{}, &fakeUsers{searchErr: errors.New("database down")}, admin.Rules{UserSearchLimit: 5})
+	admin.NewAPI(a, pgtest.Quiet).Routes(mux, func(h http.HandlerFunc) http.Handler { return h })
+	for _, c := range []struct {
+		method, path string
+		status       int
+		code         string
+	}{
+		{"POST", "/api/admin/qtes/1/start", http.StatusInternalServerError, ""},
+		{"GET", "/api/admin/users?email=x", http.StatusInternalServerError, ""},
+		{"POST", "/api/admin/teams/12/revive", http.StatusBadRequest, "invalid_team_id"},
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(c.method, c.path, nil))
+		var env struct {
+			Code string `json:"code"`
+		}
+		pgtest.Must(0, json.Unmarshal(w.Body.Bytes(), &env))
+		if w.Code != c.status || env.Code != c.code {
+			t.Errorf("%s %s: %d %q, want %d %q", c.method, c.path, w.Code, env.Code, c.status, c.code)
+		}
 	}
 }

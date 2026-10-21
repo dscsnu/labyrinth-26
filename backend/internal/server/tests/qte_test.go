@@ -161,3 +161,23 @@ func TestQTEsOverHTTP(t *testing.T) {
 	}
 	expect(t, "answering after the timer", answer(ps[0], q2, map[string]int{"option": 0}), http.StatusConflict, "qte_closed")
 }
+
+// TestAnswerWithDatabaseDown checks a quiz answer when Postgres is gone: the
+// open quiz still reads from memory (GET /api/qte), the answer is a 500
+// (logged, nothing recorded), and the team's state is unchanged.
+func TestAnswerWithDatabaseDown(t *testing.T) {
+	e := setup(t)
+	admin := e.newAdmin("admin")
+	ps := e.startedTeam("qd")
+	r := e.call("POST", "/api/admin/qtes", admin, quizBody("heart", true))
+	expect(t, "send out a quiz", r, http.StatusOK, "")
+	e.db.Close()
+	if g := e.call("GET", "/api/qte", ps[0], nil); g.status != http.StatusOK || g.payload["id"] != r.payload["id"] {
+		t.Fatalf("GET /api/qte with the database down: %d %v", g.status, g.payload)
+	}
+	expect(t, "answer with the database down", e.call("POST", fmt.Sprintf("/api/teams/me/state/qte/%v/answer", r.payload["id"]), ps[0],
+		map[string]int{"option": 1}), http.StatusInternalServerError, "")
+	if st := e.call("GET", "/api/teams/me/state", ps[0], nil); st.status != http.StatusOK || st.payload["qte"] != nil {
+		t.Fatalf("state after the failed answer: %d %v", st.status, st.payload["qte"])
+	}
+}

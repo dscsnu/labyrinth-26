@@ -1151,6 +1151,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestDamageMultiplier` | `team_boss.multiplier = 1.5` set in Postgres, restart: `damage_multiplier` 1.5; a cast's `dealt` is `round(damage × 1.5)` while `damage` is the pattern's; the multiplier survives the cast's upsert and another restart |
   | `TestEveryBossDefeated` | every boss at 1 HP: each cast (quadrilateral and triangle in turn) defeats one; after the last, `boss` null and `bosses_defeated` = the count; one more cast counts (`cast_count`) but deals 0 and hits no boss |
   | `TestLoadRefusesTooManyDefeated` | a `team_boss` row with `defeated` above `game.bosses` stops `Load` |
+  | `TestLoadReadErrors` (`load_test.go`) | with a row in every per-team table, each of `Load`'s reads failing stops it (`load team state: …`), both ways: a table (or the stack's `team_scan.wrong`) missing, refused at prepare, and a view over it dividing by zero as rows stream; mended, the state loads as before |
 
 - `tests/qrcooldown_test.go` (same fixture with `qrCooldown: true` through `qrStarted`, which skips if `game.qr_cooldown` is under 30 s, `minQRCooldown`):
 
@@ -1178,6 +1179,8 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestPowerupsAcrossRestart` | held kinds, an armed multiplier and a running window survive a restart (JSON equal); a window that ended while down is gone |
   | `TestPowerupReconcile` | `held` cleared by hand: activating fails, memory reloads (`resync`) |
   | `TestConcurrentPowerups` | 8 concurrent grants grant one; 8 concurrent activations use one |
+  | `TestActivateUnknownKind` | a kind past the four: `unknown_powerup` |
+  | `TestInstantCastFinishes` | an instant cast defeating the last boss calls `OnFinished` once |
   | `TestLoadRefusesBadPowerups` | `Load` refuses a `damage_multiplier` activated past the end of the cast log, and a kind the code doesn't have (the CHECK dropped to plant one) |
 
 - `tests/qte_test.go` (same fixture, with a qte store on its clock; `quiz`, `answer` helpers):
@@ -1209,6 +1212,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestResetCooldowns` | with the QR cooldown on: the quadrilateral puts `class_4` and its four waypoints on cooldown and selecting it again is `shape_on_cooldown`; `ResetCooldowns` empties both (`cooldowns_reset` event); a restart keeps the reset; the next cast starts new cooldowns |
   | `TestResetCooldownsErrors` | an unknown team → `ErrTeamNotFound`; a lobby team → `ErrNotInGame` |
   | `TestFinishedHook` | every boss at 1 HP: `Rules.OnFinished` is called once, with the team, only by the cast that defeats the last boss, and **outside the lock** (the hook calls `Revive`, which takes it); a restart finding the team still `IN_GAME` calls it again |
+  | `TestRemovedDuringWrite` | every member write (select, clear, scan, activate, instant cast, answer) by a member an admin removed after the write's lookup (a stale `Teams.ForUser`): `not_in_team` from the check under the lock, nothing changed |
   | `TestTeamDeleted` | `TeamDeleted` stops the timer and forgets the state; the clock moving a day later recreates nothing; the team has no standing |
   | `TestStandings` | a team's bosses defeated, its latest defeat's time and its damage on the current boss |
 

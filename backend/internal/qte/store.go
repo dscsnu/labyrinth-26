@@ -201,11 +201,13 @@ func (s *Store) schedule() {
 // it broadcasts it closed, with its answer. It writes nothing: a QTE is
 // closed because the clock passed its stored ends_at, which every read
 // already sees, so Load reproduces it. A timer that fires early re-arms; one
-// for a QTE that was ended (or replaced) meanwhile does nothing.
+// for a QTE that was ended (or replaced) meanwhile, or that fires after
+// Close, does nothing: armedFor no longer names it (Close clears it, and a
+// closed store never arms again).
 func (s *Store) due(id int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.armedFor != id {
+	if s.armedFor != id {
 		return
 	}
 	q, _ := s.ByID(id)

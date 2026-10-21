@@ -478,3 +478,39 @@ func TestLoadRefusesBadPowerups(t *testing.T) {
 		t.Fatalf("load with a shield: %v", err)
 	}
 }
+
+// TestActivateUnknownKind checks Activate's guard on a kind that isn't one
+// of the four (the route resolves names first, so only a caller in code can
+// pass one): unknown_powerup, nothing changed.
+func TestActivateUnknownKind(t *testing.T) {
+	f := started(t)
+	if _, err := f.state.Activate(context.Background(), f.users[0], teamstate.Powerup(99)); !errors.Is(err, teamstate.ErrUnknownPowerup) {
+		t.Fatalf("activating kind 99: %v", err)
+	}
+}
+
+// TestInstantCastFinishes checks that an instant cast defeating the last
+// boss finishes the team like a scanned one: Rules.OnFinished is called
+// once, for the team.
+func TestInstantCastFinishes(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	f := started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1", rules: func(r *teamstate.Rules) {
+		r.OnFinished = func(id string) { mu.Lock(); calls = append(calls, id); mu.Unlock() }
+	}})
+	n := f.bosses.Count()
+	for round := range n - 1 {
+		f.castAlternating(t, round)
+	}
+	f.grant(t, teamstate.PowerupInstantCast)
+	last := quad
+	if (n-1)%2 == 1 {
+		last = triangle
+	}
+	v := pgtest.Must(f.state.InstantCast(context.Background(), f.users[0], last))
+	mu.Lock()
+	defer mu.Unlock()
+	if v.BossesDefeated != n || len(calls) != 1 || calls[0] != f.teamID {
+		t.Fatalf("after the instant cast: %d of %d bosses, OnFinished %v", v.BossesDefeated, n, calls)
+	}
+}

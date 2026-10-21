@@ -29,6 +29,9 @@ type clock struct {
 	mu     sync.Mutex
 	t      time.Time
 	timers []*fakeTimer
+	// leaky makes stop miss: the timer still fires, as a real one whose
+	// callback was already on its way when stopped.
+	leaky bool
 }
 
 // fakeTimer is one pending AfterFunc call.
@@ -54,6 +57,9 @@ func (c *clock) AfterFunc(d time.Duration, f func()) func() bool {
 	return func() bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if c.leaky {
+			return false
+		}
 		was := !ft.stopped
 		ft.stopped = true
 		return was
@@ -82,6 +88,23 @@ func (c *clock) at(d time.Duration) {
 			return
 		}
 		next.f()
+	}
+}
+
+// fireNow runs every pending timer at once, before it's due: a real timer
+// firing early.
+func (c *clock) fireNow() {
+	c.mu.Lock()
+	var due []*fakeTimer
+	for _, ft := range c.timers {
+		if !ft.stopped {
+			ft.stopped = true
+			due = append(due, ft)
+		}
+	}
+	c.mu.Unlock()
+	for _, ft := range due {
+		ft.f()
 	}
 }
 
@@ -577,5 +600,95 @@ func TestLoadRefusesUnknown(t *testing.T) {
 	}
 	if _, err := qte.Load(ctx, pgtest.Open(t, f.dbURL), f.hub, pgtest.Quiet, f.rules); err == nil || !strings.Contains(err.Error(), `unknown kind "poll"`) {
 		t.Fatalf("load with a poll: %v", err)
+	}
+}
+
+// TestTimerFiresEarly checks a close timer that fires before ends_at (a
+// real timer may): it re-arms instead of closing, and the QTE closes once,
+// on time.
+func TestTimerFiresEarly(t *testing.T) {
+	f := setup(t)
+	pgtest.Must(f.store.Create(context.Background(), f.admin, draft(), true))
+	f.next(t, "start")
+	f.clock.at(f.rules.AnswerWindow / 2)
+	f.clock.fireNow()
+	f.quiet(t, "an early fire")
+	if f.store.Public() == nil || f.clock.pending() != 1 {
+		t.Fatalf("after an early fire: public %v, %d timers", f.store.Public(), f.clock.pending())
+	}
+	f.clock.at(f.rules.AnswerWindow)
+	if ev := f.next(t, "close"); ev.typ != qte.Closed {
+		t.Fatalf("close: %s", ev.raw)
+	}
+	f.quiet(t, "after the close")
+}
+
+// TestStaleTimer checks a close timer that fires after its QTE was ended
+// and another started (the stop came too late): it does nothing; no
+// second closed for the ended QTE, and the new one stays open.
+func TestStaleTimer(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.clock.leaky = true
+	q1 := pgtest.Must(f.store.Create(ctx, f.admin, draft(), true))
+	f.next(t, "start 1")
+	pgtest.Must(f.store.End(ctx, q1.ID))
+	f.next(t, "end 1")
+	f.clock.at(time.Second)
+	pgtest.Must(f.store.Create(ctx, f.admin, draft(), true))
+	f.next(t, "start 2")
+	f.clock.at(f.rules.AnswerWindow) // q1's timer fires, stale
+	f.quiet(t, "the stale timer")
+	if f.store.Public() == nil {
+		t.Fatal("the stale timer closed the new QTE")
+	}
+}
+
+// TestTimerAfterClose checks a close timer that fires after Close (the stop
+// came too late): it does nothing.
+func TestTimerAfterClose(t *testing.T) {
+	f := setup(t)
+	f.clock.leaky = true
+	pgtest.Must(f.store.Create(context.Background(), f.admin, draft(), true))
+	f.next(t, "start")
+	f.store.Close()
+	f.clock.at(f.rules.AnswerWindow)
+	f.quiet(t, "a timer after Close")
+}
+
+// TestWriteAfterClose checks a write landing after Close (a request still in
+// flight at shutdown): it's applied and published, but arms no timer.
+func TestWriteAfterClose(t *testing.T) {
+	f := setup(t)
+	f.store.Close()
+	pgtest.Must(f.store.Create(context.Background(), f.admin, draft(), true))
+	f.next(t, "start")
+	if n := f.clock.pending(); n != 0 {
+		t.Fatalf("%d timers armed after Close", n)
+	}
+}
+
+// TestLoadReadErrors checks that Load fails when its read does, either way:
+// the qte table missing (refused when the query is prepared), or a row
+// failing as it streams (a view over the table dividing by zero).
+func TestLoadReadErrors(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	pgtest.Must(f.store.Create(ctx, f.admin, draft(), false))
+	for name, sql := range map[string][2]string{
+		"missing": {"ALTER TABLE qte RENAME TO qte_real", "ALTER TABLE qte_real RENAME TO qte"},
+		"failing a row": {"ALTER TABLE qte RENAME TO qte_real; CREATE VIEW qte AS SELECT * FROM qte_real WHERE 1 / (random() * 0)::int = 1",
+			"DROP VIEW qte; ALTER TABLE qte_real RENAME TO qte"},
+	} {
+		if _, err := f.db.Pool().Exec(ctx, sql[0]); err != nil {
+			t.Fatal(err)
+		}
+		_, err := qte.Load(ctx, pgtest.Open(t, f.dbURL), f.hub, pgtest.Quiet, f.rules)
+		if _, ferr := f.db.Pool().Exec(ctx, sql[1]); ferr != nil {
+			t.Fatal(ferr)
+		}
+		if err == nil || !strings.HasPrefix(err.Error(), "load qte: ") {
+			t.Errorf("%s: load: %v", name, err)
+		}
 	}
 }
