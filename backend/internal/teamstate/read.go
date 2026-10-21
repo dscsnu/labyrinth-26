@@ -102,6 +102,10 @@ const (
 // the API takes and shows.
 var powerupIDs = [powerupKinds]string{"damage_multiplier", "heart", "short_qr_cooldown", "instant_cast"}
 
+// PowerupIDs returns every powerup kind's wire name, in kind order: what
+// server.Build gives the qte use case, so a QTE can only earn a real kind.
+func PowerupIDs() []string { return powerupIDs[:] }
+
 // ID returns k's wire name, e.g. "heart".
 func (k Powerup) ID() string { return powerupIDs[k] }
 

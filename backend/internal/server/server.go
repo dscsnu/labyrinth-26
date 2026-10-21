@@ -23,6 +23,7 @@ import (
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/stats"
 	"labyrinth/internal/qr"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -39,6 +40,8 @@ type App struct {
 	TeamState  *teamstate.Store
 	// Leaderboard broadcasts the top teams; main runs its loop (Run).
 	Leaderboard *leaderboard.Leaderboard
+	// QTEs holds the quick-time events and broadcasts the open one.
+	QTEs *qte.Store
 
 	db     *postgres.DB
 	stream *live.Streamer
@@ -110,6 +113,16 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		Rotate:    set.QR.Rotate.Duration,
 		Tolerance: set.QR.Tolerance.Duration,
 	}, theAtlas)
+	// QTEs, before team state, which checks answers against them.
+	qteStore, err := qte.Load(ctx, db, hub, log, qte.Rules{
+		AnswerWindow:    set.QTE.AnswerWindow.Duration,
+		MaxAnswerWindow: set.QTE.MaxAnswerWindow.Duration,
+		Powerups:        teamstate.PowerupIDs(),
+		WriteTimeout:    set.Storage.WriteTimeout.Duration,
+	})
+	if err != nil {
+		return nil, err
+	}
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, hub, log, teamstate.Rules{
 		MaxPatternPoints:    set.Game.MaxPatternPoints,
 		Health:              set.Game.Health,
@@ -138,7 +151,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	})
 
 	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore,
-		Leaderboard: board, db: db, startedAt: time.Now(),
+		Leaderboard: board, QTEs: qteStore, db: db, startedAt: time.Now(),
 		stream: &live.Streamer{
 			Heartbeat:    set.Live.Heartbeat.Duration,
 			WriteTimeout: set.Live.WriteTimeout.Duration,
@@ -170,6 +183,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	teams.NewAPI(teamStore, log).Routes(mux, authed)
 	teamstate.NewAPI(stateStore, log).Routes(mux, authed)
 	leaderboard.NewAPI(board).Routes(mux, authed)
+	qte.NewAPI(qteStore).Routes(mux, authed)
 	// Every /api/admin/… route lives in the admin use case.
 	admin.NewAPI(admin.New(teamStore, stateStore, users, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
 		Routes(mux, adminOnly)
@@ -275,13 +289,16 @@ func (a *App) events(w http.ResponseWriter, r *http.Request) {
 
 // snapshot is everything a new stream starts with, in order: hello, then the
 // user's and team's state (team or no_team, then team_state if in a team),
-// then game-wide state.
+// then game-wide state (the open QTE or null, then the leaderboard).
 func (a *App) snapshot(userID uuid.UUID) []live.Event {
 	evs := []live.Event{hello(time.Now()), a.Teams.Snapshot(userID)}
 	if ev, ok := a.TeamState.Snapshot(userID); ok {
 		evs = append(evs, ev)
 	}
 	// Game-wide snapshots, after the user's own.
+	if ev, err := a.QTEs.Snapshot(); err == nil {
+		evs = append(evs, ev)
+	}
 	if ev, err := a.Leaderboard.Snapshot(); err == nil {
 		evs = append(evs, ev)
 	}

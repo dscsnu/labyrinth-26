@@ -663,6 +663,26 @@ paths:
           $ref: "#/components/responses/Error"
           description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`, `waypoint_on_cooldown`, `qr_expired`"
 
+  /api/qte:
+    get:
+      tags: [game]
+      summary: The open quick-time event
+      description: >-
+        The QTE open now, as players see it: without its answer (`quiz.correct_option` null), or null when none
+        is open. The same JSON as the game-wide `qte` event's message. One QTE runs at a time; it disappears once
+        its window is over (the closing `qte` event reveals the answer once).
+      responses:
+        "200":
+          description: The open QTE, or null.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/QTE" }] }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+
   /api/teams/me/state/powerups/{kind}:
     post:
       tags: [game]
@@ -796,15 +816,16 @@ paths:
         nobody acting, both on the server's timer: `boss_attacked` / `knocked_out` and `qr_cooldown_ended`.
         The full reference (every type and when it's sent, ordering, versioning, reconnection, and a client example) is `backend/internal/server/README.md`, "The event stream".
 
-        Later game-wide events (quizzes, quick-time events) will use the same envelope as `leaderboard`,
-        with `message` `null` when nothing is active, or an object with at least an `id`. Their schemas are not final.
+        Game-wide events use the same envelope, with `message` `null` when nothing is active, or an object with
+        at least an `id`: the `leaderboard`, and the open quick-time event (`qte`).
 
         | event | scope | data | `type` values |
         |---|---|---|---|
         | `hello` | stream | `HelloEvent` | `connected` |
         | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `finished`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `powerup_granted`, `powerup_activated`, `powerup_ended`, `resync` |
+        | `qte` | game | `QTEEvent` | `snapshot`, `started`, `closed`, `resync` |
         | `leaderboard` | game | `LeaderboardEvent` | `snapshot`, `updated` |
 
         ```
@@ -1102,6 +1123,35 @@ components:
       properties:
         type: { type: string, enum: [snapshot, updated] }
         message: { $ref: "#/components/schemas/LeaderboardBoard" }
+    QTEEvent:
+      type: object
+      description: |
+        The data of a `qte` event, sent to every stream (game-wide). Types: `snapshot` (on connect: the open QTE,
+        or null), `started` (an admin started one: it, open, `quiz.correct_option` null), `closed` (its window
+        ended or an admin ended it: it, closed, with `quiz.correct_option` revealed; from then on the resource is
+        null until the next QTE starts), `resync` (reloaded after a failed write).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, started, closed, resync] }
+        message: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/QTE" }] }
+    QTE:
+      type: object
+      description: A quick-time event as players see it. Kind-specific content sits under its kind's key (`quiz`).
+      required: [id, kind, status, powerup, started_at, ends_at]
+      properties:
+        id: { type: integer, description: What an answer names., example: 7 }
+        kind: { type: string, enum: [quiz] }
+        status: { type: string, enum: [open, closed], description: "`closed` only in the closing event." }
+        powerup: { $ref: "#/components/schemas/PowerupKind" }
+        started_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time, description: "When answers stop. Count down to it on the server's clock (hello)." }
+        quiz:
+          type: object
+          required: [question, options, correct_option]
+          properties:
+            question: { type: string, example: "Which building has the clock tower?" }
+            options: { type: array, minItems: 2, items: { type: string }, description: "The choices, in order: answer with an index (from 0)." }
+            correct_option: { type: ["integer", "null"], description: "The right choice's index in the closing event; null while open." }
     User:
       type: object
       required: [id, email, name, avatar_url, role, created_at]

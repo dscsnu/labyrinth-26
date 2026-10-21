@@ -139,6 +139,7 @@ func (e *env) restart() *env {
 	if e.app != nil {
 		e.app.Hub.Close()       // end the old app's streams, as a real restart would
 		e.app.TeamState.Close() // and its boss attack timers
+		e.app.QTEs.Close()      // and the QTE close timer
 	}
 	e.app, e.tokens = app, app.Tokens
 	h := app.Handler
