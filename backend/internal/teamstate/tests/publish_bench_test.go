@@ -13,6 +13,7 @@ import (
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres/pgtest"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 )
@@ -51,6 +52,12 @@ type memQR struct{}
 // Verify returns the token as the waypoint ID.
 func (memQR) Verify(token string) (string, error) { return token, nil }
 
+// noQTEs is a teamstate.QTEs with no QTEs: the benchmark answers none.
+type noQTEs struct{}
+
+// ByID finds nothing.
+func (noQTEs) ByID(int64) (qte.QTE, bool) { return qte.QTE{}, false }
+
 // BenchmarkTeamStatePublish measures publishing team_state from many
 // goroutines across the game-day number of teams, every member with an open
 // stream: the team lock, encoding the state once, and queueing it for each
@@ -84,7 +91,7 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: set.Game.MaxPatternPoints}))
 	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bossRules(set, true)))
-	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, memQR{}, hub, pgtest.Quiet, teamstate.Rules{
+	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, memQR{}, noQTEs{}, hub, pgtest.Quiet, teamstate.Rules{
 		MaxPatternPoints:    set.Game.MaxPatternPoints,
 		Health:              set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints,

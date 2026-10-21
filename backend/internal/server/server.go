@@ -123,7 +123,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	if err != nil {
 		return nil, err
 	}
-	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, hub, log, teamstate.Rules{
+	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, qteStore, hub, log, teamstate.Rules{
 		MaxPatternPoints:    set.Game.MaxPatternPoints,
 		Health:              set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints,

@@ -63,7 +63,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 | **Big pattern** | A pattern of at least **5** (`game.locked_pattern_points`) waypoints. **Locked** until the team has defeated **5** (`game.unlock_after_bosses`) bosses: it can't be cast, a shape made only of big patterns can't be selected (`409 shape_locked`), and in a shape mixing sizes a scan that could only grow into a big pattern is a wrong scan. In the 2026 seed every pentagon and hexagon is big (shapes `pentagon` and `hexagon`, 462 patterns), so both shapes are locked at the start. (2025's seed had none.) |
 | **Spell cooldown** | `cooldown(State)`, `cooldown_class` in JSON: the spell class the team can't cast now, its last cast's (`class_4` after a 4-point spell), until it casts a spell of another class. Its patterns count as unavailable: a shape made only of them can't be selected (`409 shape_on_cooldown`, listed in `cooldown_shapes`), and a scan that could only grow into one is wrong. Derived from the cast log, so nothing new is stored and a restart rebuilds it; a defeated boss doesn't clear it. |
 | **QR cooldown** | `State.QRCooldowns`, `qr_cooldowns` in JSON: the waypoints the team can't scan now. A cast at *T* disables every waypoint of its pattern for the team until *T* + **5 min** (`game.qr_cooldown`); scanning one is refused (`409 waypoint_on_cooldown`), recording nothing. Other waypoints stay open and selecting isn't affected. Ends with nobody acting (`qr_cooldown_ended`). Derived from the cast log and the clock, so nothing new is stored and a restart rebuilds it. See [QR cooldown](#qr-cooldown). |
-| **Powerup** | A temporary effect a team holds and its **leader** uses (`State.Powerups`, `powerups` in JSON). Four kinds: `damage_multiplier` (the next cast deals ×**2**, `powerups.damage_multiplier`), `heart` (+**1** health, `powerups.heart`, never above `game.health`), `short_qr_cooldown` (for **5 min**, `powerups.short_qr_window`, casts cool their waypoints for **2 min**, `powerups.short_qr_cooldown`), `instant_cast` (a named pattern is cast at once, with no scans, past the class and QR cooldowns). At most one of each kind held; an admin grants them for now (a quiz will). Not a spell. See [Powerups](#powerups). |
+| **Powerup** | A temporary effect a team holds and its **leader** uses (`State.Powerups`, `powerups` in JSON). Four kinds: `damage_multiplier` (the next cast deals ×**2**, `powerups.damage_multiplier`), `heart` (+**1** health, `powerups.heart`, never above `game.health`), `short_qr_cooldown` (for **5 min**, `powerups.short_qr_window`, casts cool their waypoints for **2 min**, `powerups.short_qr_cooldown`), `instant_cast` (a named pattern is cast at once, with no scans, past the class and QR cooldowns). At most one of each kind held; an admin grants them, or a team earns one by answering a quiz right. Not a spell. See [Powerups](#powerups). |
+| **Quiz answer** | A team's one answer to a game-wide quick-time event (a quiz, owned by the [`qte`](../qte/README.md) use case): any member answers, first answer wins (`State.QTEAnswers`; `qte` in JSON is the latest). A right one earns the QTE's powerup. See [Earned by quizzes](#earned-by-quizzes). |
 | **Unlocked points** | `unlockedPoints(State)`, `unlocked_points` in JSON: the most waypoints a pattern the team can cast may have. **4** (`game.locked_pattern_points` − 1) until it has defeated `game.unlock_after_bosses` bosses, then **6** (`game.max_pattern_points`). `locked_shapes` lists the shapes whose every pattern is bigger. |
 | **Finished** | A team that defeated its last boss. The cast that did it calls `Rules.OnFinished` (teams' `Finish`, wired in `server.Build`) **after releasing the team's lock**; the team becomes `FINISHED`, and from then on every write here is `409 not_in_game` (`inGameTeam`). `Load` finishes a team it finds with every boss defeated but still `IN_GAME`. |
 | **Cooldown reset** | An admin's `ResetCooldowns`: `State.CooldownsReset` becomes the cast log's length, and only casts after that position count for the spell and QR cooldowns. **A position, not a time**, so a cast made in the same instant as the reset still starts its cooldowns (the game-loop simulation found that a time-based reset dropped it). Stored in `team_boss.cooldowns_reset_casts` (migration 0013). |
@@ -89,6 +90,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 6. **The boss attacks** every **10 min** (`game.boss_attack.interval`) of the phase, for its `game.boss_attack.damage`, with nobody acting: the server lowers health and publishes `boss_attacked` (`knocked_out` when health reaches 0). Defeating the boss starts the next boss's clock. A knocked-out team can't select or scan until an admin revives it. See [Boss attacks and health](#boss-attacks-and-health).
 7. **QR codes open again** **5 min** (`game.qr_cooldown`) after the cast that used them, with nobody acting: the server drops them from `qr_cooldowns` and publishes `qr_cooldown_ended`. See [QR cooldown](#qr-cooldown).
 8. **Powerups.** The leader uses a held powerup (`POST /api/teams/me/state/powerups/{kind}`): it arms the next cast, heals, starts a short-QR-cooldown window, or casts a pattern at once. A window ends with nobody acting (`powerup_ended`). See [Powerups](#powerups).
+9. **Quizzes.** While an admin's quiz is open (the game-wide `qte` event), any member answers for the team (`POST /api/teams/me/state/qte/{qte_id}/answer`): right or wrong at once, the powerup with a right one (`qte_answered`). See [Earned by quizzes](#earned-by-quizzes).
 
 **"Part of a pattern" narrows as the team scans.** The team selects a shape, not a pattern, so the first scan is correct if it's in *any* pattern of the shape. Each later scan must keep the stack inside at least one pattern of the shape that contains everything already scanned. A scan that doesn't is wrong.
 
@@ -113,7 +115,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 ## How each file works
 
 ### `api.go`: routes
-- **`Routes`** registers seven routes behind the auth middleware (see [API](#api)). **No admin routes here:** revive and cooldown reset are the `admin` use case's routes ([`internal/admin/README.md`](../admin/README.md)), which call `Revive`, `ResetCooldowns` and `TeamView`.
+- **`Routes`** registers eight routes behind the auth middleware (see [API](#api)). **No admin routes here:** revive and cooldown reset are the `admin` use case's routes ([`internal/admin/README.md`](../admin/README.md)), which call `Revive`, `ResetCooldowns` and `TeamView`.
 - **Handlers:**
   - `shapes` returns `Store.Game()` to any signed-in user, in a team or not.
   - `getMine` returns the caller's team state (`Store.ForUser`).
@@ -122,6 +124,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
   - `clearSelection` calls `Store.ClearSelection` (leader only).
   - `scan` decodes `{"qr"}` and calls `Store.Scan`, returning a `ScanResult`.
   - `usePowerup` resolves `{kind}` (`PowerupByID`, else `404 unknown_powerup`) and calls `Store.Activate`, or, for `instant_cast`, decodes `{"pattern": [IDs]}` (empty or a repeated ID: `400 invalid_body`) and calls `Store.InstantCast`.
+  - `answerQTE` parses `{qte_id}` (else `400 invalid_qte_id`), decodes `{"option": n}` (missing or negative: `400 invalid_body`) and calls `Store.AnswerQTE`.
 - **`fail`** maps errors to statuses and codes via the `errorCodes` table; anything unmapped is logged and becomes `500`.
 
 ### `read.go`: types and reads
@@ -163,7 +166,7 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 - **Powerups:** `Powerup` (the four kinds, `ID()`, `PowerupByID`), `PowerupSet` (a bit per kind), `Powerups{Held, MultiplierArmed, ShortQRUntil}` inside `State`, and `powerupsView` → `PowerupsView{held, active}` (both in kind order, never null). `Cast` carries `Instant`, `Boosted` and `ShortQR`. **`qrCooldowns`** gives each cast its own duration (`ShortQRCooldown` when `Cast.ShortQR`, else `QRCooldown`), walks back until a cast older than the longer one, and cools each waypoint until its **latest** end.
 
 ### `write.go`: writes, each written through
-- **`Select`**, **`ClearSelection`**, **`Scan`**, **`Revive`**, **`ResetCooldowns`**, **`GrantPowerup`**, **`Activate`** and **`InstantCast`** each follow the [write-through](#the-write-through) steps, numbered in the code.
+- **`Select`**, **`ClearSelection`**, **`Scan`**, **`Revive`**, **`ResetCooldowns`**, **`GrantPowerup`**, **`Activate`**, **`InstantCast`** and **`AnswerQTE`** each follow the [write-through](#the-write-through) steps, numbered in the code.
 - **Catch-up first.** Right after `1. lock` and `isMember`, `Select`, `ClearSelection` and `Scan` call **`catchUp`**, which applies any boss attack or QR cooldown end that has fallen due (its own change and its own event) and returns the current state; the write validates against that. Then `Select` and `ClearSelection` refuse anyone but the leader (`isLeader`, `ErrNotLeader`, `403 not_leader`); `Select` and `Scan` refuse a knocked-out team (`ErrKnockedOut`, `409 knocked_out`); `ClearSelection` doesn't (giving up is harmless); and `Select` refuses a shape whose patterns are all locked (`shapeLocked`, `ErrShapeLocked`, `409 shape_locked`), then one whose unlocked patterns are all of the cooldown class (`shapeOnCooldown`, `ErrShapeOnCooldown`, `409 shape_on_cooldown`). `Scan`'s wrong-scan check is `Atlas.FitsShapeCastable(shape, stack ∪ {w}, unlockedPoints, cooldown)`. `Revive` catches up too, so the event order is the attack, then the revive.
 - **`catchUp(e, teamID)`**: `cur.Boss.at(now)`, whether the soonest QR cooldown (`QRCooldowns[0]`) has ended (`now` ≥ its `Until`), and whether a short_qr_cooldown window has (`now` ≥ `ShortQRUntil`, then cleared). One event: `knocked_out` > `boss_attacked` > `powerup_ended` > `qr_cooldown_ended`. If neither changed, returns `cur`. Otherwise it builds the next state with the new progress, the QR cooldowns re-derived (`qrCooldowns(Casts, CooldownsReset, now)`) if one ended, and `Version.Next`, **skips persist** (memory-only, AGENTS.md §6: health is derived from the stored phase and the clock, QR cooldowns from the cast log and the clock, and `Load` reproduces both exactly), applies, and publishes **one** event: **`boss_attacked`** (or **`knocked_out`** if health is now 0) if an attack fell due, else **`qr_cooldown_ended`**. Several due attacks and expiries become one change.
 - **`due(teamID)`**: the team timer's callback, run by the `Clock` in its own goroutine. `1. lock` of the **existing** entry only (looked up in the index, never created: a team `TeamDeleted` removed isn't brought back), then nothing if the entry is closed (`entry.closed`: `Close` or `TeamDeleted`), else `catchUp` and `schedule` for whatever is next. A timer that fires early finds nothing due and re-arms; one that fires late applies everything due.
@@ -182,7 +185,8 @@ The waypoints, shapes and patterns themselves are static content owned by the **
 - **`isLeader(teamID, userID)`** reads the team through `Teams.ByID` (lock-free) and reports whether the user is its leader **now**. `Select` and `ClearSelection` call it under the entry lock, after `catchUp`: an admin removing the leader names a new one (teams' `RemoveMember`), and from then on only the new leader passes.
 - **`RosterChanged(teamID)`** is teams' `Rules.OnRosterChange` (wired in `server.Build`): an admin removed a member from a started team. It locks the entry (`lockTeam`) and drops `entry.members`, the roster cache, so the next publish re-reads the roster from teams and no longer reaches the removed player. **Memory-only** (AGENTS.md §6): the roster is teams' data, already saved. **Publishes nothing:** the team's `State` didn't change (the removed player's scans and casts stay), and teams has already sent the rest `team` and the removed player `no_team`.
 - **`PublishTeam(teamID)`** sends the team's current state to every member as `team_state`, changing nothing, and arms the team's first timer. teams calls it through `teams.Rules.OnStart` (wired in `server.Build`) right after a team starts, so members get the new team's empty state after its `team` event. Steps: `2. validate, before 1. lock` (`Teams.ByID`: the team exists and is `IN_GAME`, else nothing is published), `1. lock` (`lockTeam`, which creates the empty entry if the team had none, its phase starting at the team's `started_at`), `6. publish` (`publish`, which fills the entry's roster cache on this first publish of the started team), then `schedule`. Not a write: no build, persist or apply. It takes the entry lock so its event is ordered with the team's writes.
-- **Declared here:** the errors (`ErrUnknownPowerup`, `ErrPowerupNotHeld`, `ErrPowerupActive`, `ErrFullHealth`, `ErrUnknownPattern`, `ErrPatternLocked`, `ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrShapeOnCooldown`, `ErrWaypointOnCooldown`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`, `ErrInvalidQR`, `ErrExpiredQR`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
+- **`AnswerQTE(ctx, userID, qteID, option)`**: `2. validate, before 1. lock`: `QTEs.ByID` (none, or a draft: `ErrUnknownQTE`), the option in range (`ErrInvalidOption`), the team in a game. `1. lock`, `isMember`, `catchUp`. Then already answered (`ErrQTEAlreadyAnswered`), the QTE read again (an admin may have ended it) and `now` ≥ its `ends_at` (`ErrQTEClosed`), knocked out (`ErrKnockedOut`). Build: `correct`, `granted` (correct and the kind not held), the answer appended copy-on-write, the kind added to `Held` if granted. Persist `insertQTEAnswer`, publish `qte_answered`. **`QTEStats()`** counts every team's answers per QTE (answered, correct, granted, per option) for the admin overview.
+- **Declared here:** the errors (`ErrInvalidOption`, `ErrQTEAlreadyAnswered`, `ErrUnknownQTE` and `ErrQTEClosed` (qte's own), `ErrUnknownPowerup`, `ErrPowerupNotHeld`, `ErrPowerupActive`, `ErrFullHealth`, `ErrUnknownPattern`, `ErrPatternLocked`, `ErrNotInGame`, `ErrUnknownWaypoint`, `ErrUnknownShape`, `ErrNoShapeSelected`, `ErrWaypointAlreadyScanned`, `ErrKnockedOut`, `ErrNotLeader` (teams' own), `ErrShapeLocked`, `ErrShapeOnCooldown`, `ErrWaypointOnCooldown`, `ErrTeamNotFound` (teams' own, for `Revive`), `ErrSelectionPoisoned`, `ErrInvalidQR`, `ErrExpiredQR`), the `Outcome…` constants (`scan_added`, `wrong_scan`, `pattern_completed`), and `ScanResult`.
 
 ### `db.go`: SQL
 Only the per-team tables. The content tables are read by the atlas (`internal/atlas/db.go`).
@@ -198,7 +202,8 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
 - **`deleteSelection`**: deletes `team_selection`, and fails unless exactly one row went (memory had a selection, so Postgres must too).
 - **`upsertBossPhase`**: `Revive`'s write: one `upsertBoss` on the pool (the new phase, at full health).
 - **`upsertCooldownsReset(ctx, teamID, casts)`**: `ResetCooldowns`' write: `INSERT team_boss (team_id, cooldowns_reset_casts) … ON CONFLICT (team_id) DO UPDATE SET cooldowns_reset_casts` (a new row takes every other column's default: no progress).
-- **`upsertPowerupHeld`**: `GrantPowerup`'s write: `INSERT team_powerup … ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT held`, exactly one row (`execOne`).
+- **`upsertPowerupHeld`**: `GrantPowerup`'s write: `holdPowerup`, `INSERT team_powerup … ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT held`, exactly one row (`execOne`).
+- **`insertQTEAnswer(ctx, teamID, a, grant)`**: `AnswerQTE`'s write, one transaction: `INSERT team_qte_answer … SELECT … FROM qte WHERE id = $2 AND started_at IS NOT NULL AND option < cardinality(options)`, exactly one row (the QTE must exist and have started; the primary key refuses a second answer), then `holdPowerup` when `grant` names a kind.
 - **`updatePowerupActivated`** / **`activatePowerup`**: `UPDATE team_powerup SET held = false, activated_at, activated_casts WHERE … AND held`, exactly one row. **`useHeart`**: one transaction, that UPDATE then `upsertBoss`. **`insertInstantCast`**: one transaction, that UPDATE then `insertCastRows` (no `team_scan` row).
 - **`upsertBoss(ctx, q, teamID, progress)`**: the one `team_boss` upsert, on the pool or inside a transaction: `defeated`, `damage`, `phase_health`, `phase_started_at`. The multiplier is never written here.
 - **Attacks and QR cooldowns write nothing.** `catchUp` and the timer have no `db.go` call: health is derived from the stored phase, QR cooldowns from `team_cast`.
@@ -225,8 +230,9 @@ Only the per-team tables. The content tables are read by the atlas (`internal/at
 - **`Bosses`** is what team state needs from the bosses use case, satisfied by `*bosses.Bosses`: `Count()` (how many) and `At(i)` (the boss at index `i`, serial `i+1`). Static, so lock-free. Used by `deal` (the current boss's HP and serial), `at` and `nextAttack` (its `AttackInterval()` and `AttackDamage`), `view` (`boss.serial`) and `stateOf` (the load check).
 - **`Clock`** is the store's time source, an interface with `Now()` (UTC, truncated to microseconds) and `AfterFunc(d, f) (stop func() bool)` (call `f` in its own goroutine after `d`; `stop` cancels it). **`systemClock`** is the real one: `time.Now().UTC().Truncate(time.Microsecond)` and `time.AfterFunc(d, f).Stop`.
 - **`QR`** is what team state needs from the qr use case, declared here (AGENTS.md §4) and satisfied by `*qr.Verifier`: one method, `Verify(token) → (waypoint ID, error)`. It holds no state (the token is derived from the secret and the clock), so `Scan` calls it lock-free. It doesn't check the waypoint exists: `Scan` does that through `Atlas.WaypointIndex`.
+- **`QTEs`** is what team state needs from the qte use case, satisfied by `*qte.Store`: `ByID(id)`, lock-free. `AnswerQTE` reads the QTE's start, end, options, right option and powerup through it. qte never imports teamstate (it gets the powerup kinds from `PowerupIDs`, through `server.Build`).
 - **`Rules`** are the settings from `config.toml`: `MaxPatternPoints` (`game.max_pattern_points`; the stack holds that many plus one wrong scan), `Health` (`game.health`: starting health and what a revive restores), `LockedPatternPoints` and `UnlockAfterBosses` (`game.locked_pattern_points`, `game.unlock_after_bosses`: the unlock), `PowerupMultiplier`, `PowerupHeart`, `ShortQRCooldown`, `ShortQRWindow` (`[powerups]`), `QRCooldown` (`game.qr_cooldown`: how long a cast's waypoints stay disabled for the team; 0 turns it off), `WriteTimeout` (`storage.write_timeout`), and, not in config.toml, `Clock` and `Epoch` (nil `Clock` means `systemClock`; tests pass a fake) and `OnFinished func(teamID)` (called once a cast has defeated a team's last boss, without the lock; `server.Build` wires it to teams' `Finish`; nil means no hook).
-- **`Load(ctx, pg, atlas, bosses, teams, qr, hub, log, rules)`** reads every team's stored state (`selectTeams` with `stackSize` = `MaxPatternPoints` + 1), checking it against the atlas and bosses, and builds the `Game` (`newGame`). Then it creates an entry for every `IN_GAME` team in `Teams.All()` that had nothing stored (`lockTeam`), so every started team is attacked, and only once the map is complete arms each entry's attack timer (`schedule`). Every state is brought up to now as it's built (`emptyState` and `stateOf` call `at`), so attacks that fell due while the backend was down are applied at load (and published to nobody: no stream is open yet; clients get them in their `snapshot`). Last, if `Rules.OnFinished` is set and there are bosses, it calls it for every team still `IN_GAME` whose state has every boss defeated (the backend stopped between such a cast and the team being marked `FINISHED`). It runs after `atlas.Load` and `bosses.Load` (it's handed both) and after `teams.Load`.
+- **`Load(ctx, pg, atlas, bosses, teams, qr, qtes, hub, log, rules)`** reads every team's stored state (`selectTeams` with `stackSize` = `MaxPatternPoints` + 1), checking it against the atlas and bosses, and builds the `Game` (`newGame`). Then it creates an entry for every `IN_GAME` team in `Teams.All()` that had nothing stored (`lockTeam`), so every started team is attacked, and only once the map is complete arms each entry's attack timer (`schedule`). Every state is brought up to now as it's built (`emptyState` and `stateOf` call `at`), so attacks that fell due while the backend was down are applied at load (and published to nobody: no stream is open yet; clients get them in their `snapshot`). Last, if `Rules.OnFinished` is set and there are bosses, it calls it for every team still `IN_GAME` whose state has every boss defeated (the backend stopped between such a cast and the team being marked `FINISHED`). It runs after `atlas.Load`, `bosses.Load` and `qte.Load` (it's handed them) and after `teams.Load`.
 - **`Close()`** stops every pending timer and marks every entry `closed`, so no timer re-arms and one already running does nothing. `main.go` registers it with `srv.RegisterOnShutdown` (after `Hub.Close`); tests call it before loading another store on the same database.
 - **`emptyState(teamID)`** is a `State` with an empty stack of capacity `MaxPatternPoints` + 1 and `Boss: {Defeated: 0, Damage: 0, Multiplier: 1, PhaseStart: the team's started_at (from Teams.ByID; now if it has none), PhaseHealth: Rules.Health}`, then brought up to now (`at`): a team without a `team_boss` row is at boss 1 with multiplier 1, attacked since its start.
 - **`stateOf(teamID, teamRows)`** rebuilds a `State` from IDs through the atlas, failing on unknown waypoints, patterns or shapes. Every `team_cast` row becomes a `Cast` in `State.Casts`, oldest first (`cast: unknown pattern N` if the atlas lacks it). Stack rows are pushed oldest first, with their `wrong` flag. A `team_boss` row becomes `State.Boss` (`defeated`, `damage`, `multiplier`, and `phase_health` / `phase_started_at` where not `NULL`, else `emptyState`'s full health and team start), then `at(now)`, and `cooldowns_reset_casts` becomes `CooldownsReset`; `State.QRCooldowns` is `qrCooldowns(Casts, CooldownsReset, now)`, so cooldowns that ended while the backend was down are gone; if its `defeated` is more than `Bosses.Count()` (game.bosses lowered mid-event) the load fails (`team_boss: N bosses defeated, but game.bosses is M`).
@@ -308,6 +314,8 @@ State                                (never modified once stored)
                                      (derived: team_powerup.activated_casts == len(Casts))
     ShortQRUntil    time.Time        the short_qr_cooldown window's end; zero if none
                                      (derived: activated_at + powerups.short_qr_window)
+  QTEAnswers []QTEAnswer             the team's quiz answers, oldest first; copy-on-write
+    QTE, Option, Correct, Granted, By, At   one team_qte_answer row
   Version    live.Version            {Epoch, Seq}; memory-only
 
 Stack                                a value; Push returns a new one
@@ -323,7 +331,7 @@ StackScan
   Wrong    bool                      didn't fit the selected shape; poisons the
                                      attempt; exposed as stack[].wrong
 ```
-- **Size:** a `State` is a fixed **1416 bytes** (`Stack` 912, `Selection` 56, the `Casts` and `QRCooldowns` slice headers 24 each, `Boss` 72, `CooldownsReset` 8, `Powerups` 32; measured with `unsafe.Sizeof`, 64-bit), so a new snapshot is a plain struct copy. The cast log's backing array is on the heap, **80 bytes per cast**; the QR cooldowns' **32 bytes per cooling waypoint** (at most the waypoints of the casts of the last 5 minutes). 10,000 teams' states are about 13.5 MB, plus 0.8 MB for every 1 cast per team on average (20 casts each: about 16.5 MB). Each started team also holds one pending timer (a `time.Timer`, about 100 bytes).
+- **Size:** a `State` is a fixed **1440 bytes** (`Stack` 912, `Selection` 56, the `Casts`, `QRCooldowns` and `QTEAnswers` slice headers 24 each, `Boss` 72, `CooldownsReset` 8, `Powerups` 32; measured with `unsafe.Sizeof`, 64-bit), so a new snapshot is a plain struct copy. The cast log's backing array is on the heap, **80 bytes per cast**; the QR cooldowns' **32 bytes per cooling waypoint** (at most the waypoints of the casts of the last 5 minutes); the answers' **64 bytes per quiz answered**. 10,000 teams' states are about 13.7 MB, plus 0.8 MB for every 1 cast per team on average (20 casts each: about 16.5 MB). Each started team also holds one pending timer (a `time.Timer`, about 100 bytes).
 - **Why health is derived, not stored.** Storing it would make every attack a database write: up to one per team per boss interval, all day, with nobody acting, and a write that can fail with no player to report it to. Deriving it from the phase (`PhaseStart`, `PhaseHealth`) and the clock makes an attack a memory-only change that `Load` reproduces exactly: only a defeat and a revive, which a player or admin caused, write.
 - **Why the cast log is a slice and copy-on-write.** Its length isn't bounded, so it can't be a fixed array. Snapshots share the backing array until a cast: `Scan` builds the new log with `append(slices.Clip(cur.Casts), cast)`, which always copies, so a reader holding the old snapshot keeps seeing the old log. A cast costs one copy of the log (80 bytes per earlier cast), and only casts pay it: selections and scans copy the slice header only.
 - **Why QR cooldowns are a field, not computed on every check.** `Scan` checks them on every scan and `view` shows them on every publish; deriving them each time would walk the cast log. They're re-derived only when they change (a cast, an expiry) and at load, and replaced, never modified, so snapshots share them like `Casts`.
@@ -344,6 +352,7 @@ Per team, written through:
 | `team_selection` | `0004` | `team_id`, `shape_id`, `selected_by`, `selected_at`, `after_scan_id` BIGINT | PK `team_id`: one selection per team. `after_scan_id` is the team's latest `team_scan.id` when the shape was selected: the stack is the scans after it |
 | `team_cast` | `0007`, `0009`, `0014` | `id` BIGINT identity PK, `team_id` VARCHAR(6), `pattern_id` INTEGER, `cast_by` UUID, `cast_at` TIMESTAMPTZ, `already_completed` BOOLEAN, all `NOT NULL`; from `0009`: `dealt` INTEGER `NOT NULL DEFAULT 0 CHECK (dealt >= 0)`, `boss_serial` INTEGER NULL → `boss (serial)`, `defeated_boss` BOOLEAN `NOT NULL DEFAULT false` | One row per **cast**, repeats included (unlike `team_pattern`): the cast log. `pattern_id` → `pattern` (a cast is of a real pattern); `cast_by` → `userprofile` (a real user); `already_completed` records whether `team_pattern` already had the pattern. `id` orders casts: `Load` reads them `ORDER BY team_id, id`. Index `team_cast_team_id_idx` on `(team_id, id DESC)` serves a one-team read (`reconcile`). No unique constraint: any number of casts per team and pattern. `boss_serial` → `boss` (a cast hits a real boss); `NULL` for a cast after every boss was defeated, or from before `0009` (whose `dealt` defaults to 0) |
 | `team_powerup` | `0014` | `team_id` VARCHAR(6), `kind` TEXT `CHECK (in the four kinds)`, `held` BOOLEAN `DEFAULT false`, `activated_at` TIMESTAMPTZ NULL, `activated_casts` INTEGER NULL `CHECK (>= 0)` | PK `(team_id, kind)`: **at most one of each kind held**. `activated_casts` only for a `damage_multiplier`, and only with `activated_at` (a CHECK). No row: never held. `team_cast` gains `instant`, `boosted`, `short_qr_cooldown` (`0014`, `DEFAULT false` for older casts) |
+| `team_qte_answer` | `0015` | `team_id` VARCHAR(6), `qte_id` BIGINT → `qte`, `option` INTEGER `CHECK (>= 0)`, `correct`, `granted` BOOLEAN, `answered_by` UUID → `userprofile`, `answered_at` TIMESTAMPTZ, all `NOT NULL` | PK `(team_id, qte_id)`: **one answer per team per QTE**. `CHECK (correct OR NOT granted)`. The QTE itself is the qte use case's table ([`internal/qte/README.md`](../qte/README.md)) |
 | `team_boss` | `0009`, `0010`, `0013` | `team_id` VARCHAR(6) PK, `defeated` INTEGER `DEFAULT 0 CHECK (>= 0)`, `damage` INTEGER `DEFAULT 0 CHECK (>= 0)`, `multiplier` DOUBLE PRECISION `DEFAULT 1 CHECK (> 0)`, all `NOT NULL`; from `0010`: `phase_health` INTEGER NULL `CHECK (>= 0)`, `phase_started_at` TIMESTAMPTZ NULL; from `0013`: `cooldowns_reset_casts` INTEGER `NOT NULL DEFAULT 0 CHECK (>= 0)` (the cast log's length at an admin's last cooldown reset; 0: never) | One row per team with boss progress (PK `team_id`); no row means boss 1, 0 damage, multiplier 1, a phase from the team's start at full health. `phase_health` `NULL` means full health (`game.health`), `phase_started_at` `NULL` the team's `started_at`. Written by `insertCompletingScan`'s transaction (every cast) and by `Revive` (`upsertBossPhase`), both through `upsertBoss`. Health and attacks aren't columns: they're derived. The CHECKs back "progress never negative", "the multiplier is positive" and "health never negative". That `defeated` ≤ `game.bosses` and `damage` < the boss's HP are checked in memory (Load, `deal`), since they depend on config and another table |
 
 Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_cast` is written only inside `insertCompletingScan`'s transaction, so a cast is logged, and its damage counted, exactly when its scan and its `team_pattern` row are; `team_boss` is written there too, and by a revive.
@@ -365,6 +374,7 @@ Every per-team table has `team_id` → `team` with `ON DELETE CASCADE`. `team_ca
 | (none: derived from the phase, `game.boss_attack.interval`, the boss's `game.boss_attack.damage` and the clock) | `BossProgress.Attacks`, `Health`: recomputed by `at(now)` at `Load`, so attacks that fell due while the backend was down are applied at once |
 | (none: derived from `team_cast`, `game.qr_cooldown` and the clock) | `State.QRCooldowns`: every waypoint of a cast with `cast_at` + `game.qr_cooldown` after now, the latest such cast per waypoint; recomputed at `Load`, so cooldowns that ended while the backend was down are gone |
 | `team_powerup` | `Powerups.Held`; `MultiplierArmed` (`activated_casts` = the log's length; more than its length refuses the load); `ShortQRUntil` (`activated_at` + `powerups.short_qr_window`, if still ahead) |
+| every `team_qte_answer` row, `ORDER BY team_id, answered_at, qte_id` | `State.QTEAnswers`, oldest first; `qte` is its last |
 | `team_cast.short_qr_cooldown` | each cast's QR cooldown length in `qrCooldowns` (config applies retroactively, like `game.qr_cooldown`) |
 | (none: memory-only) | `entry.stopTimer` (the pending timer): re-armed by `Load` for every started team |
 | `boss` | Not here: the bosses use case, loaded by `bosses.Load` before this `Load` ([`internal/bosses/README.md`](../bosses/README.md)) |
@@ -484,7 +494,7 @@ For **5 min** (`game.qr_cooldown`) after a cast, the waypoints of its pattern ar
 **What the client shows** (`/play`, not built yet): each cooling waypoint with a countdown to its `until` on the server's clock (`hello`), and scanning it disabled; on `qr_cooldown_ended` (or any state without it), enabled again. The countdown only displays: the waypoint opens when the server's event arrives.
 
 ## Powerups
-Temporary effects a team **holds** (at most one of each kind) and its **leader** uses. An admin grants them for now (`POST /api/admin/teams/{team_id}/powerups/{kind}`, `GrantPowerup`); a quiz will grant them through the same function.
+Temporary effects a team **holds** (at most one of each kind) and its **leader** uses. An admin grants them (`POST /api/admin/teams/{team_id}/powerups/{kind}`, `GrantPowerup`), and a right quiz answer earns one ([Earned by quizzes](#earned-by-quizzes)).
 
 | Kind | Using it | Ends |
 |---|---|---|
@@ -496,6 +506,9 @@ Temporary effects a team **holds** (at most one of each kind) and its **leader**
 **Stored as moments, the rest derived**, like attacks and QR cooldowns: `team_powerup` holds what's held and each kind's last activation; an armed multiplier is a position in the cast log (`activated_casts`), so the cast that uses it writes nothing extra; a window is `activated_at` + config, so its end writes nothing; each cast's flags say what powerups did to it. `Load` rebuilds it all, and the team's one timer also fires at a window's end.
 
 A waypoint in several casts cools until the **latest** end: only an instant cast can cast a cooling waypoint, so for scanned casts this is the old "latest cast decides".
+
+### Earned by quizzes
+An admin's quiz (the [`qte`](../qte/README.md) use case: content, start, close, the game-wide `qte` event) names a powerup. **Each team answers once**: any member, and the first answer is the team's (`team_qte_answer`'s primary key). It's marked right or wrong **at once**, and a right one earns the powerup **in the same transaction** (`holdPowerup`), unless the team already holds that kind (`granted: false`: wasted, as with `GrantPowerup`). `team_state.qte` is the latest answer; it's built from `State` alone, so a QTE starting or closing changes no team's state. Refused once the QTE's `ends_at` has passed (the stored moment, not the close timer, decides), and while knocked out.
 
 ## Walkthroughs
 Team `482913`, members A–F, **F the leader** (only F selects and clears), 2026 seed (quadrilateral = pattern 188, `2001 2002 2007 2008` = indexes 0, 1, 6, 7, bitmask 195, damage 274; `quadrilateral` = shape 3), config.toml as shipped. Times are `mm:ss` after 12:00. Stacks are written bottom → top as `waypoint/member@time`; a wrong scan is marked ✗.
@@ -607,6 +620,7 @@ Every write in `write.go` (`Select`, `ClearSelection`, `Scan`, `Revive`, `ResetC
 | `GrantPowerup` (admin) | `upsertPowerupHeld` |
 | `Activate` | `updatePowerupActivated`; a heart: `useHeart` (`team_powerup`, upsert `team_boss`, one transaction) |
 | `InstantCast` | `insertInstantCast` (`team_powerup`, then `team_pattern`, `team_cast`, upsert `team_boss`, delete `team_selection`, one transaction) |
+| `AnswerQTE` | `insertQTEAnswer` (`team_qte_answer`, then `team_powerup` if granted, one transaction) |
 | `TeamDeleted` (teams' delete hook) | none: **memory-only** (AGENTS.md §6); teams' `deleteTeam` already removed the rows. Drops the entry and stops its timer; publishes nothing |
 | `catchUp` (the team's timer, and the start of every write) | none: **memory-only** (AGENTS.md §6). Health is derived from the stored phase and QR cooldowns from the cast log, so `Load` reproduces the change. Steps 3, 5 and 6 |
 | `PublishTeam` (start hook) | none: not a write. Only steps 2, 1 and 6; the state is published as it is, then the timer is armed |
@@ -627,6 +641,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | DELETE | `/api/teams/me/state/selection` | none | `View` |
 | POST | `/api/teams/me/state/scans` | `{"qr": "2007:1760000000.nR5…"}` | `ScanResult` |
 | POST | `/api/teams/me/state/powerups/{kind}` | none; `instant_cast`: `{"pattern": ["2001","2002","2007","2008"]}` | `View` |
+| POST | `/api/teams/me/state/qte/{qte_id}/answer` | `{"option": 2}` | `View` |
 
 **`View`** (also the data of the `team_state` live event), here for a poisoned attempt (through `2099`, a test waypoint in no pattern: the 2026 content can't poison one):
 ```json
@@ -655,6 +670,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
   "qr_cooldowns": [],
   "cast_count": 1,
   "powerups": {"held": ["heart"], "active": [{"kind": "short_qr_cooldown", "until": "2026-10-17T12:04:00Z"}]},
+  "qte": {"qte_id": 7, "option": 2, "correct": true, "granted": true, "answered_by": "c3d4…", "answered_at": "2026-10-17T11:59:12Z"},
   "version": {"epoch": 1760702400000, "seq": 4}
 }
 ```
@@ -667,6 +683,7 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 - `boss.phase_started_at` is when the team began fighting it (or was last revived); `boss.attacks` how many times it has attacked since; `boss.next_attack_at` when it attacks next, or `null` if the team is knocked out. Clients count down to it on the server's clock (`hello`).
 - `health` is the team's health (**10**, `game.health`, at the start, less every attack); `knocked_out` is true at 0.
 - `powerups.held` are the kinds the team holds, `powerups.active` the effects running (`until` null for an armed `damage_multiplier`, the window's end for a `short_qr_cooldown`); both `[]` when empty. A cast carries `instant`, `boosted` and `short_qr_cooldown`.
+- `qte` is the team's latest quiz answer, or `null` before its first: the option chosen, whether it was `correct`, whether it `granted` the QTE's powerup (false when wrong, or the kind was already held), who answered and when. Compare `qte_id` with the `qte` event's `id` to show "answered" for the open quiz.
 - `qr_cooldowns` are the waypoints the team can't scan now (`409 waypoint_on_cooldown`): `{"waypoint_id": "2001", "until": "2026-10-17T12:05:12Z"}` for each waypoint of a cast less than **5 min** (`game.qr_cooldown`) ago, sorted by `until`, then ID; `[]` when none (above: the last cast was at 11:58:40, so its cooldown ended at 12:03:40). An entry leaves at its `until`, with a `qr_cooldown_ended` event.
 - `unlocked_points` is the most waypoints a pattern the team can cast may have: **4** (`game.locked_pattern_points` − 1) until it has defeated **5** (`game.unlock_after_bosses`) bosses, then **6** (`game.max_pattern_points`). `locked_shapes` are the shapes it can't select yet (every pattern bigger), in index order; with the 2026 seed `["hexagon", "pentagon"]` until the unlock, then `[]`. (The example above shows `[]` for brevity.)
 
@@ -740,6 +757,11 @@ All routes need `Authorization: Bearer <token>` (`401` without). Bodies over **1
 | `ErrFullHealth` | 409 | `full_health` |
 | `ErrUnknownPattern` | 404 | `unknown_pattern` |
 | `ErrPatternLocked` | 409 | `pattern_locked` |
+| `ErrUnknownQTE` (qte's own) | 404 | `unknown_qte` |
+| `ErrInvalidOption` | 400 | `invalid_option` |
+| `ErrQTEAlreadyAnswered` | 409 | `qte_already_answered` |
+| `ErrQTEClosed` (qte's own) | 409 | `qte_closed` |
+| a `{qte_id}` that isn't an integer | 400 | `invalid_qte_id` |
 | a body that doesn't decode | 400 | `invalid_body` |
 
 The revive route also answers `401` (`missing_token`, `invalid_token`, `user_not_found`) and `403 not_admin` from the admin middleware.
@@ -761,6 +783,7 @@ The revive route also answers `401` (`missing_token`, `invalid_token`, `user_not
 | `GrantPowerup` (an admin) grants one the team didn't hold | `powerup_granted` | members |
 | `Activate`: a damage_multiplier, heart or short_qr_cooldown | `powerup_activated` | members |
 | `InstantCast` | `spell_cast` or `boss_defeated` | members |
+| `AnswerQTE` | `qte_answered` | members |
 | a short_qr_cooldown window ends (`catchUp`), with **nobody acting**, and no attack fell due at the same moment | `powerup_ended` | members |
 | a QR cooldown ends (`catchUp`, from the timer or the start of a write), with **nobody acting**, and no attack fell due at the same moment | `qr_cooldown_ended` | members |
 | an admin's `Revive` | `revived` | members |
@@ -977,6 +1000,21 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
 | `GrantPowerup` to a knocked-out team | Granted |
 | Persist fails | `500`; state reloaded; nothing applied |
 
+### Quiz answers: `POST /api/teams/me/state/qte/{qte_id}/answer`
+| Case | Result |
+|---|---|
+| `{qte_id}` not an integer; body without `option`, or negative | `400 invalid_qte_id`; `400 invalid_body` |
+| No such QTE, or a draft (players never see drafts) | `404 unknown_qte` |
+| `option` past the last | `400 invalid_option` |
+| Caller not in a team / team not `IN_GAME` (FINISHED included) | `404 not_in_team` / `409 not_in_game` |
+| (any due attack or expiry is applied first) | |
+| The team has answered it (a teammate, or a resend; checked before the close, so a resend after it still lands here) | `409 qte_already_answered` |
+| Now at or after its `ends_at` (time ran out, or an admin ended it) | `409 qte_closed` |
+| Knocked out | `409 knocked_out` |
+| Otherwise | `200`, `qte` set: `correct`, and `granted` with the powerup added to `held` unless already held; `qte_answered` |
+| Two members at once | One is recorded (the lock, and the primary key behind it); the other is `qte_already_answered` |
+| Persist fails | `500`; state reloaded; nothing applied |
+
 ### Delete: `TeamDeleted`, no request (teams' `Rules.OnDelete`)
 | Case | Result |
 |---|---|
@@ -1057,7 +1095,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
 - **Cooldown resets are by hand.** An admin's `ResetCooldowns` clears both cooldowns (the escape hatch for a team stuck on one class or a cooled map); nothing resets them automatically, and a revive doesn't.
 - **Small maps and the QR cooldown.** With the 2026 seed's 10 waypoints, a quadrilateral cools 4 of them and a hexagon 6, and a big pattern needs 5–6 waypoints free at once. The game-loop simulation uses a 2-minute cooldown for this reason; the real map's size decides whether 5 minutes is right.
 
-- **The frontend doesn't show powerups yet.** `team_state.powerups` and the casts' `instant` / `boosted` / `short_qr_cooldown` flags aren't in `frontend/src/lib/types/Game.type.ts` (`TeamStateSchema`), and `/play` has no inventory or use buttons (AGENTS.md §17, item 7). Nothing grants powerups but the admin route until quizzes exist.
+- **The frontend doesn't show powerups yet.** `team_state.powerups` and the casts' `instant` / `boosted` / `short_qr_cooldown` flags aren't in `frontend/src/lib/types/Game.type.ts` (`TeamStateSchema`), and `/play` has no inventory or use buttons (AGENTS.md §17, item 7). Nor is `team_state.qte`, and there's no quiz screen for the `qte` event.
 
 ## Tests
 - The content lookups teamstate relies on (`PatternFor`, `FitsShapeCastable`, `SetOf`, validation, the seed loading, `BenchmarkLookups`) are tested in the atlas: [`internal/atlas/README.md`](../atlas/README.md), "Tests".
@@ -1139,6 +1177,19 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestPowerupReconcile` | `held` cleared by hand: activating fails, memory reloads (`resync`) |
   | `TestConcurrentPowerups` | 8 concurrent grants grant one; 8 concurrent activations use one |
 
+- `tests/qte_test.go` (same fixture, with a qte store on its clock; `quiz`, `answer` helpers):
+
+  | Test | Covers |
+  |---|---|
+  | `TestAnswerQTE` | a member's right answer: `qte` (correct, granted, by), the powerup held, `qte_answered` with version + 1; a teammate's resend `qte_already_answered`, no event; a wrong answer to the next quiz: not granted, held unchanged |
+  | `TestAnswerQTEWasted` | right while holding the kind: `granted` false, one held |
+  | `TestAnswerQTEWindow` | 1 µs before `ends_at` accepted; exactly at it `qte_closed`; after an admin's `End` `qte_closed` |
+  | `TestAnswerQTERefusals` | unknown QTE, a draft (`unknown_qte`), option 4 of 4 (`invalid_option`), no team, a lobby team (`not_in_game`), knocked out; nothing recorded |
+  | `TestAnswerQTERestart` | the answer and its powerup survive a restart (JSON equal); answering again `qte_already_answered` |
+  | `TestConcurrentAnswers` | every member answering at once: exactly one recorded |
+  | `TestAnswerQTEReconcile` | a row inserted by hand: the answer fails, memory reloads it (`resync`) |
+  | `TestQTEStats` | answered, correct, granted, per option; JSON |
+
 - `tests/attack_test.go` (same fixture with `attacks: true`; `expectType` reads the next event's type, `expectNoEvent` fails on a waiting one):
 
   | Test | Covers |
@@ -1158,7 +1209,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `TestTeamDeleted` | `TeamDeleted` stops the timer and forgets the state; the clock moving a day later recreates nothing; the team has no standing |
   | `TestStandings` | a team's bosses defeated, its latest defeat's time and its damage on the current boss |
 
-- `tests/gameloop_test.go`: **the game-loop simulation**, its own fixture (`newLeague`, schema `teamstate_sim`): the 2026 seed with its boss attacks, **100** teams (`simTeams`) of every size from 1 to `teams.size`, all started at the fake clock's start, the teams store's `OnRosterChange` wired to `RosterChanged`, plus waypoint `2099` in no pattern (`simNowhere`: the sloppy teams' wrong scan, which the seed alone can't produce). The seed's pentagons and hexagons are the big patterns: one pick in five is one (`randomPattern`), so every team tries them before and after its unlock: before, `lockedFor` expects `shape_locked` (or `knocked_out`, checked first). Every select and clear is made by the leader (the first active member: member 1 once an admin removed member 0). Team *i* plays strategy *i* mod 12 at size 1 + (*i* / 12) mod 6, so each strategy runs at several sizes:
+- `tests/gameloop_test.go`: **the game-loop simulation**, its own fixture (`newLeague`, schema `teamstate_sim`): the 2026 seed with its boss attacks, **100** teams (`simTeams`) of every size from 1 to `teams.size`, all started at the fake clock's start, the teams store's `OnRosterChange` wired to `RosterChanged`, plus waypoint `2099` in no pattern (`simNowhere`: the sloppy teams' wrong scan, which the seed alone can't produce). The seed's pentagons and hexagons are the big patterns: one pick in five is one (`randomPattern`), so every team tries them before and after its unlock: before, `lockedFor` expects `shape_locked` (or `knocked_out`, checked first). Every select and clear is made by the leader (the first active member: member 1 once an admin removed member 0). Team *i* plays strategy *i* mod 16 at size 1 + (*i* / 16) mod 6, so each strategy runs at several sizes:
 
   | Strategy | What it does |
   |---|---|
@@ -1177,6 +1228,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   | `pampered` | casts every 2 steps; every 4, if anything is cooling, an admin resets its cooldowns (`ResetCooldowns`) and it casts its last pattern again at once: in the same instant as the reset, which must still start new cooldowns |
   | `doomed` | casts every 2 steps until an admin deletes the team at step 30 (`teams.Delete` → `TeamDeleted`); from then on its select is `not_in_team` and it has no state |
   | `powered` | one step in four an admin grants a random powerup (wasted when held); otherwise the leader uses a held one: a multiplier (then boosted casts), a heart (or `full_health`), a short QR window (casts cooling for the league's 1 min, `simShortQRCooldown`, ending on the timer), an instant cast (preferring a pattern past a cooldown; a locked big one is `pattern_locked`); `powerup_active`, `powerup_not_held`, `not_leader` and `knocked_out` refusals. The model tracks held, armed and the window; `check` compares `powerups` every step |
+  | `quizzer` | never casts (so boss 1 knocks it out). Every 5 steps (`simQTEEvery`) the league starts a quiz open for one step, its powerup and right option turning; a quizzer answers right half the time, sometimes two members at once (exactly one recorded) or with a teammate's resend (`qte_already_answered`); one time in four it answers a step late (`qte_closed`); knocked out, `knocked_out`. The model tracks the latest answer and held kinds; `check` compares `qte` every step. After a restart with no downtime, a quiz started at step 45 is still open; after any downtime it's gone |
 
   | Test | Covers |
   |---|---|

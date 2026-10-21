@@ -3,7 +3,8 @@ package tests
 // The game-loop simulation: simTeams teams of every size play the whole loop
 // on the fake clock (selecting, scanning, wrong scans, retries, races,
 // casts, every boss, boss attacks, knockouts, revives, an admin removing
-// members, damage multipliers), each with its own configuration. After every
+// members, damage multipliers, powerups, quizzes), each with its own
+// configuration. After every
 // step every team's state is checked against model, an independent
 // re-implementation of the rules, and at the end against the last team_state
 // its watcher received. TestGameLoopRestart plays the same league with the
@@ -32,6 +33,7 @@ import (
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
 	"labyrinth/internal/platform/postgres/pgtest"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 	"labyrinth/internal/teamstate"
 	"labyrinth/internal/user"
@@ -77,6 +79,10 @@ const (
 	// simReviveDelay is how many steps a knocked-out slowpoke waits for its
 	// revive.
 	simReviveDelay = 3
+	// simQTEEvery is how often, in steps, the league starts a quiz, each open
+	// for one step (simStep): closed when the next step moves the clock. A
+	// divisor of simDownAt, so one is open when TestGameLoopRestart goes down.
+	simQTEEvery = 5
 )
 
 // simStrategies are the ways a team plays; team i plays simStrategies[i %
@@ -97,6 +103,7 @@ var simStrategies = []string{
 	"pampered",   // casts every 2 steps; every 4 an admin resets its cooldowns, and it casts its last spell again at once
 	"doomed",     // casts every 2 steps until an admin deletes the team (simDeleteAt); then its scans are not_in_team
 	"powered",    // an admin grants it powerups; its leader uses them (multiplier, heart, short QR cooldown, instant cast) and casts
+	"quizzer",    // never casts; answers each quiz right or wrong, two members at once or with a resend, or a step late (qte_closed)
 }
 
 // simDeleteAt is the step at which an admin deletes the doomed teams.
@@ -114,10 +121,16 @@ type league struct {
 	dbURL  string
 	teams  *teams.Store
 	state  *teamstate.Store
+	qtes   *qte.Store
+	qteSet qte.Rules
 	hub    *live.Hub
 	rules  teamstate.Rules
 	clock  *clock
 	sims   []*simTeam
+	// quiz is the latest quiz the league started, and quizStep the step it
+	// started at (0 before the first).
+	quiz     qte.QTE
+	quizStep int
 	// elapsed is how far the fake clock is past start: each step adds
 	// simStep, and downtime adds its length.
 	elapsed time.Duration
@@ -163,7 +176,8 @@ type simCounts struct {
 	lockedRefused, bigCasts, cooldownRefused, qrRefused, qrBlocked,
 	finishedRefused, resets, deletions, deletedRefused,
 	grants, wasted, boostedCasts, hearts, fullHealthRefused, shortActivations, shortCasts, shortEnded,
-	instantCasts, instantBypassed, patternLockedRefused, powerupActiveRefused, notHeldRefused, notLeaderRefused atomic.Int64
+	instantCasts, instantBypassed, patternLockedRefused, powerupActiveRefused, notHeldRefused, notLeaderRefused,
+	quizzes, qteRight, qteWrong, qteGranted, qteWasted, qteRaces, qteResent, qteClosed, qteKnocked atomic.Int64
 }
 
 // newLeague seeds the dev content and starts simTeams teams of every size,
@@ -253,7 +267,10 @@ func newLeague(t testing.TB, attacks bool) *league {
 		br.AttackInterval = simAttackInterval
 	}
 	l.bosses = pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
-	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
+	l.qteSet = qteRules(set, l.clock)
+	l.qtes = pgtest.Must(qte.Load(ctx, db, l.hub, pgtest.Quiet, l.qteSet))
+	t.Cleanup(func() { l.qtes.Close() })
+	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, passQR{}, l.qtes, l.hub, pgtest.Quiet, l.rules))
 	l.board = leaderboard.New(l.state, l.teams, l.hub, pgtest.Quiet, leaderboard.Rules{Size: 5, PublishEvery: time.Second})
 	return l
 }
@@ -289,6 +306,9 @@ type model struct {
 	// shortUntil is when the team's short_qr_cooldown window ends; it's
 	// active while now is before it.
 	shortUntil time.Time
+	// answer is the team's latest quiz answer (team_state.qte), nil before
+	// its first.
+	answer *teamstate.QTEAnswerView
 }
 
 // qrFor returns how long a cast at now cools its waypoints: the short
@@ -430,6 +450,10 @@ func TestGameLoopSimulation(t *testing.T) {
 		"instant casts past a cooldown": &counts.instantBypassed, "locked instant casts refused": &counts.patternLockedRefused,
 		"powerups refused while active": &counts.powerupActiveRefused, "powerups refused not held": &counts.notHeldRefused,
 		"powerups refused for a member": &counts.notLeaderRefused,
+		"quizzes":                       &counts.quizzes, "right answers": &counts.qteRight, "wrong answers": &counts.qteWrong,
+		"powerups earned by a quiz": &counts.qteGranted, "quiz powerups wasted": &counts.qteWasted,
+		"members answering at once": &counts.qteRaces, "refused quiz resends": &counts.qteResent,
+		"late answers refused": &counts.qteClosed, "knocked-out answers refused": &counts.qteKnocked,
 	} {
 		if c.Load() == 0 {
 			t.Errorf("the simulation never exercised %s", name)
@@ -497,6 +521,9 @@ func (l *league) steps(t *testing.T, from, to int, counts *simCounts) {
 	for step := from; step <= to; step++ {
 		l.elapsed += simStep
 		l.clock.at(l.elapsed)
+		if step%simQTEEvery == 0 {
+			l.startQuiz(t, step, counts)
+		}
 		var wg sync.WaitGroup
 		for _, st := range l.sims {
 			wg.Add(1)
@@ -589,10 +616,18 @@ func (l *league) downAndRestart(t *testing.T, down time.Duration, step int, coun
 		}
 	}
 	l.state.Close()
+	l.qtes.Close()
 	l.elapsed += down
-	l.clock.at(l.elapsed) // fires nothing: the store is closed
+	l.clock.at(l.elapsed) // fires nothing: the stores are closed
 	l.rules.Epoch++
-	l.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, l.dbURL), l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
+	pg := pgtest.Open(t, l.dbURL)
+	l.qtes = pgtest.Must(qte.Load(context.Background(), pg, l.hub, pgtest.Quiet, l.qteSet))
+	l.state = pgtest.Must(teamstate.Load(context.Background(), pg, l.atlas, l.bosses, l.teams, passQR{}, l.qtes, l.hub, pgtest.Quiet, l.rules))
+	// A quiz started at the last step is still open after no downtime and
+	// gone after any.
+	if open := l.qtes.Public() != nil; open != (down == 0 && l.quizStep == step) {
+		t.Fatalf("after %v down, the quiz from step %d open: %v", down, l.quizStep, open)
+	}
 	l.board = leaderboard.New(l.state, l.teams, l.hub, pgtest.Quiet, leaderboard.Rules{Size: 5, PublishEvery: time.Second})
 	for _, st := range l.sims {
 		if st.model.deleted {
@@ -702,6 +737,9 @@ func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	if !slices.Equal(gotActive, active) {
 		fail("powerups.active", gotActive, active)
 	}
+	if (v.QTE == nil) != (m.answer == nil) || (v.QTE != nil && !sameAnswer(*v.QTE, *m.answer)) {
+		fail("qte", v.QTE, m.answer)
+	}
 	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
 	if v.UnlockedPoints != unlocked || slices.Contains(v.LockedShapes, "pentagon") != (unlocked < 5) ||
 		slices.Contains(v.LockedShapes, "hexagon") != (unlocked < 6) {
@@ -764,6 +802,8 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	}
 
 	switch st.strategy {
+	case "quizzer":
+		l.quizzer(t, st, step, knocked, counts)
 	case "powered":
 		l.powered(t, st, step, knocked, counts)
 	case "pampered":
@@ -1535,4 +1575,111 @@ func (l *league) instantCast(t *testing.T, st *simTeam, leader uuid.UUID, counts
 	}
 	l.expectCast(t, st, p, teamstate.ScanResult{Outcome: teamstate.OutcomePatternCompleted,
 		AlreadyCompleted: v.LastCast.AlreadyCompleted, State: v}, counts, true)
+}
+
+// startQuiz has an admin start a quiz, open for one step, earning the kinds
+// in turn; the right option turns too.
+func (l *league) startQuiz(t *testing.T, step int, counts *simCounts) {
+	t.Helper()
+	n := int(counts.quizzes.Add(1))
+	window := int(simStep / time.Second)
+	l.quiz = pgtest.Must(l.qtes.Create(context.Background(), l.sims[0].members[0], qte.Draft{
+		Kind: qte.KindQuiz, Powerup: teamstate.Powerup(n % 4).ID(), WindowS: &window,
+		Quiz: &qte.Quiz{Question: fmt.Sprintf("Quiz %d?", n), Options: []string{"A", "B", "C", "D"}, CorrectOption: n % 4},
+	}, true))
+	l.quizStep = step
+}
+
+// quizzer is a quizzer team's step. At a quiz's start it answers (right
+// half the time), but one time in four waits and answers the step after,
+// refused as closed; a team of two or more sometimes has two members answer
+// at once (exactly one recorded), else sometimes a teammate resends
+// (refused). Knocked out, its answers are refused.
+func (l *league) quizzer(t *testing.T, st *simTeam, step int, knocked bool, counts *simCounts) {
+	ctx := context.Background()
+	q := l.quiz
+	late := step == l.quizStep+1 && q.ID != 0
+	if (step != l.quizStep && !late) || (step == l.quizStep && st.rng.IntN(4) == 0) {
+		return
+	}
+	if late && st.model.answer != nil && st.model.answer.QTEID == q.ID {
+		return // answered in time
+	}
+	option := q.Quiz.CorrectOption
+	if st.rng.IntN(2) == 0 {
+		option = (option + 1 + st.rng.IntN(3)) % 4
+	}
+	who := rotate(st)
+	if late || knocked {
+		_, err := l.state.AnswerQTE(ctx, st.members[who(step)], q.ID, option)
+		switch {
+		case knocked && !late && errors.Is(err, teamstate.ErrKnockedOut):
+			counts.qteKnocked.Add(1)
+		case late && errors.Is(err, teamstate.ErrQTEClosed):
+			counts.qteClosed.Add(1)
+		default:
+			t.Errorf("team %d: answering (late %v, knocked out %v): %v", st.i, late, knocked, err)
+		}
+		return
+	}
+	var v teamstate.View
+	if len(st.members) > 1 && st.rng.IntN(3) == 0 {
+		views, errs := make([]teamstate.View, 2), make([]error, 2)
+		var wg sync.WaitGroup
+		for r := range 2 {
+			wg.Go(func() { views[r], errs[r] = l.state.AnswerQTE(ctx, st.members[who(step+r)], q.ID, option) })
+		}
+		wg.Wait()
+		if (errs[0] == nil) == (errs[1] == nil) || !errors.Is(errors.Join(errs...), teamstate.ErrQTEAlreadyAnswered) {
+			t.Errorf("team %d: two members answering at once: %v", st.i, errs)
+			return
+		}
+		v = views[0]
+		if errs[1] == nil {
+			v = views[1]
+		}
+		counts.qteRaces.Add(1)
+	} else {
+		var err error
+		if v, err = l.state.AnswerQTE(ctx, st.members[who(step)], q.ID, option); err != nil {
+			t.Errorf("team %d: answering: %v", st.i, err)
+			return
+		}
+		if st.rng.IntN(3) == 0 {
+			if _, err := l.state.AnswerQTE(ctx, st.members[who(step+1)], q.ID, q.Quiz.CorrectOption); !errors.Is(err, teamstate.ErrQTEAlreadyAnswered) {
+				t.Errorf("team %d: a resend: %v, want qte_already_answered", st.i, err)
+				return
+			}
+			counts.qteResent.Add(1)
+		}
+	}
+	kind, _ := teamstate.PowerupByID(q.Powerup)
+	m := &st.model
+	a := teamstate.QTEAnswerView{QTEID: q.ID, Option: option, Correct: option == q.Quiz.CorrectOption, AnsweredAt: l.clock.Now()}
+	a.Granted = a.Correct && !m.held[kind]
+	if v.QTE == nil {
+		t.Errorf("team %d: an answer without team_state.qte", st.i)
+		return
+	}
+	a.AnsweredBy = v.QTE.AnsweredBy // whichever member won
+	m.answer = &a
+	switch {
+	case a.Granted:
+		m.held[kind] = true
+		counts.qteGranted.Add(1)
+		counts.qteRight.Add(1)
+	case a.Correct:
+		counts.qteWasted.Add(1)
+		counts.qteRight.Add(1)
+	default:
+		counts.qteWrong.Add(1)
+	}
+}
+
+// sameAnswer reports that a and b are the same answer, times compared as
+// instants.
+func sameAnswer(a, b teamstate.QTEAnswerView) bool {
+	at := a.AnsweredAt.Equal(b.AnsweredAt)
+	a.AnsweredAt, b.AnsweredAt = time.Time{}, time.Time{}
+	return at && a == b
 }

@@ -11,6 +11,7 @@ import (
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/qr"
+	"labyrinth/internal/qte"
 	"labyrinth/internal/teams"
 )
 
@@ -106,6 +107,16 @@ var (
 	// team has unlocked (game.locked_pattern_points, until it has defeated
 	// game.unlock_after_bosses bosses).
 	ErrPatternLocked = errors.New("this pattern is locked until your team defeats more bosses")
+	// ErrUnknownQTE is the qte use case's: no QTE has that ID (or it's a
+	// draft, which players can't see).
+	ErrUnknownQTE = qte.ErrUnknownQTE
+	// ErrQTEClosed is the qte use case's: the QTE's window is over.
+	ErrQTEClosed = qte.ErrQTEClosed
+	// ErrInvalidOption means the answer names no option of the quiz.
+	ErrInvalidOption = errors.New("that isn't one of the options")
+	// ErrQTEAlreadyAnswered means someone on the team has answered this QTE:
+	// one answer per team (a resend lands here).
+	ErrQTEAlreadyAnswered = errors.New("your team has already answered")
 	// errNeedsPattern means Activate was asked for an instant_cast, which
 	// needs a pattern: InstantCast casts it. The API never does this.
 	errNeedsPattern = errors.New("an instant_cast is activated by InstantCast, with a pattern")
@@ -880,5 +891,77 @@ func (s *Store) InstantCast(ctx context.Context, userID uuid.UUID, waypointIDs [
 	// clock, and the cast's QR cooldowns end at their own time
 	s.publish(e, t.ID, &next, typ)
 	s.schedule(e, t.ID, &next)
+	return s.view(t.ID, next), nil
+}
+
+// AnswerQTE records userID's answer for their team to quick-time event
+// qteID, choosing option: any member may answer, one answer per team. It's
+// right or wrong at once, and a right one gives the team the QTE's powerup
+// in the same transaction (wasted if it already holds that kind). Refused,
+// in order: ErrUnknownQTE (no such QTE, or a draft), ErrInvalidOption,
+// ErrNotInTeam, ErrNotInGame, ErrQTEAlreadyAnswered (checked before the
+// close, so a resend after it still lands here), ErrQTEClosed (now at or
+// past its ends_at), ErrKnockedOut.
+func (s *Store) AnswerQTE(ctx context.Context, userID uuid.UUID, qteID int64, option int) (View, error) {
+	// 2. validate, before 1. lock: the QTE's content never changes, and the
+	// team needs no lock
+	q, ok := s.qtes.ByID(qteID)
+	if !ok || q.StartedAt == nil || q.Quiz == nil {
+		return View{}, ErrUnknownQTE
+	}
+	if option < 0 || option >= len(q.Quiz.Options) {
+		return View{}, ErrInvalidOption
+	}
+	t, err := s.inGameTeam(userID)
+	if err != nil {
+		return View{}, err
+	}
+
+	// 1. lock, then 2. validate membership again under it: an admin may
+	// have removed the user since the lookup.
+	e := s.lockTeam(t.ID)
+	defer e.mu.Unlock()
+	if !s.isMember(t.ID, userID) {
+		return View{}, ErrNotInTeam
+	}
+	cur := s.catchUp(e, t.ID)
+	now := s.now()
+
+	// 2. validate (state)
+	if slices.ContainsFunc(cur.QTEAnswers, func(a QTEAnswer) bool { return a.QTE == qteID }) {
+		return View{}, ErrQTEAlreadyAnswered
+	}
+	q, _ = s.qtes.ByID(qteID) // again: an admin may have ended it since
+	if !now.Before(*q.EndsAt) {
+		return View{}, ErrQTEClosed
+	}
+	if cur.Boss.KnockedOut() {
+		return View{}, ErrKnockedOut
+	}
+
+	// 3. build
+	kind, known := PowerupByID(q.Powerup) // qte checks it against PowerupIDs
+	a := QTEAnswer{QTE: qteID, Option: option, Correct: option == q.Quiz.CorrectOption, By: userID, At: now}
+	a.Granted = a.Correct && known && !cur.Powerups.Held.Has(kind)
+	next := *cur
+	next.QTEAnswers = append(slices.Clip(cur.QTEAnswers), a) // copy-on-write
+	grant := ""
+	if a.Granted {
+		next.Powerups.Held = cur.Powerups.Held.With(kind)
+		grant = kind.ID()
+	}
+	next.Version = cur.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.insertQTEAnswer(ctx, t.ID, a, grant)
+	}); err != nil {
+		return View{}, s.reconcile(e, t.ID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish
+	s.publish(e, t.ID, &next, QTEAnswered)
 	return s.view(t.ID, next), nil
 }

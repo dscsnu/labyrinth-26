@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 
 	"labyrinth/internal/platform/httpx"
 	"labyrinth/internal/platform/identity"
@@ -30,6 +31,7 @@ func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Hand
 	mux.Handle("DELETE /api/teams/me/state/selection", authed(a.clearSelection))
 	mux.Handle("POST /api/teams/me/state/scans", authed(a.scan))
 	mux.Handle("POST /api/teams/me/state/powerups/{kind}", authed(a.usePowerup))
+	mux.Handle("POST /api/teams/me/state/qte/{qte_id}/answer", authed(a.answerQTE))
 	mux.Handle("GET /api/game/shapes", authed(a.shapes))
 }
 
@@ -60,6 +62,10 @@ var errorCodes = []struct {
 	{ErrFullHealth, http.StatusConflict, "full_health"},
 	{ErrUnknownPattern, http.StatusNotFound, "unknown_pattern"},
 	{ErrPatternLocked, http.StatusConflict, "pattern_locked"},
+	{ErrUnknownQTE, http.StatusNotFound, "unknown_qte"},
+	{ErrInvalidOption, http.StatusBadRequest, "invalid_option"},
+	{ErrQTEAlreadyAnswered, http.StatusConflict, "qte_already_answered"},
+	{ErrQTEClosed, http.StatusConflict, "qte_closed"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or
@@ -175,6 +181,30 @@ func (a *API) usePowerup(w http.ResponseWriter, r *http.Request) {
 	} else {
 		v, err = a.store.Activate(r.Context(), identity.UserID(r), kind)
 	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	httpx.OK(w, v)
+}
+
+// answerQTE handles POST /api/teams/me/state/qte/{qte_id}/answer
+// {"option": n}: any member answers the open quick-time event for the team,
+// once. Returns the team state (its qte is the answer: right or wrong).
+func (a *API) answerQTE(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("qte_id"), 10, 64)
+	if err != nil || id < 1 {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_qte_id", "qte_id must be a positive integer")
+		return
+	}
+	var req struct {
+		Option *int `json:"option"`
+	}
+	if err := httpx.DecodeJSON(w, r, &req); err != nil || req.Option == nil || *req.Option < 0 {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body", `body must be {"option": index from 0}`)
+		return
+	}
+	v, err := a.store.AnswerQTE(r.Context(), identity.UserID(r), id, *req.Option)
 	if err != nil {
 		a.fail(w, err)
 		return

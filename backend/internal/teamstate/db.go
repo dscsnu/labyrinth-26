@@ -28,6 +28,7 @@ type teamRows struct {
 	casts     []castRow     // every team_cast row, oldest first
 	boss      *bossRow      // team_boss, if the team has a row
 	powerups  []powerupRow  // team_powerup rows, one per kind ever held
+	answers   []QTEAnswer   // team_qte_answer rows, oldest first
 }
 
 // powerupRow is a team_powerup row: one kind of powerup for one team.
@@ -147,6 +148,25 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 		&boss.phaseHealth, &boss.phaseStartedAt, &boss.cooldownsReset}, func() error {
 		row := boss
 		get(id).boss = &row
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	// Each team's QTE answers, oldest first.
+	rows, err = d.pool.Query(ctx, `
+		SELECT team_id, qte_id, option, correct, granted, answered_by, answered_at
+		FROM team_qte_answer`+filter+`
+		ORDER BY team_id, answered_at, qte_id`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	var ans QTEAnswer
+	if _, err := pgx.ForEachRow(rows, []any{&id, &ans.QTE, &ans.Option, &ans.Correct, &ans.Granted, &ans.By, &ans.At}, func() error {
+		t := get(id)
+		a := ans
+		a.At = a.At.UTC()
+		t.answers = append(t.answers, a)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -334,9 +354,39 @@ func (d db) upsertCooldownsReset(ctx context.Context, teamID string, casts int) 
 // true WHERE it wasn't held. Exactly one row (execOne): memory said the team
 // didn't hold one, so Postgres must agree.
 func (d db) upsertPowerupHeld(ctx context.Context, teamID, kind string) error {
-	return execOne(ctx, d.pool, `
+	return holdPowerup(ctx, d.pool, teamID, kind)
+}
+
+// holdPowerup is the one statement that gives a team a powerup it didn't
+// hold, on the pool or inside a transaction: INSERT INTO team_powerup …
+// ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT held.
+// Exactly one row (execOne).
+func holdPowerup(ctx context.Context, q execer, teamID, kind string) error {
+	return execOne(ctx, q, `
 		INSERT INTO team_powerup (team_id, kind, held) VALUES ($1, $2, true)
 		ON CONFLICT (team_id, kind) DO UPDATE SET held = true WHERE NOT team_powerup.held`, teamID, kind)
+}
+
+// insertQTEAnswer records teamID's answer a to a QTE, in one transaction:
+//  1. INSERT INTO team_qte_answer … SELECT … FROM qte WHERE the QTE has
+//     started and a.Option is one of its options: exactly one row (memory
+//     checked both; the primary key backs one answer per team)
+//  2. if grant isn't "": holdPowerup(grant), the QTE's powerup, in the
+//     same transaction, so a right answer is never saved without it
+func (d db) insertQTEAnswer(ctx context.Context, teamID string, a QTEAnswer, grant string) error {
+	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
+		if err := execOne(ctx, tx, `
+			INSERT INTO team_qte_answer (team_id, qte_id, option, correct, granted, answered_by, answered_at)
+			SELECT $1, id, $3, $4, $5, $6, $7 FROM qte
+			WHERE id = $2 AND started_at IS NOT NULL AND $3 < cardinality(options)`,
+			teamID, a.QTE, a.Option, a.Correct, a.Granted, a.By, a.At); err != nil {
+			return err
+		}
+		if grant == "" {
+			return nil
+		}
+		return holdPowerup(ctx, tx, teamID, grant)
+	})
 }
 
 // updatePowerupActivated uses up teamID's held powerup of kind at at: one

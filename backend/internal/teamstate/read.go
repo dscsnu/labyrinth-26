@@ -48,6 +48,10 @@ type State struct {
 	CooldownsReset int
 	// Powerups are the powerups the team holds and the ones running.
 	Powerups Powerups
+	// QTEAnswers are the team's answers to quick-time events, one per QTE,
+	// oldest first (team_qte_answer). A write builds a new slice
+	// (copy-on-write).
+	QTEAnswers []QTEAnswer
 	// Version orders this team's snapshots (see live.Version): every apply
 	// sets the next one. Memory-only; it starts again, in a new Epoch, after a
 	// restart.
@@ -71,6 +75,24 @@ func (st State) LastCast() (c Cast, ok bool) {
 		return Cast{}, false
 	}
 	return st.Casts[len(st.Casts)-1], true
+}
+
+// QTEAnswer is a team's answer to a quick-time event: right or wrong at once,
+// its powerup granted with it.
+type QTEAnswer struct {
+	// QTE is the QTE's ID.
+	QTE int64
+	// Option is the index it chose.
+	Option int
+	// Correct reports that it was the right one.
+	Correct bool
+	// Granted reports that the team got the QTE's powerup (false when wrong,
+	// or when it already held that kind).
+	Granted bool
+	// By is the member who answered for the team.
+	By uuid.UUID
+	// At is when.
+	At time.Time
 }
 
 // Powerup is a kind of powerup: a temporary effect a team holds (at most one
@@ -437,6 +459,10 @@ type View struct {
 	CastCount int `json:"cast_count"`
 	// Powerups are the powerups the team holds and the ones running.
 	Powerups PowerupsView `json:"powerups"`
+	// QTE is the team's latest answer to a quick-time event, or null if it
+	// never answered one: compare its qte_id with the qte event's id to know
+	// whether the team answered the open one.
+	QTE *QTEAnswerView `json:"qte"`
 	// Version orders this team's snapshots: keep a copy only if its epoch
 	// differs from the one held, or it has a higher seq (live.Version).
 	Version live.Version `json:"version"`
@@ -473,6 +499,35 @@ type CastView struct {
 	// ShortQRCooldown reports that its waypoints cool for
 	// powerups.short_qr_cooldown (a short_qr_cooldown powerup was active).
 	ShortQRCooldown bool `json:"short_qr_cooldown"`
+}
+
+// QTEAnswerView is a QTEAnswer as JSON.
+type QTEAnswerView struct {
+	// QTEID is the QTE answered.
+	QTEID int64 `json:"qte_id"`
+	// Option is the index chosen.
+	Option int `json:"option"`
+	// Correct reports that it was right.
+	Correct bool `json:"correct"`
+	// Granted reports that the team got the QTE's powerup.
+	Granted bool `json:"granted"`
+	// AnsweredBy is the member who answered.
+	AnsweredBy uuid.UUID `json:"answered_by"`
+	// AnsweredAt is when.
+	AnsweredAt time.Time `json:"answered_at"`
+}
+
+// QTEStat counts the teams' answers to one QTE, for the admin overview.
+type QTEStat struct {
+	// Answered is how many teams answered.
+	Answered int `json:"answered"`
+	// Correct is how many answered right.
+	Correct int `json:"correct"`
+	// Granted is how many got the powerup (right, and not already holding
+	// it).
+	Granted int `json:"granted"`
+	// ByOption counts the answers per option index.
+	ByOption map[int]int `json:"by_option"`
 }
 
 // PowerupsView is a team's Powerups as JSON.
@@ -824,6 +879,10 @@ func (s *Store) view(teamID string, st State) View {
 		BossesDefeated: st.Boss.Defeated, DamageMultiplier: st.Boss.Multiplier,
 		Health: st.Boss.Health, KnockedOut: st.Boss.KnockedOut(), UnlockedPoints: s.unlockedPoints(st), LockedShapes: []string{},
 		CooldownShapes: []string{}, QRCooldowns: []QRCooldownView{}, Powerups: powerupsView(st.Powerups)}
+	if n := len(st.QTEAnswers); n > 0 {
+		a := st.QTEAnswers[n-1]
+		v.QTE = &QTEAnswerView{QTEID: a.QTE, Option: a.Option, Correct: a.Correct, Granted: a.Granted, AnsweredBy: a.By, AnsweredAt: a.At.UTC()}
+	}
 	for _, qc := range st.QRCooldowns { // already soonest first, ties by waypoint index (ID order)
 		v.QRCooldowns = append(v.QRCooldowns, QRCooldownView{WaypointID: c.Waypoint(qc.Waypoint).ID, Until: qc.Until.UTC()})
 	}
@@ -948,6 +1007,32 @@ func (s *Store) Standings() []Standing {
 			}
 		}
 		out = append(out, sd)
+	}
+	return out
+}
+
+// QTEStats returns every team's answers counted per QTE, from memory: what
+// the admin overview shows next to each QTE.
+func (s *Store) QTEStats() map[int64]QTEStat {
+	out := map[int64]QTEStat{}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.states {
+		for _, a := range e.cur.Load().QTEAnswers {
+			st := out[a.QTE]
+			if st.ByOption == nil {
+				st.ByOption = map[int]int{}
+			}
+			st.Answered++
+			st.ByOption[a.Option]++
+			if a.Correct {
+				st.Correct++
+			}
+			if a.Granted {
+				st.Granted++
+			}
+			out[a.QTE] = st
+		}
 	}
 	return out
 }

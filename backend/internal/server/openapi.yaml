@@ -683,6 +683,34 @@ paths:
                       payload: { oneOf: [{ type: "null" }, { $ref: "#/components/schemas/QTE" }] }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
+  /api/teams/me/state/qte/{qte_id}/answer:
+    post:
+      tags: [game]
+      summary: Answer the open quick-time event
+      description: >-
+        Any member answers the open QTE for the team, once: the first answer locks it in. It's right or wrong at
+        once (`team_state.qte`), and a right answer gives the team the QTE's powerup in the same write (wasted if
+        it already holds that kind: `granted` false). Members get `team_state` of type `qte_answered`. A resend
+        is `qte_already_answered`, even after the close. A knocked-out team can't answer.
+      parameters:
+        - { name: qte_id, in: path, required: true, schema: { type: integer, minimum: 1 }, example: 7 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [option]
+              additionalProperties: false
+              properties:
+                option: { type: integer, minimum: 0, description: "The chosen option's index (from 0).", example: 2 }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_qte_id`, `invalid_body`, `invalid_option`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_qte`, `not_in_team`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`, `qte_already_answered`, `qte_closed`, `knocked_out`" }
+
   /api/teams/me/state/powerups/{kind}:
     post:
       tags: [game]
@@ -824,7 +852,7 @@ paths:
         | `hello` | stream | `HelloEvent` | `connected` |
         | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `finished`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `powerup_granted`, `powerup_activated`, `powerup_ended`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `powerup_granted`, `powerup_activated`, `powerup_ended`, `qte_answered`, `resync` |
         | `qte` | game | `QTEEvent` | `snapshot`, `started`, `closed`, `resync` |
         | `leaderboard` | game | `LeaderboardEvent` | `snapshot`, `updated` |
 
@@ -956,10 +984,11 @@ components:
         `boss_attacked` or `knocked_out` instead), `revived` (an admin revived the team), `powerup_granted`
         (`powerups.held` gained a kind), `powerup_activated` (the leader used a damage_multiplier, heart or
         short_qr_cooldown), `powerup_ended` (with nobody acting, a short_qr_cooldown's window ended; an attack due
-        at the same moment sends `boss_attacked` or `knocked_out` instead), `resync` (reloaded after a failed write).
+        at the same moment sends `boss_attacked` or `knocked_out` instead), `qte_answered` (a member answered the
+        open quick-time event: `qte` is the answer; `powerups.held` grew if it was right), `resync` (reloaded after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, powerup_granted, powerup_activated, powerup_ended, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, powerup_granted, powerup_activated, powerup_ended, qte_answered, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
     QRCooldown:
       type: object
@@ -1255,7 +1284,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, powerups, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, powerups, qte, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["2001", "2002"] }
@@ -1377,6 +1406,21 @@ components:
             log's length, it missed some (a reconnect) and re-fetches the log.
           example: 1
         powerups: { $ref: "#/components/schemas/Powerups" }
+        qte:
+          description: >-
+            The team's latest answer to a quick-time event, or null if it never answered one. Compare `qte_id`
+            with the `qte` event's `id` to know whether the team answered the open one.
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [qte_id, option, correct, granted, answered_by, answered_at]
+              properties:
+                qte_id: { type: integer, example: 7 }
+                option: { type: integer, minimum: 0, example: 2 }
+                correct: { type: boolean, description: It was the right option. }
+                granted: { type: boolean, description: "The team got the QTE's powerup (false: wrong, or it already held that kind)." }
+                answered_by: { type: string, format: uuid }
+                answered_at: { type: string, format: date-time }
         version: { $ref: "#/components/schemas/Version" }
     PowerupKind:
       type: string
