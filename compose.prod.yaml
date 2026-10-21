@@ -107,7 +107,10 @@ services:
     logging: *logging
     env_file: backend/.env
     environment:
-      DATABASE_URL: postgres://labyrinth:${POSTGRES_PASSWORD}@postgres:5432/labyrinth?sslmode=disable
+      # pool_max_conns: pgx's default is the CPU count (min 4), so 4 on the
+      # c4-standard-4. 16 leaves room for write bursts, well under
+      # Postgres's max_connections (50).
+      DATABASE_URL: postgres://labyrinth:${POSTGRES_PASSWORD}@postgres:5432/labyrinth?sslmode=disable&pool_max_conns=16
       PORT: "3000"
     # Least privilege: the image already runs as uid 10001; here it also
     # gets a read-only filesystem (it writes no files), no Linux
