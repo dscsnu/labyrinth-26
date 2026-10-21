@@ -135,6 +135,8 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `game.locked_pattern_points` | 5 | `teamstate.Rules.LockedPatternPoints` |
 | `game.unlock_after_bosses` | 5 | `teamstate.Rules.UnlockAfterBosses` |
 | `game.qr_cooldown` | 5 m | `teamstate.Rules.QRCooldown` |
+| `powerups.damage_multiplier`, `powerups.heart` | 2, 1 | `teamstate.Rules.PowerupMultiplier`, `PowerupHeart` |
+| `powerups.short_qr_cooldown`, `powerups.short_qr_window` | 2 m, 5 m | `teamstate.Rules.ShortQRCooldown`, `ShortQRWindow` |
 | `game.boss_attack.interval`, `game.boss_attack.damage` | 10 m; 1–6 by serial | `bosses.Rules.AttackInterval`, `AttackDamage` (`BossDamage()`) |
 | `qr.rotate`, `qr.tolerance` | 5 s, 5 s | `qr.Rules.Rotate`, `Tolerance` |
 | `auth.token_ttl` | 12 h | `auth.NewTokens` |

@@ -36,6 +36,8 @@ type Settings struct {
 	QR QRSettings `toml:"qr"`
 	// Spell are the coefficients for pattern damage calculation.
 	Spell SpellSettings `toml:"spell"`
+	// Powerups are the powerups' strengths and durations.
+	Powerups PowerupSettings `toml:"powerups"`
 	// Auth are the sign-in and token timings.
 	Auth AuthSettings `toml:"auth"`
 	// Live are the event stream settings.
@@ -131,6 +133,20 @@ type GameSettings struct {
 	QRCooldown Duration `toml:"qr_cooldown"`
 	// BossAttack is how bosses attack ([game.boss_attack]).
 	BossAttack BossAttackSettings `toml:"boss_attack"`
+}
+
+// PowerupSettings is config.toml's [powerups] table: what each powerup does.
+type PowerupSettings struct {
+	// DamageMultiplier is what the next cast after a damage_multiplier
+	// powerup's activation multiplies its damage by.
+	DamageMultiplier float64 `toml:"damage_multiplier"`
+	// Heart is the health a heart powerup gives back, capped at game.health.
+	Heart int `toml:"heart"`
+	// ShortQRCooldown is how long a cast's waypoints cool while a
+	// short_qr_cooldown powerup is active, instead of game.qr_cooldown.
+	ShortQRCooldown Duration `toml:"short_qr_cooldown"`
+	// ShortQRWindow is how long a short_qr_cooldown powerup stays active.
+	ShortQRWindow Duration `toml:"short_qr_window"`
 }
 
 // BossAttackSettings is [game.boss_attack]: every boss attacks a team every
@@ -337,6 +353,11 @@ func (s Settings) validate() []error {
 		check(v > 0, "spell.base.%s must be positive", k)
 	}
 	check(s.Spell.Bonus.ConcaveQuad >= 0, "spell.bonus.concave_quad must not be negative")
+	check(s.Powerups.DamageMultiplier >= 1, "powerups.damage_multiplier must be at least 1")
+	check(s.Powerups.Heart >= 1, "powerups.heart must be at least 1")
+	check(s.Powerups.ShortQRCooldown.Duration >= 0 && s.Powerups.ShortQRCooldown.Duration <= s.Game.QRCooldown.Duration,
+		"powerups.short_qr_cooldown must be 0 to game.qr_cooldown")
+	check(s.Powerups.ShortQRWindow.Duration > 0, "powerups.short_qr_window must be positive")
 	check(s.Leaderboard.Size >= 1, "leaderboard.size must be at least 1")
 	check(s.Leaderboard.PublishEvery.Duration >= time.Second, "leaderboard.publish_every must be at least 1s")
 	check(s.Admin.UserSearchLimit >= 1, "admin.user_search_limit must be at least 1")

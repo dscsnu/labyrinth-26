@@ -47,6 +47,11 @@ per_100m = 0.8
 6 = 1200
 [spell.bonus]
 concave_quad = 75
+[powerups]
+damage_multiplier = 2.0
+heart = 1
+short_qr_cooldown = "2m"
+short_qr_window = "5m"
 [auth]
 token_ttl = "12h"
 login_code_ttl = "2m"
@@ -104,6 +109,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 || s.Game.QRCooldown.Duration != 5*time.Minute ||
+		s.Powerups.DamageMultiplier != 2 || s.Powerups.Heart != 1 || s.Powerups.ShortQRCooldown.Duration != 2*time.Minute || s.Powerups.ShortQRWindow.Duration != 5*time.Minute ||
 		s.Game.BossAttack.Interval.Duration != 10*time.Minute || s.Game.BossAttack.BossDamage()[6] != 6 || len(s.Game.BossAttack.Damage) != 6 ||
 		s.QR.Rotate.Duration != 5*time.Second || s.QR.Tolerance.Duration != 5*time.Second ||
 		s.Spell.Walkability != 1.5 || s.Spell.Per100m != 0.8 || s.Spell.Bonus.ConcaveQuad != 75 || s.Spell.BaseDamage()[4] != 186 || len(s.Spell.Base) != 6 ||
@@ -140,6 +146,11 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"negative unlock":                     {"unlock_after_bosses = 5", "unlock_after_bosses = -1", "game.unlock_after_bosses must be 0-6"},
 		"no health":                           {"health = 10", "health = 0", "game.health must be at least 1"},
 		"negative qr cooldown":                {`qr_cooldown = "5m"`, `qr_cooldown = "-1m"`, "game.qr_cooldown must not be negative"},
+		"powerup multiplier under 1":          {"damage_multiplier = 2.0", "damage_multiplier = 0.5", "powerups.damage_multiplier must be at least 1"},
+		"zero heart":                          {"heart = 1", "heart = 0", "powerups.heart must be at least 1"},
+		"negative short qr cooldown":          {`short_qr_cooldown = "2m"`, `short_qr_cooldown = "-1s"`, "powerups.short_qr_cooldown must be 0 to game.qr_cooldown"},
+		"short qr cooldown over qr_cooldown":  {`short_qr_cooldown = "2m"`, `short_qr_cooldown = "6m"`, "powerups.short_qr_cooldown must be 0 to game.qr_cooldown"},
+		"zero short qr window":                {`short_qr_window = "5m"`, `short_qr_window = "0s"`, "powerups.short_qr_window must be positive"},
 		"zero qr rotate":                      {`rotate = "5s"`, `rotate = "0s"`, "qr.rotate must be positive"},
 		"zero qr tolerance":                   {`tolerance = "5s"`, `tolerance = "0s"`, "qr.tolerance must be positive"},
 		"negative per_100m":                   {"per_100m = 0.8", "per_100m = -1", "spell.per_100m must not be negative"},

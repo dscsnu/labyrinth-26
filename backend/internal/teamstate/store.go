@@ -148,6 +148,19 @@ type Rules struct {
 	// QRCooldown is how long a cast's waypoints stay disabled for the team
 	// that cast it (game.qr_cooldown); 0 turns it off.
 	QRCooldown time.Duration
+	// PowerupMultiplier is what the next cast after a damage_multiplier
+	// powerup's activation multiplies its damage by
+	// (powerups.damage_multiplier).
+	PowerupMultiplier float64
+	// PowerupHeart is the health a heart powerup gives back, capped at
+	// Health (powerups.heart).
+	PowerupHeart int
+	// ShortQRCooldown is how long a cast's waypoints stay disabled while a
+	// short_qr_cooldown powerup is active (powerups.short_qr_cooldown).
+	ShortQRCooldown time.Duration
+	// ShortQRWindow is how long a short_qr_cooldown powerup stays active
+	// (powerups.short_qr_window).
+	ShortQRWindow time.Duration
 	// OnFinished, if not nil, is called with a team's ID once a cast has
 	// defeated its last boss (and at Load for a team found like that still
 	// IN_GAME), after the team's lock is released: server.Build passes

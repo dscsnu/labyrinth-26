@@ -116,6 +116,10 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		LockedPatternPoints: set.Game.LockedPatternPoints,
 		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
 		QRCooldown:          set.Game.QRCooldown.Duration,
+		PowerupMultiplier:   set.Powerups.DamageMultiplier,
+		PowerupHeart:        set.Powerups.Heart,
+		ShortQRCooldown:     set.Powerups.ShortQRCooldown.Duration,
+		ShortQRWindow:       set.Powerups.ShortQRWindow.Duration,
 		WriteTimeout:        set.Storage.WriteTimeout.Duration,
 		Epoch:               epoch,
 		// A team that defeats its last boss is FINISHED (teams' write).
