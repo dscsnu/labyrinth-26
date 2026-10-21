@@ -20,7 +20,8 @@
   import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
   import { z } from "zod";
   import { goto } from "$app/navigation";
-  import { onMount, untrack } from "svelte";
+  import jsQR from "jsqr";
+  import { onMount, tick, untrack } from "svelte";
   import type { PageProps } from "./$types";
 
   let { data }: PageProps = $props();
@@ -102,11 +103,10 @@
   let isLeader = $derived(!!team && team.leader_id === user?.id);
   let selectedShape = $derived(game.shapes.find((s) => s.id === selected));
   let busy = $state(false);
-  let waypoint = $state("");
   let message = $state<{ ok: boolean; text: string } | null>(null);
 
   onMount(() => {
-    const tick = setInterval(() => (now = clock.now()), 1000);
+    const ticker = setInterval(() => (now = clock.now()), 1000);
     const events = new EventSource("/api/events");
     events.onopen = () => (connected = true);
     events.onerror = () => (connected = false);
@@ -161,9 +161,24 @@
       goto("/team");
     });
     return () => {
-      clearInterval(tick);
+      clearInterval(ticker);
       events.close();
+      closeScanner();
     };
+  });
+
+  // What a player sees for a refused scan or selection; other codes show the
+  // backend's own code and message.
+  const errorText: Record<string, string> = {
+    invalid_qr: "That's not a Labyrinth code.",
+    qr_expired: "The code rotated: scan it again.",
+    waypoint_on_cooldown:
+      "That point was just used in a cast. It opens again once its QR cooldown ends.",
+    shape_on_cooldown: "You can't cast the same class twice in a row.",
+  };
+  const refused = (json: { code?: string; message?: string }) => ({
+    ok: false,
+    text: (json.code && errorText[json.code]) ?? `${json.code}: ${json.message}`,
   });
 
   const call = async (path: string, method: string, body?: unknown) => {
@@ -179,8 +194,7 @@
     busy = true;
     const { res, json } = await call("/play/selection", "PUT", { shape });
     busy = false;
-    if (!res.ok)
-      return (message = { ok: false, text: `${json.code}: ${json.message}` });
+    if (!res.ok) return (message = refused(json));
     observe(TeamStateSchema.parse(json.payload));
     message = restart
       ? { ok: true, text: "attempt restarted: every scan cleared" }
@@ -201,15 +215,66 @@
     message = { ok: true, text: "selection cleared" };
   };
 
-  const scan = async (e: SubmitEvent) => {
-    e.preventDefault();
+  // The QR scanner: the camera, read with jsQR every 250 ms (as /test-scan
+  // does). A code is the waypoint's signed, rotating token; it's posted as
+  // is, and the backend verifies it and resolves the waypoint.
+  let scanning = $state(false);
+  let video = $state<HTMLVideoElement>();
+  let stream: MediaStream | null = null;
+  let loop: ReturnType<typeof setInterval> | null = null;
+  // The last token posted: the camera sees the same code on every frame
+  // until it rotates, and it's posted once.
+  let lastToken = "";
+
+  const openScanner = async () => {
+    message = null;
+    lastToken = "";
+    scanning = true;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+      });
+      await tick();
+      if (!scanning || !video) return closeScanner();
+      video.srcObject = stream;
+      await video.play();
+      loop = setInterval(decode, 250);
+    } catch (e) {
+      message = { ok: false, text: `Camera unavailable: ${e}` };
+    }
+  };
+
+  const closeScanner = () => {
+    scanning = false;
+    if (loop) clearInterval(loop);
+    loop = null;
+    stream?.getTracks().forEach((t) => t.stop());
+    stream = null;
+  };
+
+  const decode = () => {
+    if (!video || busy) return;
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h) return;
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, w, h);
+    const code = jsQR(ctx.getImageData(0, 0, w, h).data, w, h);
+    if (code?.data && code.data !== lastToken) {
+      lastToken = code.data;
+      void scan(code.data);
+    }
+  };
+
+  const scan = async (qr: string) => {
     busy = true;
-    const { res, json } = await call("/play/scan", "POST", {
-      waypoint_id: waypoint.trim(),
-    });
+    const { res, json } = await call("/play/scan", "POST", { qr });
     busy = false;
-    if (!res.ok)
-      return (message = { ok: false, text: `${json.code}: ${json.message}` });
+    if (!res.ok) return (message = refused(json));
     const result = ScanResultSchema.parse(json.payload);
     observe(result.state);
     const name = selectedShape?.name ?? selected;
@@ -227,10 +292,9 @@
         : result.outcome === "wrong_scan"
           ? {
               ok: false,
-              text: `${waypoint.trim()} doesn't match any ${name} pattern with the points already scanned. Restart the attempt.`,
+              text: `${result.state.stack.at(-1)?.waypoint_id ?? "That point"} doesn't match any ${name} pattern with the points already scanned. Restart the attempt.`,
             }
           : { ok: true, text: "scan added" };
-    waypoint = "";
   };
 
   const memberName = (id: string) =>
@@ -320,10 +384,12 @@
 <div class="fixed inset-x-0 top-[25dvh] bottom-0">
   <MapView bind:level={zoomLevel} markers={MAP_POINTS} />
 
-  <!-- QR scanner button, bottom left. The scanner isn't built yet, so it does nothing. -->
+  <!-- QR scanner button, bottom left: opens the camera. -->
   <button
     type="button"
     aria-label="Scan QR code"
+    aria-haspopup="dialog"
+    onclick={openScanner}
     class="absolute bottom-4 left-4 h-20 w-20 rounded-full transition-transform active:scale-90"
   >
     <img
@@ -389,6 +455,44 @@
     </button>
   </div>
 </div>
+
+<!-- The QR scanner: the camera over the whole screen, the last result
+     below it. It stays open so a player can scan several points in a row. -->
+{#if scanning}
+  <div
+    role="dialog"
+    aria-modal="true"
+    aria-label="Scan QR code"
+    class="fixed inset-0 z-30 flex flex-col gap-4 bg-ink p-4 font-pixel text-[16px] leading-[24px] text-white"
+  >
+    <header class="flex items-center justify-between">
+      <h2 class="uppercase">Scan a point</h2>
+      <button
+        type="button"
+        onclick={closeScanner}
+        class="pixel-box bg-ink px-3 py-1 uppercase hover:bg-pink active:pixel-box-pressed"
+      >
+        Close
+      </button>
+    </header>
+    <!-- svelte-ignore a11y_media_has_caption -->
+    <video
+      bind:this={video}
+      autoplay
+      playsinline
+      muted
+      class="min-h-0 w-full flex-1 object-cover"
+    ></video>
+    <p
+      aria-live="polite"
+      class="min-h-[48px] text-[8px] leading-[16px] uppercase"
+      class:text-pink={message && !message.ok}
+      class:text-cyan={message?.ok}
+    >
+      {busy ? "Checking…" : (message?.text ?? "Point the camera at the point's QR code.")}
+    </p>
+  </div>
+{/if}
 
 <SpellBook bind:open={bookOpen} shapes={game.shapes} {casts} {selected} />
 
@@ -493,7 +597,7 @@
     <p>No type selected.</p>
   {/if}
 
-  <h2>2. Enter waypoints</h2>
+  <h2>2. Scan waypoints</h2>
   {#if ts.poisoned}
     <p style="color: red">
       A scan doesn't match any {selectedShape?.name ?? selected} pattern, so this
@@ -503,21 +607,13 @@
       >
     </p>
   {/if}
-  <form onsubmit={scan}>
-    <input
-      bind:value={waypoint}
-      inputmode="numeric"
-      pattern="[0-9]{4}"
-      maxlength="4"
-      placeholder="1001"
-      required
+  <p>
+    <button
+      onclick={openScanner}
       disabled={!selected || ts.poisoned || ts.knocked_out || busy}
-    />
-    <button disabled={!selected || ts.poisoned || ts.knocked_out || busy}
-      >Scan</button
+      >Scan a QR code</button
     >
-    <small>dev seed waypoints: 1001–1011</small>
-  </form>
+  </p>
 
   {#if message}
     <p style:color={message.ok ? "green" : "red"}>{message.text}</p>
