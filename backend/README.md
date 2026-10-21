@@ -106,6 +106,8 @@ docker compose -f compose.prod.yaml ps                          # both should sa
 docker compose -f compose.prod.yaml logs -f backend             # one line per request; panics at level=ERROR
 ```
 
+**Logs** are rotated per container (`x-logging` in `compose.prod.yaml`): 100 MB files, at most 50, so at most **5 GB** each, the oldest lines deleted past it. A new container (a deploy, or `down`) starts a fresh log; a crash and restart keeps it. Logging is non-blocking: if writing falls behind, lines are dropped rather than requests slowed.
+
 What it handles on its own (each tested on 2026-10-21):
 
 | Failure | Recovery |
