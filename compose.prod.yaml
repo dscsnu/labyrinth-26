@@ -1,0 +1,111 @@
+# Production: the backend and its Postgres on one Docker host. Run from the
+# repository root:
+#
+#   docker compose -f compose.prod.yaml --env-file backend/.env up -d --build   # start, or deploy a new version
+#   docker compose -f compose.prod.yaml --env-file backend/.env logs -f backend # one line per request
+#   docker compose -f compose.prod.yaml --env-file backend/.env ps              # health of both
+#
+# Secrets come from backend/.env (see backend/.env.example), plus
+# POSTGRES_PASSWORD (URL-safe: openssl rand -hex 24). --env-file is what fills
+# in ${POSTGRES_PASSWORD} below; without it compose stops with "set
+# POSTGRES_PASSWORD". DATABASE_URL and PORT in backend/.env are ignored:
+# they're set below for the container.
+#
+# Both services restart whenever they exit (a crash, a lost instance lock, the
+# host rebooting), with no retry cap: a backend that starts while the old
+# one's lock is still held refuses, exits, and succeeds a retry later. Docker
+# waits longer between each retry (doubling, up to a minute), so after a long
+# Postgres outage the backend may take up to a minute to come back.
+#
+# Exactly one backend: never scale this service. A deploy (up -d --build)
+# stops the old container before starting the new one, as it must.
+#
+# Nothing is published on the host. Two networks: "labyrinth", where the
+# backend is http://backend:3000 and which a reverse proxy or the frontend
+# joins to reach it (as a service in this file, or from another compose
+# file: networks: { labyrinth: { external: true } }); and "db", internal,
+# where only the backend reaches Postgres (postgres:5432). Nothing on
+# "labyrinth" can reach Postgres, and Postgres has no route out.
+# psql and pg_dump run inside the Postgres container:
+#   docker compose -f compose.prod.yaml --env-file backend/.env exec postgres psql -U labyrinth
+name: labyrinth-26-prod
+
+# Every container's logs, rotated: 100 MB files, the oldest deleted once there
+# are 50, so at most 5 GB each (less on disk: rotated files are compressed).
+# At 10,000 players the backend writes about a line per request, which
+# unrotated would grow until the disk (shared with Postgres) filled. Once the
+# cap is reached the oldest lines go; a new container (a deploy, or down) starts
+# a fresh log, a restart keeps it. Non-blocking: if writing ever falls behind,
+# lines are dropped rather than the backend stalling on stdout.
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "100m"
+    max-file: "50"
+    mode: non-blocking
+    max-buffer-size: "4m"
+
+networks:
+  labyrinth:
+    name: labyrinth
+  db:
+    internal: true # no route out, and only the services below on it
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: labyrinth
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in backend/.env and pass --env-file backend/.env}
+      POSTGRES_DB: labyrinth
+    networks: [db]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labyrinth"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    logging: *logging
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgres://labyrinth:${POSTGRES_PASSWORD}@postgres:5432/labyrinth?sslmode=disable
+      PORT: "3000"
+    # Least privilege: the image already runs as uid 10001; here it also
+    # gets a read-only filesystem (it writes no files), no Linux
+    # capabilities, and no way to gain any (setuid binaries included).
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [labyrinth, db]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true # restarting Postgres through compose restarts the backend too
+    # One open file per event stream: 10,000 players need well over the
+    # default 1,024.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # SIGTERM, then up to server.shutdown_timeout (10 s) to finish requests,
+    # before Docker kills it.
+    stop_grace_period: 20s
+    # Marks the container unhealthy (shown in ps) when /health fails,
+    # including while Postgres is unreachable. Docker doesn't restart on it:
+    # watch it from outside and alert.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:
