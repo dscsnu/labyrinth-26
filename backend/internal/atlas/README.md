@@ -44,16 +44,15 @@ The client, the code and the spell PR use different words. The code's are used h
 | **Nested pattern** | A pattern contained in a larger pattern of the same shape. Refused at startup: scanning the larger one would pass through the smaller one first and complete it early. |
 | **Spell** | What completing a pattern casts: `Spell{Damage, Class}`, one per pattern, read from Postgres once at startup (`pattern.damage`, `pattern.spell_class_id`; see [Spells](#spells)). |
 | **Spell class** | A group of patterns by **how many waypoints they have**: every pattern of *n* waypoints, whatever its shape, is in the class whose `points` is *n* (`class_4` for every 4-point pattern, whatever its shape). A row of `spell_class` (migration 0012): a string `id` (`"class_4"`), a display `name` (`"Class 4"`) and its `points`. Each pattern names its class (`pattern.spell_class_id`); `Load` refuses a pattern whose class doesn't match its waypoint count. Held on `Pattern.Spell.Class` (the ID). |
-| **Position** | A waypoint on a flat local plane, in metres east (X) and north (Y) of an origin. **Not computed yet**: zero on main. |
 | **Read-only use case** | Static content, no runtime writes, no routes. It has `doc.go`, `read.go`, `db.go`, `store.go` and this README, and no `api.go` or `write.go` (AGENTS.md §3). |
 
 ## The flow
 1. **Content is written** by migrations and seeds (`go run . seed` loads the 2026 content, `seeds/2026.sql`), with the backend stopped. The atlas never writes.
 2. **`server.Build` calls `atlas.Load` first**, before any use case that reads it, with `atlas.Rules{MaxPatternPoints: game.max_pattern_points}`.
 3. **`Load` reads** every waypoint, shape and pattern (`db.selectAtlas`), **validates** them (`New`), and builds the lookup tables. Bad content refuses startup.
-4. **(Not yet) `Load` computes spells**: each `Waypoint.Position`, then each `Pattern.Spell` (see [Spells](#spells)).
+4. **`Load` computes nothing**: each pattern's spell (damage and class) is read as stored; the geometry behind the damage runs offline, in `internal/spells` (see [Spells](#spells)).
 5. **`Load` logs** `msg="loaded atlas" waypoints=10 shapes=5 patterns=837` (2026 seed) and returns the `*Atlas`.
-6. **Other use cases read it** through small interfaces of their own. teamstate declares `teamstate.Atlas` and uses it to validate selections and scans, label wrong scans (`FitsShape`), detect completions (`PatternFor`), rebuild stored state, and build `GET /api/game/shapes`.
+6. **Other use cases read it** through small interfaces of their own. teamstate declares `teamstate.Atlas` and uses it to validate selections and scans, label wrong scans (`FitsShapeCastable`), detect completions (`PatternFor`), rebuild stored state, and build `GET /api/game/shapes`.
 
 **Why a use case of its own.** Content is the same for every team and never changes while running; team state changes on every scan. Keeping them apart means the static part has no locks, no write-through and no reconcile, and the spell model (pure geometry over content) has a home that isn't teamstate's write path.
 
@@ -75,17 +74,14 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 - All methods are on values; none modifies its receiver. Callers: teamstate (`State` holds one of each) and `New`.
 
 ### `read.go`: types and lookups
-- **Types:** `Waypoint`, `Point`, `Shape`, `Pattern`, `Spell`, `Geometry`, `Atlas` (see [Data model: memory](#data-model-memory)).
-- **`Geometry.Convex(set)`**: `Hull == set`, every waypoint of the set on its hull. Unused until spells are computed.
+- **Types:** `Waypoint`, `Shape`, `Pattern`, `Spell`, `SpellClass`, `Atlas` (see [Data model: memory](#data-model-memory)).
 - **Counts:** `WaypointCount()`, `ShapeCount()`, `PatternCount()`. Indexes run from 0 to count − 1.
 - **By index:** `Waypoint(i)`, `Shape(i)`, `Pattern(i)` return copies. An out-of-range index panics (slice indexing); callers only pass indexes the atlas gave them.
 - **By ID:** `WaypointIndex(id)`, `ShapeIndex(id)`, `PatternByID(id)` (Postgres key) return `(index, ok)`.
 - **`SetOf(ids)`**: IDs to a `WaypointSet`; `unknown waypoint "9999"` on the first unknown ID. Duplicates collapse (it's a set). Used by `New` and teamstate's `stateOf`.
 - **`PatternFor(set)`**: the pattern made of **exactly** these waypoints, one map lookup. Teamstate's completion check.
-- **`ShapePatterns(shape)`**: the shape's pattern indexes, in key order. The slice is shared: callers must not modify it. Used by `FitsShape`, `checkNesting` and teamstate's `newGame`.
-- **`FitsShape(shape, set)`**: whether some pattern of the shape contains every waypoint in `set` (see [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)). The empty set fits nothing.
-- **`FitsShapeCastable(shape, set, maxPoints, cooldown)`**: `FitsShapeWithin` also leaving out the shape's patterns of spell class `cooldown` (`""` leaves none out). Teamstate's wrong-scan check: it passes the team's unlocked size and its cooldown class (its last cast's), so a set that only a locked or cooled-down pattern contains is wrong. One string comparison more per pattern than `FitsShapeWithin`, which calls it with `""`.
-- **`FitsShapeWithin(shape, set, maxPoints)`**: `FitsShape` counting only the shape's patterns of at most `maxPoints` waypoints: `FitsShapeCastable` with no cooldown. Teamstate's limit is the team's unlocked size (`unlocked_points`: **4** until the team has defeated **5** bosses, `game.locked_pattern_points` − 1 and `game.unlock_after_bosses`, then **6**), so a set that only a locked pattern contains is wrong. The same scan as `FitsShape` plus a popcount (`Waypoints.Len()`) per pattern.
+- **`ShapePatterns(shape)`**: the shape's pattern indexes, in key order. The slice is shared: callers must not modify it. Used by `checkNesting` and teamstate's `newGame` (`FitsShapeCastable` reads `shapePatterns` directly).
+- **`FitsShapeCastable(shape, set, maxPoints, cooldown)`**: whether some pattern of the shape with at most `maxPoints` waypoints and not of spell class `cooldown` (`""` leaves none out: every pattern has a class) contains every waypoint in `set` (see [Does a set still fit the shape?](#does-a-set-still-fit-the-shape)). The empty set fits nothing. Teamstate's wrong-scan check: it passes the team's unlocked size (`unlocked_points`: **4** until the team has defeated **5** bosses, `game.locked_pattern_points` − 1 and `game.unlock_after_bosses`, then **6**) and its cooldown class (its last cast's), so a set that only a locked or cooled-down pattern contains is wrong. With `maxPoints` = `game.max_pattern_points` and `""`, every pattern of the shape counts.
 - **`SpellClasses()`**: every spell class, ascending by points. The slice is shared: callers must not modify it. Used by teamstate's `newGame` for `GET /api/game/shapes`.
 - **`WaypointIDs(set)`**: a set back to IDs, sorted. Used for every view and `ScanResult.Pattern`, and the string key for a pattern ([Spells](#spells), identity).
 - No lookup locks or touches Postgres. Only `WaypointIDs` and the `Indexes` methods allocate (their result slices).
@@ -97,11 +93,11 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 - **`Load(ctx, pg, log, rules)`**: `selectAtlas` (error → `load atlas: …`), then `New(src, rules)` (error → `invalid atlas: …`), then the `loaded atlas` log line. Called once, by `server.Build`, and by the tests.
 - **`New(src, rules)`**: builds an Atlas from a `Source`, validating in the order of [Loading at startup](#loading-at-startup) and builds every slice and map. Waypoints and shapes take their index from their row order (ID order, from the query); patterns from theirs (key order).
 - **`spellClasses(src)`**: validates the classes (points at least 1; each ID and each points value at most once) and returns them sorted by points, with an index by ID. Called first by `New`.
-- **`checkNesting(shape, patterns)`**: for every pair of the shape's patterns, refuses one that's smaller than and contained in another. O(n²) per shape: 156² ≈ 24,000 AND-compares for the seed's triangles, once at startup.
+- **`checkNesting(shape, patterns)`**: for every pair of the shape's patterns, refuses one that's smaller than and contained in another. O(n²) per shape: 252² ≈ 63,500 AND-compares for the 2026 seed's pentagons, once at startup.
 
 ### `db.go`: SQL (reads only)
 - **`db{pool}`**: the pool. The atlas never writes; content changes only through migrations and seeds, with the backend stopped.
-- **`Source`** (`Waypoints []Waypoint`, `Shapes []Shape`, `Patterns []PatternSource`) and **`PatternSource`** (`ID`, `Shape` (the shape's ID), `Waypoints []string`): the content tables as stored, by IDs. `Load` reads one from Postgres; tests build one by hand and pass it to `New`. Exported for that reason (AGENTS.md §13).
+- **`Source`** (`Waypoints []Waypoint`, `Shapes []Shape`, `Patterns []PatternSource`, `SpellClasses []SpellClass`) and **`PatternSource`** (`ID`, `Shape` (the shape's ID), `Waypoints []string`, `Damage`, `Class` (the spell class's ID, `""` if none)): the content tables as stored, by IDs. Declared in `store.go`; `selectAtlas` fills one from Postgres; tests build one by hand and pass it to `New`. Exported for that reason (AGENTS.md §13).
 - **`selectAtlas(ctx)`** runs three queries on the pool, not in a transaction (nothing writes content while the backend runs, and the instance lock keeps `seed` out):
   1. `SELECT id, name, latitude, longitude FROM waypoint ORDER BY id`
   2. `SELECT id, name FROM shape ORDER BY id`
@@ -110,9 +106,6 @@ The package comment: what the atlas owns, that it's static and loaded once, that
 
 ### `tests/store_test.go`
 See [Tests](#tests).
-
-### `geometry.go` (to add)
-Pure maths for spells, no I/O and no `Atlas` state: the projection, the shortest closed tour, the convex hull. Listed here per AGENTS.md §3 (supporting files must be in the README). See [Spells](#spells).
 
 ## Data model: memory
 ```
@@ -124,7 +117,7 @@ Atlas                                built once by Load; never modified after
   waypointIndex  map[string]int      "2007" → 6
   shapeIndex     map[string]int      "quadrilateral" → 3
   patternByID    map[int]int         Postgres key → index (87 → 86)
-  patternBySet   map[WaypointSet]int exact set → index (195 → 86)
+  patternBySet   map[WaypointSet]int exact set → index (195 → 187)
   shapePatterns  [][]int             shape index → its pattern indexes, key order
 ```
 
@@ -134,28 +127,22 @@ Atlas                                built once by Load; never modified after
 | | `Name` | `string` | display, e.g. `"G Block Junc"` (JSON `name`) |
 | | `Latitude` | `float64` | degrees, WGS 84, from Postgres (JSON `latitude`) |
 | | `Longitude` | `float64` | degrees, WGS 84, from Postgres (JSON `longitude`) |
-| | `Position` | `Point` | metres on the campus plane; **zero until spells are computed**; never in JSON (`json:"-"`) |
-| `Point` | `X`, `Y` | `float64` | metres east, north of a fixed origin |
 | `Shape` | `ID` | `string` | what a selection names, e.g. `"quadrilateral"` (JSON `id`) |
-| | `Name` | `string` | display, e.g. `"Square"` (JSON `name`) |
+| | `Name` | `string` | display, e.g. `"Quadrilateral"` (JSON `name`) |
 | `Pattern` | `ID` | `int` | Postgres `pattern.id`; what `team_pattern` stores |
 | | `Shape` | `int` | its shape's index |
 | | `Waypoints` | `WaypointSet` | its waypoints |
-| | `Spell` | `Spell` | what completing it casts; **zero until computed** |
+| | `Spell` | `Spell` | what completing it casts, read from `pattern.damage` and `pattern.spell_class_id` |
 | `Spell` | `Damage` | `int` | what the spell deals |
 | | `Class` | `string` | its spell class's ID, e.g. `"class_4"`: the class of patterns with its waypoint count (`pattern.spell_class_id`) |
 | `SpellClass` | `ID` | `string` | stable identifier clients see, e.g. `"class_4"` (JSON `id`) |
 | | `Name` | `string` | display, e.g. `"Class 4"` (JSON `name`) |
 | | `Points` | `int` | the waypoint count of its patterns (JSON `points`) |
-| | `Geometry` | `Geometry` | what `Damage` is computed from, kept for display and tests |
-| `Geometry` | `Hull` | `WaypointSet` | waypoints on the set's convex hull; interior points are `pattern.Waypoints &^ Hull` |
-| | `TourM` | `float64` | shortest closed loop through every waypoint, straight-line metres (out and back for 2, 0 for 1) |
-| | `WalkM` | `float64` | `TourM × Walkability`: estimated walking metres |
 
-- **Size**, from `unsafe.Sizeof` on amd64: `Waypoint` 64 bytes, `Shape` 32, `Pattern` 56 (of which `Spell` 32). With the 2026 seed the three slices are 10 × 64 + 5 × 32 + 837 × 56 = **47,672 bytes**, plus the strings and the five maps: tens of KB. At the limits (64 waypoints, 64 shapes, 2048 patterns) the slices are about 121 KB.
+- **Size**, from `unsafe.Sizeof` on amd64: `Waypoint` 48 bytes, `Shape` 32, `Pattern` 48 (of which `Spell` 24). With the 2026 seed the three slices are 10 × 48 + 5 × 32 + 837 × 48 = **40,816 bytes**, plus the strings and the five maps: tens of KB. At the limits (64 waypoints, 64 shapes, 2048 patterns) the slices are about 101 KB (103,424 bytes).
 - **Why slices plus maps.** Teamstate stores indexes in fixed-size bitsets, so it needs index → item (slices) and ID → index (maps). Patterns are found by set, not ID, during play, hence `patternBySet`; `patternByID` is only for loading `team_pattern`.
 - **Why `Pattern` holds `Spell` by value.** A scan that completes a pattern reads `Pattern(i).Spell` as a field: no map, no computation.
-- **No `json` tags on `Pattern`, `Spell`, `Geometry`, `Point`.** No route serialises them today.
+- **No `json` tags on `Pattern`, `Spell`.** No route serialises them today.
 
 ## Data model: Postgres
 Migration `0003_content_progress.sql`. The atlas reads these tables; nothing at runtime writes them.
@@ -189,11 +176,9 @@ Teamstate's tables refer to these (`team_scan.waypoint_id`, `team_pattern.patter
 | `shape` (ID order) | `shapes`, `shapeIndex` |
 | `pattern` + `pattern_waypoint` (key order) | `patterns` (`ID`, `Shape`, `Waypoints`, `Spell.Damage`, `Spell.Class`), `patternByID`, `patternBySet`, `shapePatterns` |
 | `spell_class` (points order) | `classes` |
-| (none: computed from `latitude`/`longitude`) | `Waypoint.Position`, once spells are added |
-| (none: computed from positions and `Rules.Spell`) | `Pattern.Spell`, once spells are added |
 
-- **Exact on every start.** Every field is either read from Postgres or a pure function of what was read and of `config.toml`. The same rows and config give the same atlas, indexes included (the queries are ordered).
-- **Not persisted, by design:** indexes, the maps, positions and spells. They're derived; storing them would be a second copy that can drift (see [Spells](#spells), single source of truth).
+- **Exact on every start.** Every field is either read from Postgres or a pure function of what was read and of `config.toml` (`game.max_pattern_points`, which only validates). The same rows and config give the same atlas, indexes included (the queries are ordered).
+- **Not persisted, by design:** indexes and the maps. They're derived; storing them would be a second copy that can drift. Spells are persisted (`pattern.damage`, `pattern.spell_class_id`), computed offline by `cmd/spells` (see [Spells](#spells), single source of truth).
 - **Changes need a restart.** Content edited while the backend runs isn't seen until the next start.
 
 ## How waypoints and patterns are stored
@@ -223,23 +208,22 @@ Example: the quadrilateral `2001, 2002, 2007, 2008` (pattern `188`) is indexes 0
 | `shapeIndex` | `"quadrilateral"` → 3 | validating a selection |
 | `patternBySet` | `195` → 187 (pattern `188`, the quadrilateral) | the completion check, one map lookup (`PatternFor`; about 2 ns on the test fixture, `BenchmarkLookups`) |
 | `patternByID` | `87` → 86 | loading `team_pattern` (teamstate's `stateOf`) |
-| `shapePatterns` | `3` → the quadrilateral's 210 pattern indexes | `FitsShape`, `checkNesting`, teamstate's `newGame` (each shape's count and sizes) |
+| `shapePatterns` | `3` → the quadrilateral's 210 pattern indexes | `FitsShapeCastable`, `checkNesting`, teamstate's `newGame` (each shape's count and sizes) |
 
 ### Bit operations
 | Question | Operation |
 |---|---|
 | Visited 2007? | `set & (1<<6) != 0` (`Has`) |
 | Stack plus this scan | `set \| 1<<w` (`With`) |
-| Still inside a pattern of the shape? | any `p` of the shape with `p & set == set` (`Contains`, in `FitsShape`) |
+| Still inside a pattern of the shape? | any `p` of the shape with `p & set == set` (`Contains`, in `FitsShapeCastable`) |
 | Stack *is* a pattern? | `patternBySet[set]` (exact, `PatternFor`) |
 | How many points? | `bits.OnesCount64(set)` (`Len`) |
-| Interior points of a pattern | `p.Waypoints &^ p.Spell.Geometry.Hull` |
 
 ### Does a set still fit the shape?
-`FitsShape(shape, set)`: is there a pattern of the shape containing every waypoint in `set`? Teamstate calls its bounded form, `FitsShapeWithin(shape, set, maxPoints)`, with the stack plus the new scan and the team's unlocked size; `false` marks the scan **wrong**, it doesn't reject it. `FitsShapeWithin` is the same steps with one more condition in step 2: the pattern has at most `maxPoints` waypoints.
+`FitsShapeCastable(shape, set, maxPoints, cooldown)`: is there a pattern of the shape the team may cast now containing every waypoint in `set`? Teamstate calls it with the stack plus the new scan, the team's unlocked size and its cooldown class; `false` marks the scan **wrong**, it doesn't reject it.
 
 1. The empty set fits nothing (`false` at once).
-2. For each index `p` in `shapePatterns[shape]`: if `patterns[p].Waypoints & set == set`, return `true`.
+2. For each index `p` in `shapePatterns[shape]`: if `patterns[p]` has at most `maxPoints` waypoints, isn't of class `cooldown`, and `patterns[p].Waypoints & set == set`, return `true`.
 3. None matched: `false`.
 
 One AND-compare per pattern of the shape, with an early exit. The 2026 seed:
@@ -252,9 +236,9 @@ One AND-compare per pattern of the shape, with an early exit. The 2026 seed:
 | `pentagon` | 252 | 5 |
 | `hexagon` | 210 | 6 |
 
-**Every combination is a pattern**, so with the 2026 seed `FitsShape` is `true` for any set of the 10 checkpoints no bigger than the shape's size: the first pattern checked usually contains it. A miss (and so a wrong scan) needs a waypoint in none of the shape's patterns, which the real content doesn't have (tests add one, `2099`). What still narrows a fit is `FitsShapeWithin` (the unlock) and `FitsShapeCastable` (the class cooldown).
+**Every combination is a pattern**, so with the 2026 seed `FitsShapeCastable` with no size limit and no cooldown is `true` for any set of the 10 checkpoints no bigger than the shape's size: the first pattern checked usually contains it. A miss (and so a wrong scan) needs a waypoint in none of the shape's patterns, which the real content doesn't have (tests add one, `2099`). What still narrows a fit is the size limit (the unlock) and the class cooldown.
 
-Measured once on the 2025 seed, by hand (the committed `BenchmarkLookups` runs on the small test fixture instead): about **1 ns** on a hit (early exit), about **9 ns** on a miss (all 156 of its triangles checked). A 2026 miss scans at most 252 patterns (the pentagons).
+Measured once on the 2025 seed, by hand, before the size and class conditions were added (the committed `BenchmarkLookups` runs on the small test fixture instead): about **1 ns** on a hit (early exit), about **9 ns** on a miss (all 156 of its triangles checked). A 2026 miss scans at most 252 patterns (the pentagons).
 
 **Why not a lookup table.** The alternative is a precomputed map from every `(shape, subset of one of its patterns)` to `true`. On the 2025 seed that was **983** entries, and, measured once there, a flat **15–19 ns**: hashing a key costs more than scanning at most 156 `uint64`s. So the loop stays. Revisit only if a shape grows to thousands of patterns.
 
@@ -299,7 +283,6 @@ The generator's coefficients live in `config.toml` under `[spell]` (the formula:
 
 ### Drift prevention
 The test `TestPatternDamageDrift` in `internal/spells/tests/` recomputes every pattern's damage from database waypoints and coefficients and verifies it matches `pattern.damage`. Any change to coordinates or coefficients without re-running `go run ./cmd/spells` fails the test.
-| `DAMAGE_MODEL.md` | this section |
 
 Open questions are under [Not decided yet](#not-decided-yet).
 
@@ -321,14 +304,14 @@ Open questions are under [Not decided yet](#not-decided-yet).
 ### 2. Lookups during a quadrilateral (teamstate's calls)
 Team selected `quadrilateral` (shape 3):
 
-| Scan | Set | `FitsShape(3, set)` | `PatternFor(set)` | Teamstate does |
+| Scan | Set | `FitsShapeCastable(3, set, 6, "")` | `PatternFor(set)` | Teamstate does |
 |---|---|---|---|---|
 | `2001` | 1 | true | none | `scan_added` |
 | `2002` | 3 | true | 0, a **line** (shape 1 ≠ 3) | `scan_added`: wrong shape, no completion |
 | `2007` | 67 | true (inside 195) | 49, a **triangle** (shape 4 ≠ 3) | `scan_added`: wrong shape, no completion |
 | `2008` | 195 | true | 187, shape 3 | `pattern_completed`, `WaypointIDs(195)` = `["2001","2002","2007","2008"]`; `team_pattern` stores `Pattern(187).ID` = 188 |
 
-Any third scan would have fit: every 4 of the 10 checkpoints is a quadrilateral, so every set of up to 4 is inside one. Only a waypoint in no pattern (a test's `2099`) makes `FitsShape` `false` and teamstate mark the scan wrong. (2025's drawn shapes were different: there, `1001 1002 1003` was in no square, so that third scan was wrong.)
+Any third scan would have fit: every 4 of the 10 checkpoints is a quadrilateral, so every set of up to 4 is inside one. Only a waypoint in no pattern (a test's `2099`), a locked size or the cooldown class makes `FitsShapeCastable` `false` and teamstate mark the scan wrong. (2025's drawn shapes were different: there, `1001 1002 1003` was in no square, so that third scan was wrong.)
 
 ### 3. A refused start
 A migration adds a shape `zigzag` with pattern `900`, waypoints `2001 2002 2007` (set 67), and pattern `901`, waypoints `2001 2002 2007 2008` (set 195): two patterns of one shape, one inside the other. But both sets are already 2026 patterns (`50` and `188`), so the first refusal is the duplicate:
@@ -396,12 +379,13 @@ Stored team progress that refers to content that no longer exists is refused lat
 | | Empty list | `0`, no error |
 | `PatternFor(set)` | Exactly a pattern's set, any scan order | `(index, true)` |
 | | A subset, a superset, or empty | `(0, false)` |
-| `FitsShape(shape, set)` | Empty set | `false` |
-| | Inside at least one of the shape's patterns | `true` |
+| `FitsShapeCastable(shape, set, max, cooldown)` | Empty set | `false` |
+| | Inside at least one of the shape's patterns of at most `max` waypoints, not of class `cooldown` | `true` |
 | | Spans two patterns, or touches none | `false` |
-| `FitsShapeWithin(shape, set, max)` | Inside a pattern of at most `max` waypoints | `true` |
 | | Only inside bigger patterns | `false` |
-| | `max` at least the shape's biggest pattern | the same as `FitsShape` |
+| | Only inside patterns of class `cooldown` (an exact cooled-down pattern included, so it can't complete) | `false` |
+| | `max` at least the shape's biggest pattern | the same as no size limit |
+| | `cooldown` `""` or an unknown class | excludes nothing |
 | `Waypoint(i)`, `Shape(i)`, `Pattern(i)`, `ShapePatterns(i)` | `i` out of range | panics (callers only pass indexes from the atlas) |
 
 ## Concurrency and locking
@@ -425,13 +409,12 @@ No races to resolve: the atlas is built once before `Load` returns and never mod
 | 64 shapes | `ShapeSet uint64`, `MaxShapes` | Same approach |
 | 2048 patterns | `PatternSet [32]uint64`, `MaxPatterns` | Raise `MaxPatterns` (a multiple of 64); the array grows with it, and so does every teamstate `State` copy (256 bytes now) |
 | 4-digit waypoint IDs | `waypointIDPattern`, and the `waypoint.id` CHECK | A new migration changing the CHECK, and the pattern, together |
-| `FitsShape` cost | linear in a shape's patterns (252 max in the 2026 seed, the pentagons) | Revisit the lookup-table alternative only at thousands of patterns per shape |
+| `FitsShapeCastable` cost | linear in a shape's patterns (252 max in the 2026 seed, the pentagons) | Revisit the lookup-table alternative only at thousands of patterns per shape |
 
 ## Not decided yet
 - **Spells: any subset, or only defined patterns?** Decided for 2026: every subset of 2–6 of the 10 checkpoints is a pattern (837), so a spell exists for every combination (`damage_lookup.json`, `seeds/2026.sql`). 2025 had 359 curated patterns of drawn shapes. The game rule is unchanged (only patterns complete); the content makes every combination one, which is why the real content has no wrong scans.
 - **Spells: what damage is applied to.** Decided: teamstate deals each cast's `Spell.Damage` (× the team's multiplier) to the team's current boss ([`internal/bosses/README.md`](../bosses/README.md), "Damage rules").
-- **Spells: rounding** of `Damage` to `int`, and how the hull treats collinear points, are the PR's to state here.
-- **Coordinates aren't range-checked.** A waypoint at `0, 0` would load and, once positions are computed, skew the projection's origin. Consider a check in `New` alongside spells.
+- **Coordinates aren't range-checked.** A waypoint at `0, 0` would load, and `cmd/spells` would project it into the damage it computes offline (skewing the projection's origin). Consider a check in `New`.
 - **`Waypoint(i)` and friends panic on a bad index** rather than returning `ok`. Fine while only atlas-issued indexes are passed.
 
 ## Tests
@@ -445,12 +428,12 @@ No races to resolve: the atlas is built once before `Load` returns and never mod
 | `TestSpellClasses` | every fixture pattern carries `class_n` for its *n* waypoints; `SpellClasses` lists the 15 classes ascending by points though the fixture gives them in reverse |
 | `TestBitsets` | `PatternSet` across 64-bit words (bits 0, 63, 64, 70, 2047) with `Indexes` and `Has`; `WaypointSet` `With` (twice the same), `Has`, `Len`, `Contains` |
 | `TestMixedSizesAllowedWhenNotNested` | a shape may mix 2- and 3-point patterns when none is inside another |
-| `TestFitsShape` | one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
-| `TestFitsShapeWithin` | a line shape with a 2- and a 3-point pattern: a point only in the 3-point one fits within 3, not within 2; a limit below every pattern fits nothing; a pair spanning both lines doesn't fit; the empty set doesn't; and with nothing excluded it equals `FitsShape` |
-| `TestFitsShapeCastable` | a line shape with a 2-point (`class_2`) and a 3-point (`class_3`) pattern: a point only in the cooled-down class doesn't fit, one in the other class does, the size limit still applies on top, the exact cooled-down pattern doesn't fit (so it can't complete), an unknown class excludes nothing, the empty set fits nothing; with no cooldown it equals `FitsShapeWithin` |
+| `TestFitsShapeAll` | `FitsShapeCastable` with no size limit (`game.max_pattern_points`) and no cooldown: one waypoint in either triangle, a pair in both, a pair in none, a whole pattern, a waypoint on no line, a pair on a line, and the empty set → `false` |
+| `TestFitsShapeSizeLimit` | `FitsShapeCastable` with no cooldown, on a line shape with a 2- and a 3-point pattern: a point only in the 3-point one fits within 3, not within 2; a limit below every pattern fits nothing; a pair spanning both lines doesn't fit; the empty set doesn't; and a limit at least the biggest pattern equals no limit |
+| `TestFitsShapeCastable` | a line shape with a 2-point (`class_2`) and a 3-point (`class_3`) pattern: a point only in the cooled-down class doesn't fit, one in the other class does, the size limit still applies on top, the exact cooled-down pattern doesn't fit (so it can't complete), an unknown class excludes nothing, the empty set fits nothing; no cooldown (`""`) gives the same as an unknown class |
 | `TestSeedLoads` | real Postgres (`TEST_DATABASE_URL`, schema `atlas_test`): the 2026 seed loads through `Load` with config.toml's rules: 10 waypoints, 5 shapes, 837 patterns; each shape holds exactly the combinations of its size (45 lines, 120 triangles, 210 quadrilaterals, 252 pentagons, 210 hexagons), each pattern with positive damage and `class_n`; `2001 2002 2003 2004` is a `quadrilateral`; waypoint 0 is `2001`, `G Block Junc`, with coordinates; seeding again succeeds and still loads 837 (idempotent) |
 | `TestLoadRefusesMissingDamage` | real Postgres: a seeded pattern's damage set to `NULL` (migration 0008 without the spells seed) makes `Load` fail with `pattern 7: damage must be positive`, not a scan error |
 | `TestLoadRefusesMissingSpellClass` | real Postgres: a seeded pattern's `spell_class_id` set to `NULL` (migration 0012 without the seed) makes `Load` fail with `pattern 7 has no spell class` |
-| `BenchmarkLookups` | `FitsShape`, `PatternFor` and `WaypointIndex`+`Has` on the fixture (not the seed), results kept in package-level sinks (`sinkBool`, `sinkInt`). On an i7-12650H: about 1 ns, 2 ns and 6 ns |
+| `BenchmarkLookups` | `FitsShapeCastable` (no size limit, no cooldown), `PatternFor` and `WaypointIndex`+`Has` on the fixture (not the seed), results kept in package-level sinks (`sinkBool`, `sinkInt`). On an i7-12650H: about 2 ns, 2 ns and 7 ns |
 
 Run `go test -bench . ./internal/atlas/` for the benchmark. Not tested here: `Load`'s `load atlas:` error path (no database fault injection). Teamstate's tests (`internal/teamstate/README.md`) exercise the atlas through `teamstate.Atlas` on the 2026 seed (its hexagons included), with a 1-point pattern and a waypoint in no pattern (`2099`) added by SQL.

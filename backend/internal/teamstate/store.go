@@ -110,7 +110,6 @@ type Atlas interface {
 	PatternByID(id int) (int, bool)
 	SetOf(ids []string) (atlas.WaypointSet, error)
 	PatternFor(set atlas.WaypointSet) (int, bool)
-	FitsShape(shape int, set atlas.WaypointSet) bool
 	FitsShapeCastable(shape int, set atlas.WaypointSet, maxPoints int, cooldown string) bool
 	WaypointIDs(set atlas.WaypointSet) []string
 	ShapePatterns(shape int) []int
@@ -456,15 +455,15 @@ const (
 	// GameStarted: the team just started; this is its state (empty for a new
 	// team), sent right after the "team" event of type started.
 	GameStarted live.EventType = "game_started"
-	// ShapeSelected: a member selected a shape (or reselected it), which
+	// ShapeSelected: the leader selected a shape (or reselected it), which
 	// purged the stack: a spell attempt starts.
 	ShapeSelected live.EventType = "shape_selected"
-	// SelectionCleared: a member cleared the selection, purging the stack.
+	// SelectionCleared: the leader cleared the selection, purging the stack.
 	SelectionCleared live.EventType = "selection_cleared"
 	// ScanAdded: a scan joined the stack; the attempt goes on.
 	ScanAdded live.EventType = "scan_added"
 	// WrongScan: a scan joined the stack marked wrong; the attempt is
-	// poisoned until a member selects again.
+	// poisoned until the leader selects again.
 	WrongScan live.EventType = "wrong_scan"
 	// QRCooldownEnded: by itself, with nobody acting, a QR cooldown ended:
 	// waypoints of a cast game.qr_cooldown ago can be scanned again

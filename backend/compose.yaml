@@ -1,5 +1,6 @@
 # Local Postgres for development: docker compose up -d
-# Host port defaults to 5432; set POSTGRES_PORT in .env to change it.
+# Host port defaults to 5432; set POSTGRES_PORT in .env to change it (and the
+# port in DATABASE_URL with it).
 name: labyrinth-26
 
 services:

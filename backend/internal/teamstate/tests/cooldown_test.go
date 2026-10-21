@@ -46,18 +46,18 @@ func TestSpellCooldown(t *testing.T) {
 		t.Fatalf("before any cast: cooldown %v, shapes %v", v.CooldownClass, v.CooldownShapes)
 	}
 
-	f.castSquare(t, 0) // also defeats boss 1 (25 HP)
-	for range 1 + len(square) {
+	f.castQuad(t, 0) // also defeats boss 1 (25 HP)
+	for range 1 + len(quad) {
 		nextState(t, sub)
 	}
 	v := f.view(t)
 	if v.CooldownClass == nil || *v.CooldownClass != "class_4" || v.BossesDefeated != 1 ||
 		!slices.Equal(v.CooldownShapes, []string{"quadrilateral"}) {
-		t.Fatalf("after the square: cooldown %v, shapes %v, defeated %d", v.CooldownClass, v.CooldownShapes, v.BossesDefeated)
+		t.Fatalf("after the quadrilateral: cooldown %v, shapes %v, defeated %d", v.CooldownClass, v.CooldownShapes, v.BossesDefeated)
 	}
 	seq := v.Version.Seq
 	if _, err := f.state.Select(ctx, f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
-		t.Fatalf("selecting the square on cooldown: %v, want shape_on_cooldown", err)
+		t.Fatalf("selecting the quadrilateral on cooldown: %v, want shape_on_cooldown", err)
 	}
 	expectNoEvent(t, sub, "refused selections")
 	if v := f.view(t); v.Version.Seq != seq || v.Selection != nil {
@@ -92,22 +92,22 @@ func TestSpellCooldown(t *testing.T) {
 		t.Fatalf("selecting the triangle after a restart: %v, want shape_on_cooldown", err)
 	}
 
-	// The square casts again: class_4 is no longer the last class.
-	if res := f.castSquare(t, 3); res.State.LastCast.Class != "class_4" || !res.AlreadyCompleted {
-		t.Fatalf("the square after a class_3 cast: %+v", res.State.LastCast)
+	// The quadrilateral casts again: class_4 is no longer the last class.
+	if res := f.castQuad(t, 3); res.State.LastCast.Class != "class_4" || !res.AlreadyCompleted {
+		t.Fatalf("the quadrilateral after a class_3 cast: %+v", res.State.LastCast)
 	}
 	if v := f.view(t); v.CooldownClass == nil || *v.CooldownClass != "class_4" {
-		t.Fatalf("after the second square: cooldown %v", v.CooldownClass)
+		t.Fatalf("after the second quadrilateral: cooldown %v", v.CooldownClass)
 	}
 }
 
 // TestCooldownFailedCastKeepsIt checks that a completing scan that fails to
 // persist changes nothing: with the database closed, the triangle that would
-// clear the square's cooldown fails, and the cooldown, the last cast and the
-// cast count stay the square's.
+// clear the quadrilateral's cooldown fails, and the cooldown, the last cast and the
+// cast count stay the quadrilateral's.
 func TestCooldownFailedCastKeepsIt(t *testing.T) {
 	f := started(t)
-	f.castSquare(t, 0)
+	f.castQuad(t, 0)
 	f.selectAt(t, f.tick(200), 0, "triangle")
 	f.scanAt(t, f.tick(201), 0, triangle[0])
 	f.scanAt(t, f.tick(202), 1, triangle[1])
@@ -124,21 +124,21 @@ func TestCooldownFailedCastKeepsIt(t *testing.T) {
 // TestCooldownKnockedOutFirst checks the order of Select's checks: a knocked
 // out team selecting a shape on cooldown is told knocked_out, not
 // shape_on_cooldown (every boss hits for 100, so boss 2's first attack after
-// the square defeats boss 1 knocks the team out). ClearSelection still works.
+// the quadrilateral defeats boss 1 knocks the team out). ClearSelection still works.
 func TestCooldownKnockedOutFirst(t *testing.T) {
 	f := started(t, fixtureOptions{attacks: true, bossRules: func(r *bosses.Rules) {
 		for serial := range r.AttackDamage {
 			r.AttackDamage[serial] = 100
 		}
 	}})
-	res := f.castSquare(t, 0)
+	res := f.castQuad(t, 0)
 	if !res.State.LastCast.DefeatedBoss {
-		t.Fatalf("the square should defeat boss 1: %+v", res.State.LastCast)
+		t.Fatalf("the quadrilateral should defeat boss 1: %+v", res.State.LastCast)
 	}
 	defeatedAt := res.State.LastCast.CastAt.Sub(start)
 	f.clock.at(defeatedAt + f.interval(2))
 	if v := f.view(t); !v.KnockedOut || v.CooldownClass == nil || *v.CooldownClass != "class_4" {
-		t.Fatalf("knocked out with the square on cooldown: knocked %v, cooldown %v", v.KnockedOut, v.CooldownClass)
+		t.Fatalf("knocked out with the quadrilateral on cooldown: knocked %v, cooldown %v", v.KnockedOut, v.CooldownClass)
 	}
 	if _, err := f.state.Select(context.Background(), f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrKnockedOut) {
 		t.Fatalf("selecting a shape on cooldown while knocked out: %v, want knocked_out", err)
@@ -173,7 +173,7 @@ func TestCooldownOnBigPatterns(t *testing.T) {
 	if _, err := f.state.Select(context.Background(), f.users[0], "pentagon"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
 		t.Fatalf("selecting the pentagon right after its cast: %v, want shape_on_cooldown", err)
 	}
-	f.castSquare(t, 51)
+	f.castQuad(t, 51)
 	f.cast(t, 52, "pentagon", pent)
 }
 

@@ -113,7 +113,7 @@ Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack 
 
 0009 also adds `team_boss` and three `team_cast` columns, and 0010 adds `team_boss.phase_health` and `phase_started_at`; those belong to teamstate: see its README.
 
-**Seed** `seeds/2026_bosses.sql` (was `dev_2025_bosses.sql`), applied last by `Seed2026` (after `2026.sql` and `2026_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1), one quadrilateral defeats boss 1, 2 or 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
+**Seed** `seeds/2026_bosses.sql`, applied last by `Seed2026` (after `2026.sql` and `2026_spells.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1), one quadrilateral defeats boss 1, 2 or 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
 
 | Serial | Name | Asset | HP | Attacks every (`game.boss_attack.interval`) | Attack damage (`game.boss_attack.damage`) | Full health lasts |
 |---|---|---|---|---|---|---|
@@ -124,7 +124,7 @@ Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack 
 | 5 | Ken & Kyle Katayanagi | `bosses/5.png` | 900 | 10 min | 5 | 20 min (2) |
 | 6 | Gideon Graves | `bosses/6.png` | 1500 | 10 min | 6 | 20 min (2) |
 
-Seed casts deal 60–131 at multiplier 1, so boss 1 falls to one cast and Gideon takes 12 to 25. 3,285 HP in all. Each boss hits as hard as its serial: "full health lasts" is for a team at **10** (`game.health`) stalled on that boss; health carries over between bosses, so a team that reaches the twins or Gideon already hurt has less. Defeating boss 5 also unlocks the big patterns (`game.unlock_after_bosses`, **5**: see teamstate's README).
+At multiplier 1, every 2026 cast deals at least 25, so any one cast defeats boss 1 (damage ranges above). 3,285 HP in all. Each boss hits as hard as its serial: "full health lasts" is for a team at **10** (`game.health`) stalled on that boss; health carries over between bosses, so a team that reaches the twins or Gideon already hurt has less. Defeating boss 5 also unlocks the big patterns (`game.unlock_after_bosses`, **5**: see teamstate's README).
 
 ## Memory ↔ Postgres
 | Postgres | Memory |

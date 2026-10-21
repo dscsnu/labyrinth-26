@@ -112,5 +112,6 @@ func (s *Store) Snapshot(userID uuid.UUID) live.Event {
 	return ev
 }
 
-// Size is how many members a team needs to start, and the most it can hold.
+// Size is the most members a team can hold (teams.size); a team can start
+// with any number from 1 to Size.
 func (s *Store) Size() int { return s.rules.Size }

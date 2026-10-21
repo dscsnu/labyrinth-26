@@ -375,7 +375,7 @@ func TestAdminDeleteTeam(t *testing.T) {
 	expect(t, "delete again", e.call("DELETE", "/api/admin/teams/"+teamID, admin, nil), http.StatusNotFound, "team_not_found")
 }
 
-// TestAdminResetCooldownsOverHTTP casts the square, so its class and its
+// TestAdminResetCooldownsOverHTTP casts the quadrilateral, so its class and its
 // waypoints cool down; the reset route clears both (stream type
 // cooldowns_reset), so the waypoint scans again; and the route's guard and
 // errors.
@@ -453,7 +453,7 @@ func TestAdminUsersAndRoles(t *testing.T) {
 }
 
 // TestLeaderboardAndFinish gives every boss 1 HP: one team casts until the
-// last falls (square and triangle in turn, for the spell cooldown; no QR
+// last falls (quadrilateral and triangle in turn, for the spell cooldown; no QR
 // cooldown). It becomes FINISHED (team event finished) and its scans are
 // not_in_game. GET /api/leaderboard puts it first, marked finished, with
 // the other team's own entry as me; streams open with the leaderboard

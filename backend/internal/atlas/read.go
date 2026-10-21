@@ -7,9 +7,9 @@ import (
 
 // Waypoint is a physical location with a QR code.
 type Waypoint struct {
-	// ID is the waypoint's identity everywhere: 4 digits, e.g. "1001".
+	// ID is the waypoint's identity everywhere: 4 digits, e.g. "2001".
 	ID string `json:"id"`
-	// Name is for display, e.g. "Tower 6 FruitShop (T6)".
+	// Name is for display, e.g. "G Block Junc".
 	Name string `json:"name"`
 	// Latitude is in degrees (WGS 84), from Postgres.
 	Latitude float64 `json:"latitude"`
@@ -17,12 +17,12 @@ type Waypoint struct {
 	Longitude float64 `json:"longitude"`
 }
 
-// Shape is a pattern type a team selects, e.g. "square" (the client calls it
-// a type).
+// Shape is a pattern type a team selects, e.g. "quadrilateral" (the client
+// calls it a type).
 type Shape struct {
-	// ID is what a selection names, e.g. "square".
+	// ID is what a selection names, e.g. "quadrilateral".
 	ID string `json:"id"`
-	// Name is for display, e.g. "Square".
+	// Name is for display, e.g. "Quadrilateral".
 	Name string `json:"name"`
 }
 
@@ -140,41 +140,22 @@ func (a *Atlas) PatternFor(set WaypointSet) (int, bool) {
 // don't modify it.
 func (a *Atlas) ShapePatterns(shape int) []int { return a.shapePatterns[shape] }
 
-// FitsShape reports whether some pattern of shape contains every waypoint in
-// set: whether set can still grow into a pattern of that shape. The empty set
-// fits no shape.
+// FitsShapeCastable reports whether some pattern of shape that a team may
+// cast now contains every waypoint in set: whether set can still grow into
+// one. Only the shape's patterns of at most maxPoints waypoints count (the
+// team's unlocked size), and none of spell class cooldown (its last cast's;
+// "" leaves none out, since every pattern has a class). With maxPoints at
+// game.max_pattern_points and cooldown "", every pattern of the shape
+// counts. The empty set fits nothing. Team state's wrong-scan check.
 //
-// It's one AND-compare per pattern of the shape (pattern & set == set),
-// stopping at the first match. Measured once on the 2025 seed (156 patterns in
-// the largest shape): ~1 ns on a hit, ~9 ns on a miss. A precomputed map of
-// every subset of every pattern was measured once on the seed too, at a flat
-// ~15-19 ns: hashing costs more than the scan at this size, so it isn't used.
-// (BenchmarkLookups runs on the small test fixture, not the seed.)
-func (a *Atlas) FitsShape(shape int, set WaypointSet) bool {
-	if set == 0 {
-		return false
-	}
-	for _, p := range a.shapePatterns[shape] {
-		if a.patterns[p].Waypoints.Contains(set) {
-			return true
-		}
-	}
-	return false
-}
-
-// FitsShapeWithin is FitsShape counting only the shape's patterns of at most
-// maxPoints waypoints: whether set can still grow into one of those. Team
-// state uses it for patterns a team hasn't unlocked yet. The same scan, with
-// a popcount per pattern checked.
-func (a *Atlas) FitsShapeWithin(shape int, set WaypointSet, maxPoints int) bool {
-	return a.FitsShapeCastable(shape, set, maxPoints, "")
-}
-
-// FitsShapeCastable is FitsShapeWithin also leaving out the patterns of spell
-// class cooldown ("" leaves none out): whether set can still grow into a
-// pattern the team may cast now. Team state uses it for a team's spell
-// cooldown, the class of its last cast. One string comparison more per
-// pattern than FitsShapeWithin.
+// It's one AND-compare per pattern of the shape (pattern & set == set), plus
+// a popcount and a string comparison, stopping at the first match. Measured
+// once, by hand, on the 2025 seed (156 patterns in its largest shape; the
+// 2026 seed's largest, pentagon, has 252), before the size and class
+// conditions were added: ~1 ns on a hit, ~9 ns on a miss. A precomputed map
+// of every subset of every pattern was measured there too, at a flat ~15-19
+// ns: hashing costs more than the scan at this size, so it isn't used.
+// (BenchmarkLookups runs on the small test fixture, not a seed.)
 func (a *Atlas) FitsShapeCastable(shape int, set WaypointSet, maxPoints int, cooldown string) bool {
 	if set == 0 {
 		return false

@@ -42,13 +42,13 @@ func qrIDs(t *testing.T, v teamstate.View, until time.Time) []string {
 	return ids
 }
 
-// TestQRCooldown follows the square's waypoints through game.qr_cooldown:
+// TestQRCooldown follows the quadrilateral's waypoints through game.qr_cooldown:
 //
 //   - the cast puts its 4 waypoints in qr_cooldowns, until cast_at +
 //     qr_cooldown, sorted by waypoint
 //   - scanning any of them, by any member, is waypoint_on_cooldown: nothing
 //     logged, pushed or published, the version unchanged
-//   - a waypoint not in the square (1003) scans normally
+//   - a waypoint not in the quadrilateral (2003) scans normally
 //   - one microsecond before until, still refused
 //   - at until, the timer applies the expiry with nobody acting: one
 //     qr_cooldown_ended event, the version up by one, qr_cooldowns empty
@@ -63,8 +63,8 @@ func TestQRCooldown(t *testing.T) {
 	if v := f.view(t); len(v.QRCooldowns) != 0 || v.QRCooldowns == nil {
 		t.Fatalf("before any cast: qr_cooldowns %#v, want []", v.QRCooldowns)
 	}
-	res := f.castSquare(t, 0) // cast at 4 s
-	for range 1 + len(square) {
+	res := f.castQuad(t, 0) // cast at 4 s
+	for range 1 + len(quad) {
 		nextState(t, sub)
 	}
 	castAt := start.Add(f.tick(4))
@@ -72,16 +72,16 @@ func TestQRCooldown(t *testing.T) {
 	if !res.State.LastCast.CastAt.Equal(castAt) {
 		t.Fatalf("cast at %v, want %v", res.State.LastCast.CastAt, castAt)
 	}
-	if got := qrIDs(t, res.State, until); !slices.Equal(got, square) {
-		t.Fatalf("the cast's state: qr_cooldowns %v, want %v", got, square)
+	if got := qrIDs(t, res.State, until); !slices.Equal(got, quad) {
+		t.Fatalf("the cast's state: qr_cooldowns %v, want %v", got, quad)
 	}
 
 	f.selectAt(t, f.tick(10), 0, "triangle")
 	expectType(t, sub, "select", teamstate.ShapeSelected)
 	seq, logged := f.view(t).Version.Seq, f.loggedScans(t)
-	for i, w := range square {
+	for i, w := range quad {
 		if err := f.scanErrAt(f.tick(11), i, w); !errors.Is(err, teamstate.ErrWaypointOnCooldown) {
-			t.Fatalf("member %d scanning %s right after the square: %v, want waypoint_on_cooldown", i, w, err)
+			t.Fatalf("member %d scanning %s right after the quadrilateral: %v, want waypoint_on_cooldown", i, w, err)
 		}
 	}
 	expectNoEvent(t, sub, "refused scans")
@@ -89,13 +89,13 @@ func TestQRCooldown(t *testing.T) {
 		t.Fatalf("refused scans changed the state: seq %d (was %d), stack %v, %d scans logged (was %d)",
 			v.Version.Seq, seq, v.Stack, f.loggedScans(t), logged)
 	}
-	expectOutcome(t, "1003, not in the square", f.scanAt(t, f.tick(12), 4, "2003"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "2003, not in the quadrilateral", f.scanAt(t, f.tick(12), 4, "2003"), teamstate.OutcomeScanAdded)
 	expectType(t, sub, "2003", teamstate.ScanAdded)
 
 	f.clock.at(until.Sub(start) - time.Microsecond)
 	expectNoEvent(t, sub, "just before until")
 	if err := f.scanErrAt(until.Sub(start)-time.Microsecond, 0, "2001"); !errors.Is(err, teamstate.ErrWaypointOnCooldown) {
-		t.Fatalf("1001 a microsecond before until: %v, want waypoint_on_cooldown", err)
+		t.Fatalf("2001 a microsecond before until: %v, want waypoint_on_cooldown", err)
 	}
 	seq = f.view(t).Version.Seq
 
@@ -106,7 +106,7 @@ func TestQRCooldown(t *testing.T) {
 	}
 	expectNoEvent(t, sub, "one event per expiry")
 
-	expectOutcome(t, "1001 at until", f.scanAt(t, until.Sub(start), 0, "2001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "2001 at until", f.scanAt(t, until.Sub(start), 0, "2001"), teamstate.OutcomeScanAdded)
 	res = f.scanAt(t, until.Sub(start)+f.tick(1), 1, "2002")
 	expectOutcome(t, "the triangle", res, teamstate.OutcomePatternCompleted)
 	if got := qrIDs(t, res.State, until.Add(f.tick(1)+cd)); !slices.Equal(got, triangle) {
@@ -115,15 +115,15 @@ func TestQRCooldown(t *testing.T) {
 }
 
 // TestQRCooldownWriteCatchesUp checks that a scan never waits on a late
-// timer: with the timers stopped, a scan of a square waypoint at until is
+// timer: with the timers stopped, a scan of a quadrilateral waypoint at until is
 // preceded by a qr_cooldown_ended event and accepted.
 func TestQRCooldownWriteCatchesUp(t *testing.T) {
 	f := qrStarted(t, fixtureOptions{})
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
-	f.castSquare(t, 0)
+	f.castQuad(t, 0)
 	f.selectAt(t, f.tick(10), 0, "triangle")
-	for range 2 + len(square) {
+	for range 2 + len(quad) {
 		nextState(t, sub)
 	}
 	f.state.Close() // timers off: only writes catch up
@@ -140,7 +140,7 @@ func TestQRCooldownWriteCatchesUp(t *testing.T) {
 }
 
 // TestQRCooldownAndAttackTogether sets game.qr_cooldown to boss 2's attack
-// interval, so the square (which defeats boss 1, starting boss 2's phase at
+// interval, so the quadrilateral (which defeats boss 1, starting boss 2's phase at
 // the cast) has its waypoints open at the very moment boss 2 first attacks:
 // one event, boss_attacked (the attack is the bigger news), carrying both
 // changes.
@@ -151,11 +151,11 @@ func TestQRCooldownAndAttackTogether(t *testing.T) {
 	f.restart(t)
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
-	res := f.castSquare(t, 0)
+	res := f.castQuad(t, 0)
 	if !res.State.LastCast.DefeatedBoss {
-		t.Fatalf("the square should defeat boss 1: %+v", res.State.LastCast)
+		t.Fatalf("the quadrilateral should defeat boss 1: %+v", res.State.LastCast)
 	}
-	for range 1 + len(square) {
+	for range 1 + len(quad) {
 		nextState(t, sub)
 	}
 	f.clock.at(f.tick(4) + f.interval(2))
@@ -167,16 +167,16 @@ func TestQRCooldownAndAttackTogether(t *testing.T) {
 }
 
 // TestQRCooldownFailedCast checks that a completing scan that fails to
-// persist starts no QR cooldown: with the database closed, the square's last
+// persist starts no QR cooldown: with the database closed, the quadrilateral's last
 // scan fails and qr_cooldowns stays empty.
 func TestQRCooldownFailedCast(t *testing.T) {
 	f := qrStarted(t, fixtureOptions{})
 	f.selectAt(t, 0, 0, "quadrilateral")
-	for i, w := range square[:3] {
+	for i, w := range quad[:3] {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
 	}
 	f.db.Close()
-	if err := f.scanErrAt(f.tick(4), 3, square[3]); err == nil {
+	if err := f.scanErrAt(f.tick(4), 3, quad[3]); err == nil {
 		t.Fatal("the completing scan with the database closed should fail")
 	}
 	if v := f.view(t); len(v.QRCooldowns) != 0 || v.CastCount != 0 {
@@ -189,14 +189,14 @@ func TestQRCooldownFailedCast(t *testing.T) {
 // that ended while the backend was down.
 func TestQRCooldownRestart(t *testing.T) {
 	f := qrStarted(t, fixtureOptions{})
-	f.castSquare(t, 0)
+	f.castQuad(t, 0)
 	f.clock.at(f.tick(10))
 	before := pgtest.Must(json.Marshal(f.view(t).QRCooldowns))
 	f.restart(t)
 	if after := pgtest.Must(json.Marshal(f.view(t).QRCooldowns)); string(after) != string(before) {
 		t.Fatalf("qr_cooldowns across a restart\nbefore: %s\nafter:  %s", before, after)
 	}
-	if len(f.view(t).QRCooldowns) != len(square) {
+	if len(f.view(t).QRCooldowns) != len(quad) {
 		t.Fatalf("after a restart: qr_cooldowns %v", f.view(t).QRCooldowns)
 	}
 
@@ -207,18 +207,18 @@ func TestQRCooldownRestart(t *testing.T) {
 		t.Fatalf("restarted after the cooldown ended: qr_cooldowns %v", v.QRCooldowns)
 	}
 	f.selectAt(t, f.tick(6)+f.rules.QRCooldown, 0, "triangle")
-	expectOutcome(t, "1001 after the restart", f.scanAt(t, f.tick(7)+f.rules.QRCooldown, 0, "2001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "2001 after the restart", f.scanAt(t, f.tick(7)+f.rules.QRCooldown, 0, "2001"), teamstate.OutcomeScanAdded)
 }
 
 // TestQRCooldownLatestCastWins checks the one way a waypoint can be in two
-// active casts, game.qr_cooldown raised between restarts: with the square
-// at 4 s and the triangle (sharing 1001 and 1002) one cooldown later, a
-// restart with three times the cooldown shows 1001 and 1002 until the
-// triangle's end, 1007 and 1008 until the square's, sorted by until.
+// active casts, game.qr_cooldown raised between restarts: with the quadrilateral
+// at 4 s and the triangle (sharing 2001 and 2002) one cooldown later, a
+// restart with three times the cooldown shows 2001 and 2002 until the
+// triangle's end, 2007 and 2008 until the quadrilateral's, sorted by until.
 func TestQRCooldownLatestCastWins(t *testing.T) {
 	f := qrStarted(t, fixtureOptions{})
 	cd := f.rules.QRCooldown
-	f.castSquare(t, 0) // cast at 4 s
+	f.castQuad(t, 0) // cast at 4 s
 	f.selectAt(t, cd+f.tick(10), 0, "triangle")
 	var res teamstate.ScanResult
 	for i, w := range triangle {
@@ -245,13 +245,13 @@ func TestQRCooldownLatestCastWins(t *testing.T) {
 }
 
 // TestQRCooldownOff checks that game.qr_cooldown = 0 turns it off: after
-// the square, qr_cooldowns is empty and its waypoints scan straight away.
+// the quadrilateral, qr_cooldowns is empty and its waypoints scan straight away.
 func TestQRCooldownOff(t *testing.T) {
 	f := started(t, fixtureOptions{rules: func(r *teamstate.Rules) { r.QRCooldown = 0 }})
-	res := f.castSquare(t, 0)
+	res := f.castQuad(t, 0)
 	if res.State.QRCooldowns == nil || len(res.State.QRCooldowns) != 0 {
 		t.Fatalf("qr_cooldowns with game.qr_cooldown 0: %#v, want []", res.State.QRCooldowns)
 	}
 	f.selectAt(t, f.tick(10), 0, "triangle")
-	expectOutcome(t, "1001 straight after the square", f.scanAt(t, f.tick(11), 0, "2001"), teamstate.OutcomeScanAdded)
+	expectOutcome(t, "2001 straight after the quadrilateral", f.scanAt(t, f.tick(11), 0, "2001"), teamstate.OutcomeScanAdded)
 }

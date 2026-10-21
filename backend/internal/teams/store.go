@@ -54,8 +54,8 @@ type Store struct {
 
 // Rules are the team settings from config.toml.
 type Rules struct {
-	// Size is how many members a team needs before the leader can start, and
-	// the most it can hold (teams.size).
+	// Size is the most members a team can hold (teams.size). The leader can
+	// start with any number from 1 to Size.
 	Size int
 	// NameMaxLength is the longest team name, in characters
 	// (teams.name_max_length).

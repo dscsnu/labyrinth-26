@@ -77,9 +77,10 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		return nil, err
 	}
 
-	// stateStore is loaded after teams (it reads teams), but teams' OnStart
-	// and OnRosterChange need it. Build assigns it before returning, and no team can start
-	// before the routes are served, so OnStart never sees it nil.
+	// stateStore is loaded after teams (it reads teams), but teams' OnStart,
+	// OnRosterChange and OnDelete need it. Build assigns it before returning,
+	// and no team can start, lose a member or be deleted before the routes
+	// are served, so no hook ever sees it nil.
 	var stateStore *teamstate.Store
 	teamStore, err := teams.Load(ctx, db, hub, log, teams.Rules{
 		Size:          set.Teams.Size,

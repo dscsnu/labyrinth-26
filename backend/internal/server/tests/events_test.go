@@ -47,17 +47,17 @@ func (s *stream) seen() []string {
 // events in the background.
 func (e *env) openStream(p player) *stream {
 	e.t.Helper()
-	return e.openStreamAt("/api/events", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+p.token) })
+	return e.openStreamWith(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+p.token) })
 }
 
-// openStreamAt connects to the event stream at path, letting auth add the
-// credentials, and parses events in the background.
-func (e *env) openStreamAt(path string, auth func(*http.Request)) *stream {
+// openStreamWith connects to the event stream (GET /api/events), letting
+// auth add the credentials, and parses events in the background.
+func (e *env) openStreamWith(auth func(*http.Request)) *stream {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	e.t.Cleanup(cancel)
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", e.backend.URL+path, nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", e.backend.URL+"/api/events", nil)
 	auth(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -340,7 +340,7 @@ func TestStreamCookieAuth(t *testing.T) {
 	p := e.newPlayer("p")
 	cookie := &http.Cookie{Name: auth.TokenCookie, Value: p.token}
 
-	s := e.openStreamAt("/api/events", func(r *http.Request) { r.AddCookie(cookie) })
+	s := e.openStreamWith(func(r *http.Request) { r.AddCookie(cookie) })
 	expectNoTeam(t, "cookie stream", s.next(t, "cookie stream"))
 
 	req, _ := http.NewRequest("GET", e.backend.URL+"/api/teams/me", nil)
@@ -367,7 +367,8 @@ func TestStreamCookieAuth(t *testing.T) {
 }
 
 // TestCastPublishesDamageOverEventStream checks that after a completing scan,
-// team_state.last_cast arrives over the event stream with its positive damage value.
+// team_state.last_cast arrives over the event stream with its damage: positive,
+// and equal to the pattern's stored pattern.damage.
 func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	e := setup(t)
 	if err := e.db.Seed2026(context.Background()); err != nil {
@@ -375,11 +376,7 @@ func TestCastPublishesDamageOverEventStream(t *testing.T) {
 	}
 	e = e.restart()
 
-	_, ps := e.fullTeam("cast-damage")
-	for _, p := range ps[1:] {
-		expect(t, "ready", e.call("PUT", "/api/teams/me/ready", p, map[string]bool{"ready": true}), http.StatusOK, "")
-	}
-	expect(t, "start", e.call("POST", "/api/teams/me/start", ps[0], nil), http.StatusOK, "")
+	ps := e.startedTeam("cast-damage")
 
 	s := e.openStream(ps[0])
 	expectTeam(t, "initial team", s.next(t, "initial team"), len(ps))
@@ -487,8 +484,8 @@ func TestEventTypes(t *testing.T) {
 	scan(a, "2001")
 	scan(b, "2002")
 	scan(c, "2007")
-	scan(a, "2008") // completes the square
-	sel("triangle") // the square's class is on cooldown now
+	scan(a, "2008") // completes the quadrilateral
+	sel("triangle") // the quadrilateral's class is on cooldown now
 	scan(b, "2099") // wrong
 	expect(t, "clear", e.call("DELETE", "/api/teams/me/state/selection", a, nil), http.StatusOK, "")
 	// Boss 1 has 25 HP in the seed: the first cast defeats it (boss_defeated,

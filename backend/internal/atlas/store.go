@@ -47,7 +47,7 @@ type Source struct {
 type PatternSource struct {
 	// ID is pattern.id.
 	ID int
-	// Shape is the shape's ID, e.g. "square".
+	// Shape is the shape's ID, e.g. "quadrilateral".
 	Shape string
 	// Waypoints are the waypoint IDs, in any order.
 	Waypoints []string

@@ -31,7 +31,7 @@ import (
 // takes the same lock), so a write either runs before the removal is
 // visible or is refused with ErrNotInTeam after it.
 //
-// The game flow. A member selects a shape, which always purges the team's
+// The game flow. The leader selects a shape, which always purges the team's
 // scan stack. There's no time limit, and any member may scan any number of
 // the pattern's waypoints. A scan is rejected without being pushed if:
 //
@@ -41,7 +41,7 @@ import (
 //
 // Otherwise it's pushed. If the stack plus this waypoint can no longer become
 // a pattern of the selected shape, the scan is pushed marked wrong and the
-// player is told (OutcomeWrongScan): the attempt is poisoned until someone
+// player is told (OutcomeWrongScan): the attempt is poisoned until the leader
 // selects again, which purges it. Once the stack is exactly a pattern of the
 // selected shape, the pattern completes (a cast, logged in team_cast) and the
 // stack and selection are purged.
@@ -359,7 +359,7 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	// 4. persist
 	if err := s.persist(ctx, func(ctx context.Context) error {
 		if isComplete {
-			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, wrong, cast, next.Boss)
+			return s.db.insertCompletingScan(ctx, t.ID, waypointID, userID, now, s.atlas.Pattern(completed).ID, cast, next.Boss)
 		}
 		return s.db.insertScan(ctx, t.ID, waypointID, userID, now, wrong)
 	}); err != nil {

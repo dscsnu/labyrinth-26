@@ -13,39 +13,39 @@ import (
 	"labyrinth/internal/teamstate"
 )
 
-// squareDamage is the seed square's spell damage, from the atlas.
-func (f *fixtureEnv) squareDamage(t *testing.T) int {
+// quadDamage is the seed quadrilateral's spell damage, from the atlas.
+func (f *fixtureEnv) quadDamage(t *testing.T) int {
 	t.Helper()
-	set := pgtest.Must(f.atlas.SetOf(square))
+	set := pgtest.Must(f.atlas.SetOf(quad))
 	p, ok := f.atlas.PatternFor(set)
 	if !ok {
-		t.Fatal("the seed square isn't a pattern")
+		t.Fatal("the seed quadrilateral isn't a pattern")
 	}
 	return f.atlas.Pattern(p).Spell.Damage
 }
 
-// castSquare selects the square and scans it, starting at round × 100 s, and
-// returns the completing scan's result. The square is class_4: the spell
+// castQuad selects the quadrilateral and scans it, starting at round × 100 s, and
+// returns the completing scan's result. The quadrilateral is class_4: the spell
 // cooldown refuses it right after another class_4 cast.
-func (f *fixtureEnv) castSquare(t *testing.T, round int) teamstate.ScanResult {
+func (f *fixtureEnv) castQuad(t *testing.T, round int) teamstate.ScanResult {
 	t.Helper()
-	return f.cast(t, round, "quadrilateral", square)
+	return f.cast(t, round, "quadrilateral", quad)
 }
 
 // castTriangle casts the triangle (class_3) the same way: what a test casts
-// between two squares to clear the square's cooldown.
+// between two quadrilaterals to clear the quadrilateral's cooldown.
 func (f *fixtureEnv) castTriangle(t *testing.T, round int) teamstate.ScanResult {
 	t.Helper()
 	return f.cast(t, round, "triangle", triangle)
 }
 
-// castAlternating casts the square on even rounds and the triangle on odd
+// castAlternating casts the quadrilateral on even rounds and the triangle on odd
 // ones, so the spell cooldown never blocks the next cast, and returns the
 // result and the cast pattern's damage.
 func (f *fixtureEnv) castAlternating(t *testing.T, round int) (teamstate.ScanResult, int) {
 	t.Helper()
 	if round%2 == 0 {
-		return f.castSquare(t, round), f.damageOf(t, square)
+		return f.castQuad(t, round), f.damageOf(t, quad)
 	}
 	return f.castTriangle(t, round), f.damageOf(t, triangle)
 }
@@ -82,8 +82,8 @@ func (f *fixtureEnv) restart(t *testing.T) {
 	f.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, f.dbURL), f.atlas, f.bosses, f.teams, passQR{}, f.hub, pgtest.Quiet, f.rules))
 }
 
-// TestCastsDamageBosses casts the square and the triangle in turn (the spell
-// cooldown forbids two squares in a row) until two bosses fall, checking after
+// TestCastsDamageBosses casts the quadrilateral and the triangle in turn (the spell
+// cooldown forbids two quadrilaterals in a row) until two bosses fall, checking after
 // every cast, against a model built from the seed's HPs: the damage dealt
 // (the pattern's, multiplier 1), the boss hit, the progress, a defeat moving
 // to the next boss with the excess lost, the event type (spell_cast, or
@@ -162,9 +162,9 @@ func TestDamageMultiplier(t *testing.T) {
 	if m := f.view(t).DamageMultiplier; m != 1.5 {
 		t.Fatalf("multiplier after restart: %v", m)
 	}
-	dmg := f.squareDamage(t)
+	dmg := f.quadDamage(t)
 	want := int(math.Round(float64(dmg) * 1.5))
-	lc := f.castSquare(t, 0).State.LastCast
+	lc := f.castQuad(t, 0).State.LastCast
 	if lc.Damage != dmg || lc.Dealt != want {
 		t.Fatalf("cast: damage %d dealt %d, want %d and %d", lc.Damage, lc.Dealt, dmg, want)
 	}

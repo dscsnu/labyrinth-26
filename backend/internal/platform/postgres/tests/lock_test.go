@@ -64,22 +64,16 @@ func TestLostInstanceLockIsNoticed(t *testing.T) {
 	other.Release()
 }
 
-// TestEditedMigrationIsRefused checks that a migration whose recorded
-// checksum differs from the file is refused, and that a missing checksum
-// (from before checksums) is backfilled.
+// TestEditedMigrationIsRefused checks that every applied migration has its
+// file's SHA-256 recorded, and that one whose recorded checksum differs from
+// the file is refused.
 func TestEditedMigrationIsRefused(t *testing.T) {
 	db := pgtest.Open(t, pgtest.URL(t, "postgres_test"))
 	ctx := context.Background()
 
-	if _, err := db.Pool().Exec(ctx, "UPDATE schema_migrations SET checksum = NULL WHERE version = '0001_users'"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(ctx, pgtest.Quiet); err != nil {
-		t.Fatalf("backfilling: %v", err)
-	}
-	var sum *string
-	if err := db.Pool().QueryRow(ctx, "SELECT checksum FROM schema_migrations WHERE version = '0001_users'").Scan(&sum); err != nil || sum == nil || len(*sum) != 64 {
-		t.Fatalf("checksum not backfilled: %v %v", sum, err)
+	var sum string
+	if err := db.Pool().QueryRow(ctx, "SELECT checksum FROM schema_migrations WHERE version = '0001_users'").Scan(&sum); err != nil || len(sum) != 64 {
+		t.Fatalf("recorded checksum: %q %v", sum, err)
 	}
 
 	if _, err := db.Pool().Exec(ctx, "UPDATE schema_migrations SET checksum = 'edited' WHERE version = '0001_users'"); err != nil {

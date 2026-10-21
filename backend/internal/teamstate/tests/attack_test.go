@@ -71,7 +71,7 @@ func TestBossAttacks(t *testing.T) {
 	t0 := f.interval(1)
 	for round := 0; f.view(t).BossesDefeated == 0; round++ {
 		f.selectAt(t, t0+f.tick(float64(10*round)), 0, "quadrilateral")
-		for i, w := range square {
+		for i, w := range quad {
 			f.scanAt(t, t0+f.tick(float64(10*round+i+1)), i, w)
 		}
 	}
@@ -118,7 +118,7 @@ func TestBossAttacks(t *testing.T) {
 		t.Fatalf("after revive: health %d, boss %+v, %d timers", v.Health, v.Boss, f.clock.pending())
 	}
 	expectType(t, sub, "revive", teamstate.Revived)
-	f.selectAt(t, now+f.tick(1), 0, "triangle") // the square is on cooldown after its cast
+	f.selectAt(t, now+f.tick(1), 0, "triangle") // the quadrilateral is on cooldown after its cast
 }
 
 // TestAttacksAcrossRestart checks that health is derived, not stored: with

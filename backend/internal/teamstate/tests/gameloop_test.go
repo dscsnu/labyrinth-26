@@ -1077,7 +1077,7 @@ func (l *league) sloppy(t *testing.T, st *simTeam, knocked bool, counts *simCoun
 	first := pgtest.Must(l.atlas.SetOf(ids[:1]))
 	wrong := ""
 	for w := range l.atlas.WaypointCount() {
-		if !first.Has(w) && !l.atlas.FitsShape(pat.Shape, first.With(w)) && !st.model.cooling(w, l.clock.Now()) {
+		if !first.Has(w) && !l.atlas.FitsShapeCastable(pat.Shape, first.With(w), l.rules.MaxPatternPoints, "") && !st.model.cooling(w, l.clock.Now()) {
 			wrong = l.atlas.Waypoint(w).ID
 			break
 		}

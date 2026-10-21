@@ -30,9 +30,7 @@ var ErrMigrationEdited = errors.New("migration was edited after it was applied; 
 // Migrate applies every migrations/NNNN_name.sql file not yet recorded in
 // schema_migrations, in filename order, each in its own transaction, and
 // records its SHA-256. An applied file whose hash changed fails with
-// ErrMigrationEdited before anything is applied. Rows from before checksums
-// existed (checksum NULL) get the current file's hash recorded.
-// Applied files must never be edited; add a new file instead.
+// ErrMigrationEdited before anything is applied. Applied files must never be edited; add a new file instead.
 func (db *DB) Migrate(ctx context.Context, log *slog.Logger) error {
 	conn, err := db.pool.Acquire(ctx)
 	if err != nil {
@@ -48,19 +46,19 @@ func (db *DB) Migrate(ctx context.Context, log *slog.Logger) error {
 	if _, err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-		ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT`); err != nil {
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			checksum   TEXT NOT NULL
+		)`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	applied := map[string]*string{} // version → recorded checksum (nil before checksums)
+	applied := map[string]string{} // version → recorded checksum
 	rows, err := conn.Query(ctx, "SELECT version, checksum FROM schema_migrations")
 	if err != nil {
 		return err
 	}
 	var version string
-	var checksum *string
+	var checksum string
 	if _, err := pgx.ForEachRow(rows, []any{&version, &checksum}, func() error {
 		applied[version] = checksum
 		return nil
@@ -90,11 +88,7 @@ func (db *DB) Migrate(ctx context.Context, log *slog.Logger) error {
 		switch {
 		case !ok:
 			pending = append(pending, f)
-		case recorded == nil:
-			if _, err := conn.Exec(ctx, "UPDATE schema_migrations SET checksum = $2 WHERE version = $1", f.version, f.sum); err != nil {
-				return fmt.Errorf("record checksum of %s: %w", f.version, err)
-			}
-		case *recorded != f.sum:
+		case recorded != f.sum:
 			return fmt.Errorf("migration %s: %w", f.version, ErrMigrationEdited)
 		}
 	}

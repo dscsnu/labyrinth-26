@@ -700,7 +700,7 @@ paths:
         `text/event-stream`, the caller's one stream: it carries events of every scope (the user's own, their
         team's, and game-wide). On connect: a `retry:` line (a random reconnect delay between `live.retry_min`
         and `live.retry_max`, 1–6 s, so a restart doesn't bring every client back at once), then `hello`, then
-        `team` (or `no_team`), then `team_state` if you're in a team, then game-wide resources (none yet). Then
+        `team` (or `no_team`), then `team_state` if you're in a team, then game-wide resources (`leaderboard`). Then
         one event per change, and a `: ping` comment after `live.heartbeat` (25 s) with no event. A client that
         falls `live.subscriber_buffer` (16) events behind, or can't take a write within `live.write_timeout`
         (10 s), is dropped and should reconnect (EventSource does this itself).
@@ -710,7 +710,7 @@ paths:
         `snapshot` on connect, `resync` after a failed write was reloaded); `message` is the resource's
         **full** state, never a diff: the same JSON as its GET route. A client that only renders state reads
         `message` and ignores `type`; one that animates or notifies switches on `type`. Each envelope is a
-        schema here: `HelloEvent`, `TeamEvent`, `NoTeamEvent`, `TeamStateEvent`.
+        schema here: `HelloEvent`, `TeamEvent`, `NoTeamEvent`, `TeamStateEvent`, `LeaderboardEvent`.
 
         `team` and `team_state` carry a `version` (`Version`): keep an incoming copy only if its `epoch`
         differs from the one you hold, or the epoch matches and `seq` is higher. Write responses carry the same
@@ -718,12 +718,12 @@ paths:
         many casts the log (`GET /api/teams/me/casts`) holds: re-fetch it when it's more than you have.
 
         Nobody subscribes to channels: the server routes each event by user ID, to one user, to a team's
-        current members, or to every stream. Rejections and no-ops publish nothing. Nothing changes with time
-        alone. The full reference (every type and when it's sent, ordering, versioning, reconnection, and a
-        client example) is `backend/internal/server/README.md`, "The event stream".
+        current members, or to every stream. Rejections and no-ops publish nothing. Only two changes happen with
+        nobody acting, both on the server's timer: `boss_attacked` / `knocked_out` and `qr_cooldown_ended`.
+        The full reference (every type and when it's sent, ordering, versioning, reconnection, and a client example) is `backend/internal/server/README.md`, "The event stream".
 
-        Game-wide events (quizzes, quick-time events; none yet) will use the same envelope, with `message` `null`
-        when nothing is active, or an object with at least an `id`. Their schemas are not final.
+        Later game-wide events (quizzes, quick-time events) will use the same envelope as `leaderboard`,
+        with `message` `null` when nothing is active, or an object with at least an `id`. Their schemas are not final.
 
         | event | scope | data | `type` values |
         |---|---|---|---|

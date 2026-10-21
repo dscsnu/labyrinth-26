@@ -201,17 +201,16 @@ func (d db) insertScan(ctx context.Context, teamID, waypointID string, userID uu
 //     (1); an existing one keeps its multiplier, which casts never change.
 //  5. DELETE team_selection: which also empties the stack
 //
-// wrong is always false here (a wrong scan can't complete), but it's passed
-// through for one uniform call.
-func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, wrong bool, c Cast, p BossProgress) error {
+// The scan is written with wrong = false: a wrong scan can't complete.
+func (d db) insertCompletingScan(ctx context.Context, teamID, waypointID string, userID uuid.UUID, at time.Time, patternID int, c Cast, p BossProgress) error {
 	var bossSerial *int
 	if c.Boss != 0 {
 		bossSerial = &c.Boss
 	}
 	return pgx.BeginFunc(ctx, d.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, $5)",
-			teamID, waypointID, userID, at, wrong); err != nil {
+			"INSERT INTO team_scan (team_id, waypoint_id, user_id, scanned_at, wrong) VALUES ($1, $2, $3, $4, false)",
+			teamID, waypointID, userID, at); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `

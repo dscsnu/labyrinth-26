@@ -2,12 +2,12 @@
 .env
 .env.*
 !.env.example
-!.env.test
 
 # Build output: `go build` in backend/ names binaries after the package
 /labyrinth
 /loadtest
 /docaudit
+/spells
 
 # Go test and profiling output
 *.test

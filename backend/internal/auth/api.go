@@ -310,9 +310,6 @@ func (a *API) serveAuthed(w http.ResponseWriter, r *http.Request, raw string, ne
 	})))
 }
 
-// Authed adapts RequireAuth for route registration.
-func (a *API) Authed(h http.HandlerFunc) http.Handler { return a.RequireAuth(h) }
-
 // emailAllowed reports whether email's domain is in ALLOWED_EMAIL_DOMAINS, or
 // true when that list is empty.
 func (a *API) emailAllowed(email string) bool {

@@ -11,9 +11,9 @@ import (
 	"labyrinth/internal/teamstate"
 )
 
-// TestResetCooldowns casts the square (class_4, its four waypoints on QR
+// TestResetCooldowns casts the quadrilateral (class_4, its four waypoints on QR
 // cooldown), then resets the team's cooldowns: cooldown_class goes null and
-// qr_cooldowns empty (published as cooldowns_reset), the square can be
+// qr_cooldowns empty (published as cooldowns_reset), the quadrilateral can be
 // selected again and its waypoints scanned; a restart keeps the reset
 // (stored); and the next cast starts cooldowns as usual.
 func TestResetCooldowns(t *testing.T) {
@@ -23,12 +23,12 @@ func TestResetCooldowns(t *testing.T) {
 	}
 	sub := f.hub.Subscribe(f.users[0])
 	defer sub.Close()
-	f.castSquare(t, 0)
-	if v := f.view(t); v.CooldownClass == nil || len(v.QRCooldowns) != len(square) {
-		t.Fatalf("after the square: cooldown %v, qr %v", v.CooldownClass, v.QRCooldowns)
+	f.castQuad(t, 0)
+	if v := f.view(t); v.CooldownClass == nil || len(v.QRCooldowns) != len(quad) {
+		t.Fatalf("after the quadrilateral: cooldown %v, qr %v", v.CooldownClass, v.QRCooldowns)
 	}
 	if _, err := f.state.Select(context.Background(), f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
-		t.Fatalf("the square before the reset: %v", err)
+		t.Fatalf("the quadrilateral before the reset: %v", err)
 	}
 	for len(sub.C) > 0 {
 		<-sub.C
@@ -44,8 +44,8 @@ func TestResetCooldowns(t *testing.T) {
 	if v := f.view(t); v.CooldownClass != nil || len(v.QRCooldowns) != 0 {
 		t.Fatalf("the reset across a restart: cooldown %v, qr %v", v.CooldownClass, v.QRCooldowns)
 	}
-	res := f.castSquare(t, 1) // allowed again: neither its class nor its waypoints cool down
-	if v := res.State; v.CooldownClass == nil || len(v.QRCooldowns) != len(square) {
+	res := f.castQuad(t, 1) // allowed again: neither its class nor its waypoints cool down
+	if v := res.State; v.CooldownClass == nil || len(v.QRCooldowns) != len(quad) {
 		t.Fatalf("a cast after the reset starts new cooldowns: cooldown %v, qr %v", v.CooldownClass, v.QRCooldowns)
 	}
 }
@@ -108,7 +108,7 @@ func TestFinishedHook(t *testing.T) {
 // its state, and that the timer firing later recreates nothing.
 func TestTeamDeleted(t *testing.T) {
 	f := started(t, fixtureOptions{attacks: true})
-	f.castSquare(t, 0)
+	f.castQuad(t, 0)
 	if f.clock.pending() != 1 {
 		t.Fatalf("%d timers before the delete, want 1", f.clock.pending())
 	}
@@ -131,7 +131,7 @@ func TestTeamDeleted(t *testing.T) {
 // boss fell, and its damage on the current boss.
 func TestStandings(t *testing.T) {
 	f := started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1 WHERE serial = 1"})
-	res := f.castSquare(t, 0) // defeats boss 1 (1 HP)
+	res := f.castQuad(t, 0) // defeats boss 1 (1 HP)
 	res2, dmg := f.castAlternating(t, 1)
 	var got []teamstate.Standing
 	for _, sd := range f.state.Standings() {
@@ -141,7 +141,7 @@ func TestStandings(t *testing.T) {
 	}
 	want := teamstate.Standing{TeamID: f.teamID, BossesDefeated: 1, LastDefeatAt: res.State.LastCast.CastAt, Damage: dmg}
 	if res2.State.BossesDefeated != 1 {
-		t.Skipf("the second cast defeated boss 2 too (damage %d): the seed's boss 2 is weaker than this test assumes", dmg)
+		t.Fatalf("the second cast (the triangle, damage %d) defeated boss 2 too: the test needs boss 2's HP above a triangle's damage", dmg)
 	}
 	if len(got) != 1 || got[0].BossesDefeated != want.BossesDefeated || !got[0].LastDefeatAt.Equal(want.LastDefeatAt) || got[0].Damage != want.Damage {
 		t.Fatalf("standings %+v, want %+v", got, want)

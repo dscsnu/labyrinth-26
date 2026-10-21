@@ -20,8 +20,8 @@ import (
 	"labyrinth/internal/platform/postgres/pgtest"
 )
 
-// simSquare is a quadrilateral in the 2026 seed.
-var simSquare = []string{"2001", "2002", "2007", "2008"}
+// simQuad is a quadrilateral in the 2026 seed.
+var simQuad = []string{"2001", "2002", "2007", "2008"}
 
 // simClient is one player's phone: a network delay each way, and an event
 // stream delivered after the same delay.
@@ -159,17 +159,17 @@ func simTeam(t *testing.T, shape string, delay func(i int) (up, down time.Durati
 	return e, clients
 }
 
-// TestSimTeamCompletesUnderLatency has four players scan a square at once,
+// TestSimTeamCompletesUnderLatency has four players scan a quadrilateral at once,
 // each with its own delays (up to 150 ms each way): exactly one scan completes
-// it, and every player's screen ends with the stack purged and the square
+// it, and every player's screen ends with the stack purged and the quadrilateral
 // completed.
 func TestSimTeamCompletesUnderLatency(t *testing.T) {
 	_, cs := simTeam(t, "quadrilateral", func(i int) (time.Duration, time.Duration) {
 		return time.Duration(i*30) * time.Millisecond, time.Duration(150-i*25) * time.Millisecond
 	})
 	var wg sync.WaitGroup
-	outcomes := make([]string, len(simSquare))
-	for i, w := range simSquare {
+	outcomes := make([]string, len(simQuad))
+	for i, w := range simQuad {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -191,7 +191,7 @@ func TestSimTeamCompletesUnderLatency(t *testing.T) {
 		t.Fatalf("outcomes %v: want exactly one pattern_completed", outcomes)
 	}
 	for _, c := range cs {
-		eventually(t, "player sees the purge and the square", func() bool {
+		eventually(t, "player sees the purge and the quadrilateral", func() bool {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			return len(c.stack) == 0 && len(c.shape) == 1 && c.shape[0] == "quadrilateral"
@@ -216,7 +216,7 @@ func TestSimRaceSameWaypoint(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			status, code, _, _ := cs[i].scan(simSquare[0])
+			status, code, _, _ := cs[i].scan(simQuad[0])
 			results[i] = result{status, code}
 		}()
 	}
@@ -243,7 +243,7 @@ func TestSimRaceSameWaypoint(t *testing.T) {
 }
 
 // TestSimWrongScanReachesEveryone has one player scan a waypoint that can't
-// be part of the square: they're told (wrong_scan), every phone sees the
+// be part of the quadrilateral: they're told (wrong_scan), every phone sees the
 // attempt poisoned, a teammate's scan racing it is either accepted before it
 // or refused after it (selection_poisoned), and a reselect clears it for all.
 func TestSimWrongScanReachesEveryone(t *testing.T) {

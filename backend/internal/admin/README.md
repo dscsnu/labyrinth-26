@@ -21,7 +21,7 @@ Config values appear with their key: **20** (`admin.user_search_limit`).
 ## Concepts
 | Term | Meaning |
 |---|---|
-| **Admin** | A user whose role is `ADMIN` **in Postgres now**. `server.Build` wraps every admin route as `authAPI.RequireAuth(userAPI.RequireAdmin(h))`: `RequireAdmin` reads the role with `user.Get` on every request, never from the token (which can be up to **12 h**, `auth.token_ttl`, stale). Anyone else gets `403 not_admin`. |
+| **Admin** | A user whose role is `ADMIN` **in Postgres now**. `server.Build` wraps every admin route as `authAPI.RequireAuth(perUser(userAPI.RequireAdmin(h)))` (`perUser` is the per-user rate limit): `RequireAdmin` reads the role with `user.Get` on every request, never from the token (which can be up to **12 h**, `auth.token_ttl`, stale). Anyone else gets `403 not_admin`. |
 | **Facade** | A use case that owns nothing: its writes are the owners' writes (their rules, write-through and events), run for an admin. Admin adds only rules about *who is acting*. |
 | **Team overview** | One row of the admin's teams list: the team and, for a started or finished team, its **game at a glance** (health, knocked out, boss, cooldowns, cast count). |
 | **Own role** | An admin can't change their own role (`409 cannot_change_own_role`), so nobody locks themselves out; another admin can. |

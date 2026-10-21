@@ -29,7 +29,7 @@ type Point struct {
 
 // Waypoint is a physical landmark identified by its 4-digit ID and GPS coordinates.
 type Waypoint struct {
-	// ID is the 4-digit waypoint ID, e.g. "1001".
+	// ID is the 4-digit waypoint ID, e.g. "2001".
 	ID string
 	// GPS is the geographic location of the waypoint.
 	GPS GPS
@@ -132,9 +132,10 @@ func ConvexHull(pts []Point) []Point {
 
 // TourM calculates the shortest closed Euclidean tour visiting all points in pts
 // (the Traveling Salesperson closed loop).
-// - For 0 or 1 point, TourM is 0.
-// - For 2 points, TourM is out and back: 2 * Distance(p0, p1).
-// - For 3 to 6 points, all (n-1)! / 2 cyclic directions are evaluated.
+//   - For 0 or 1 point, TourM is 0.
+//   - For 2 points, TourM is out and back: 2 * Distance(p0, p1).
+//   - For 3 to 6 points, all (n-1)! orderings starting from pts[0] are
+//     evaluated (each cycle twice, once per direction).
 func TourM(pts []Point) float64 {
 	n := len(pts)
 	switch n {

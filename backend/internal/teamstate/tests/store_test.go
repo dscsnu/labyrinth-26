@@ -4,7 +4,7 @@ package tests
 // teamstate_test, with the 2026 seed, config.toml's rules and a fake
 // clock. In the 2026 seed every 2 to 6 of the 10 checkpoints (2001-2010) form a
 // pattern of the shape of that size (line … hexagon), so every scan fits its
-// shape; the fixture adds nowhere, in no pattern, for wrong scans. square is
+// shape; the fixture adds nowhere, in no pattern, for wrong scans. quad is
 // one of the quadrilaterals.
 // Times are written with f.tick (seconds after the fake clock's start). There
 // is no time limit, so they only order and stamp events.
@@ -44,9 +44,9 @@ var triangle = []string{"2001", "2002", "2003"}
 // wrong scan (the 2026 content has none of its own).
 const nowhere = "2099"
 
-// square is a quadrilateral in the 2026 seed (G Block Junc, Arcade, Lake,
-// Canopies): the name stays from 2025, when it was a square.
-var square = []string{"2001", "2002", "2007", "2008"}
+// quad is a quadrilateral in the 2026 seed (G Block Junc, Arcade, Lake,
+// Canopies; pattern 188, a concave one).
+var quad = []string{"2001", "2002", "2007", "2008"}
 
 // start is the fake clock's starting time.
 var start = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
@@ -401,12 +401,12 @@ func TestScanNeedsSelection(t *testing.T) {
 	}
 }
 
-// TestSquareCasts walks a square to completion: a waypoint can't be scanned
+// TestQuadCasts walks a quadrilateral to completion: a waypoint can't be scanned
 // twice (the rejection changes nothing), one member may scan several of its
 // waypoints, three waypoints forming a triangle don't complete the selected
-// square, and the fourth completes it, clears the selection and stack, and
+// quad, and the fourth completes it, clears the selection and stack, and
 // logs the cast.
-func TestSquareCasts(t *testing.T) {
+func TestQuadCasts(t *testing.T) {
 	f := started(t)
 
 	if v := f.selectAt(t, 0, 0, "quadrilateral"); v.Selection == nil || v.Selection.SelectedBy != f.users[0] {
@@ -422,16 +422,16 @@ func TestSquareCasts(t *testing.T) {
 		t.Fatalf("stack: %v", got)
 	}
 
-	// 1001, 1002, 1007 is a triangle, but the team selected a square.
+	// 2001, 2002, 2007 is a triangle, but the team selected a quadrilateral.
 	expectOutcome(t, "third scan", f.scanAt(t, f.tick(10), 2, "2007"), teamstate.OutcomeScanAdded)
 	res := f.scanAt(t, f.tick(12), 0, "2008")
 	expectOutcome(t, "fourth scan", res, teamstate.OutcomePatternCompleted)
-	if !slices.Equal(res.Pattern, square) || res.AlreadyCompleted {
+	if !slices.Equal(res.Pattern, quad) || res.AlreadyCompleted {
 		t.Fatalf("completion: %+v", res)
 	}
 	st := res.State
 	if st.Selection != nil || len(st.Stack) != 0 || st.Poisoned || !slices.Equal(st.Shapes, []string{"quadrilateral"}) ||
-		len(st.Patterns) != 1 || !slices.Equal(st.Waypoints, square) || st.LastCast == nil || st.LastCast.CastBy != f.users[0] {
+		len(st.Patterns) != 1 || !slices.Equal(st.Waypoints, quad) || st.LastCast == nil || st.LastCast.CastBy != f.users[0] {
 		t.Fatalf("after completion: %+v", st)
 	}
 	if err := f.scanErrAt(f.tick(13), 4, "2009"); !errors.Is(err, teamstate.ErrNoShapeSelected) {
@@ -445,10 +445,10 @@ func TestOneMemberScansWholePattern(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
 	res := teamstate.ScanResult{}
-	for i, w := range square {
+	for i, w := range quad {
 		res = f.scanAt(t, f.tick(float64(i+1)), 3, w)
 	}
-	expectOutcome(t, "one member, whole square", res, teamstate.OutcomePatternCompleted)
+	expectOutcome(t, "one member, whole quadrilateral", res, teamstate.OutcomePatternCompleted)
 }
 
 // TestNoTimeLimit checks that an attempt never expires: scans hours apart
@@ -456,14 +456,14 @@ func TestOneMemberScansWholePattern(t *testing.T) {
 func TestNoTimeLimit(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
-	for i, w := range square[:3] {
+	for i, w := range quad[:3] {
 		f.scanAt(t, time.Duration(i)*time.Hour, i, w)
 	}
 	f.clock.at(10 * time.Hour)
-	if got := stackWaypoints(f.view(t)); !slices.Equal(got, square[:3]) {
+	if got := stackWaypoints(f.view(t)); !slices.Equal(got, quad[:3]) {
 		t.Fatalf("stack after 10 h: %v", got)
 	}
-	expectOutcome(t, "last point 10 h later", f.scanAt(t, 10*time.Hour, 3, square[3]), teamstate.OutcomePatternCompleted)
+	expectOutcome(t, "last point 10 h later", f.scanAt(t, 10*time.Hour, 3, quad[3]), teamstate.OutcomePatternCompleted)
 }
 
 // TestEverySelectionPurges checks that every selection empties the stack,
@@ -472,14 +472,14 @@ func TestNoTimeLimit(t *testing.T) {
 func TestEverySelectionPurges(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
-	for i, w := range square[:3] {
+	for i, w := range quad[:3] {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
 	}
 
 	if v := f.selectAt(t, f.tick(4), 0, "quadrilateral"); len(v.Stack) != 0 || v.Selection.SelectedBy != f.users[0] {
 		t.Fatalf("reselecting the same shape should purge: %+v", v)
 	}
-	res := f.scanAt(t, f.tick(5), 3, "2008") // without the purge this would complete the square
+	res := f.scanAt(t, f.tick(5), 3, "2008") // without the purge this would complete the quadrilateral
 	expectOutcome(t, "after reselect", res, teamstate.OutcomeScanAdded)
 	if got := stackWaypoints(res.State); !slices.Equal(got, []string{"2008"}) {
 		t.Fatalf("stack after reselect: %v", got)
@@ -504,7 +504,7 @@ func TestRescanIsRejected(t *testing.T) {
 	defer sub.Close()
 	for _, member := range []int{0, 1} {
 		if err := f.scanErrAt(f.tick(2), member, "2001"); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
-			t.Fatalf("member %d rescanning 1001: %v", member, err)
+			t.Fatalf("member %d rescanning 2001: %v", member, err)
 		}
 	}
 	if got := stackWaypoints(f.view(t)); !slices.Equal(got, []string{"2001"}) || f.loggedScans(t) != 1 {
@@ -573,7 +573,7 @@ func TestWrongScanIsReported(t *testing.T) {
 }
 
 // TestWrongScanPoisonsSelection checks that a poisoned attempt can't cast,
-// and that selecting again purges it so the square then completes.
+// and that selecting again purges it so the quadrilateral then completes.
 func TestWrongScanPoisonsSelection(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
@@ -582,15 +582,15 @@ func TestWrongScanPoisonsSelection(t *testing.T) {
 	// nowhere is in no pattern: wrong.
 	expectOutcome(t, "poisoning scan", f.scanAt(t, f.tick(3), 2, nowhere), teamstate.OutcomeWrongScan)
 	if err := f.scanErrAt(f.tick(4), 3, "2007"); !errors.Is(err, teamstate.ErrSelectionPoisoned) {
-		t.Fatalf("the rest of the square on a poisoned attempt: %v", err)
+		t.Fatalf("the rest of the quadrilateral on a poisoned attempt: %v", err)
 	}
 
-	// Reselecting purges the wrong scan; the square then completes.
+	// Reselecting purges the wrong scan; the quadrilateral then completes.
 	if v := f.selectAt(t, f.tick(6), 0, "quadrilateral"); v.Poisoned || len(v.Stack) != 0 {
 		t.Fatalf("after reselect: %+v", v)
 	}
 	res := teamstate.ScanResult{}
-	for i, w := range square {
+	for i, w := range quad {
 		res = f.scanAt(t, f.tick(7)+f.tick(float64(i)), i, w)
 	}
 	expectOutcome(t, "completes after reselect", res, teamstate.OutcomePatternCompleted)
@@ -602,7 +602,7 @@ func TestWrongScanPoisonsSelection(t *testing.T) {
 func TestCompletionPurges(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
-	for i, w := range square {
+	for i, w := range quad {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
 	if v := f.view(t); v.Selection != nil || len(v.Stack) != 0 {
@@ -616,7 +616,7 @@ func TestCompletionPurges(t *testing.T) {
 			t.Fatalf("member %d scanning %s after completion: %v", c.member, c.waypoint, err)
 		}
 	}
-	// A new selection works again (the triangle: the square's class is on
+	// A new selection works again (the triangle: the quadrilateral's class is on
 	// cooldown after its cast).
 	f.selectAt(t, f.tick(5), 0, "triangle")
 	expectOutcome(t, "after a new selection", f.scanAt(t, f.tick(6), 3, "2001"), teamstate.OutcomeScanAdded)
@@ -624,19 +624,19 @@ func TestCompletionPurges(t *testing.T) {
 
 // TestOutOfOrderScanning checks that a pattern completes whatever order the
 // waypoints are scanned in. A pattern is an unordered set of waypoints (a
-// WaypointSet bitmask): scanning 1001 then 1007 and scanning 1007 then 1001
+// WaypointSet bitmask): scanning 2001 then 2007 and scanning 2007 then 2001
 // set the same bits, so the same pattern is found.
 func TestOutOfOrderScanning(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
 
-	order := []string{"2008", "2007", "2002", "2001"} // square, scrambled
+	order := []string{"2008", "2007", "2002", "2001"} // quad, scrambled
 	res := teamstate.ScanResult{}
 	for i, w := range order {
 		res = f.scanAt(t, f.tick(float64(i)), i, w)
 	}
 	expectOutcome(t, "completes out of order", res, teamstate.OutcomePatternCompleted)
-	if !slices.Equal(res.Pattern, square) { // Pattern is returned sorted
+	if !slices.Equal(res.Pattern, quad) { // Pattern is returned sorted
 		t.Fatalf("pattern %v", res.Pattern)
 	}
 }
@@ -677,18 +677,18 @@ func TestSixPointPatternAtCapacity(t *testing.T) {
 
 // TestCompletingAgain checks that completing an already completed pattern
 // reports it and doesn't grow progress (a triangle cast in between: the
-// spell cooldown refuses two squares in a row).
+// spell cooldown refuses two quadrilaterals in a row).
 func TestCompletingAgain(t *testing.T) {
 	f := started(t)
-	if res := f.castSquare(t, 0); res.AlreadyCompleted {
-		t.Fatal("first square: already_completed")
+	if res := f.castQuad(t, 0); res.AlreadyCompleted {
+		t.Fatal("first quadrilateral: already_completed")
 	}
 	f.castTriangle(t, 1)
-	if res := f.castSquare(t, 2); !res.AlreadyCompleted {
-		t.Fatal("second square: not already_completed")
+	if res := f.castQuad(t, 2); !res.AlreadyCompleted {
+		t.Fatal("second quadrilateral: not already_completed")
 	}
 	if v := f.view(t); len(v.Patterns) != 2 || len(v.Shapes) != 2 {
-		t.Fatalf("patterns after the square twice and a triangle: %v, shapes %v", v.Patterns, v.Shapes)
+		t.Fatalf("patterns after the quadrilateral twice and a triangle: %v, shapes %v", v.Patterns, v.Shapes)
 	}
 }
 
@@ -717,10 +717,10 @@ func TestClearSelection(t *testing.T) {
 func TestRestartRestoresEverything(t *testing.T) {
 	f := started(t)
 	f.selectAt(t, 0, 0, "quadrilateral")
-	for i, w := range square {
+	for i, w := range quad {
 		f.scanAt(t, f.tick(float64(i)), i, w)
 	}
-	later := f.tick(100) // long after the square
+	later := f.tick(100) // long after the quadrilateral
 	f.selectAt(t, later, 0, "triangle")
 	f.scanAt(t, later, 4, "2003")
 	f.scanAt(t, later+f.tick(1), 5, "2004")
@@ -876,7 +876,7 @@ func TestPublishTeam(t *testing.T) {
 	nextState(t, subs[0]) // the selection's own event
 	f.state.PublishTeam(f.teamID)
 	if _, v := nextState(t, subs[0]); v.Selection == nil || v.Selection.Shape != "quadrilateral" {
-		t.Fatalf("republished state %+v, want the square selected", v)
+		t.Fatalf("republished state %+v, want the quadrilateral selected", v)
 	}
 	if got, _ := json.Marshal(f.view(t)); f.loggedScans(t) != 0 || !strings.Contains(string(got), `"quadrilateral"`) {
 		t.Fatalf("PublishTeam changed state: %s", got)
@@ -923,8 +923,8 @@ func nextState(t *testing.T, sub *live.Subscription) (live.EventType, teamstate.
 }
 
 // TestCastLog checks that every cast is logged in memory and in team_cast,
-// repeats included and marked: the square, a triangle (the cooldown forbids
-// two squares in a row), the square again; last_cast is the newest,
+// repeats included and marked: the quadrilateral, a triangle (the cooldown forbids
+// two quadrilaterals in a row), the quadrilateral again; last_cast is the newest,
 // CastsForUser lists them newest first with their classes, a new selection
 // keeps them, and a restart reloads the whole log.
 func TestCastLog(t *testing.T) {
@@ -937,7 +937,7 @@ func TestCastLog(t *testing.T) {
 	}
 	for round := range 3 {
 		t0 := time.Duration(round) * f.tick(100)
-		shape, ids, class := "quadrilateral", square, "class_4"
+		shape, ids, class := "quadrilateral", quad, "class_4"
 		if round == 1 {
 			shape, ids, class = "triangle", triangle, "class_3"
 		}
@@ -1005,24 +1005,24 @@ func TestVersionAndTypes(t *testing.T) {
 	want("publish team", teamstate.GameStarted, 0, 0)
 	f.selectAt(t, 0, 0, "quadrilateral")
 	want("select", teamstate.ShapeSelected, 1, 0)
-	for i, w := range square[:3] {
+	for i, w := range quad[:3] {
 		f.scanAt(t, f.tick(float64(i+1)), i, w)
 		want("scan "+w, teamstate.ScanAdded, 1, 0)
 	}
-	if err := f.scanErrAt(f.tick(4), 0, square[0]); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
+	if err := f.scanErrAt(f.tick(4), 0, quad[0]); !errors.Is(err, teamstate.ErrWaypointAlreadyScanned) {
 		t.Fatalf("rescan: %v", err)
 	}
 	quiet("rejected rescan")
-	f.scanAt(t, f.tick(5), 3, square[3])
+	f.scanAt(t, f.tick(5), 3, quad[3])
 	want("completing scan", teamstate.SpellCast, 1, 1)
 	if _, err := f.state.ClearSelection(ctx, f.users[0]); err != nil {
 		t.Fatal(err)
 	}
 	quiet("clear with nothing selected")
 	if _, err := f.state.Select(ctx, f.users[0], "quadrilateral"); !errors.Is(err, teamstate.ErrShapeOnCooldown) {
-		t.Fatalf("reselecting the square right after its cast: %v, want shape_on_cooldown", err)
+		t.Fatalf("reselecting the quadrilateral right after its cast: %v, want shape_on_cooldown", err)
 	}
-	quiet("square on cooldown")
+	quiet("quadrilateral on cooldown")
 	f.selectAt(t, f.tick(6), 0, "triangle")
 	want("select another class", teamstate.ShapeSelected, 1, 1)
 	f.scanAt(t, f.tick(7), 0, "2001")

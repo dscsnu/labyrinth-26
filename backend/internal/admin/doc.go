@@ -2,8 +2,9 @@
 // place. It owns no data and no state: each route checks its input and calls
 // the use case that owns the data (teams, teamstate, user), through small
 // interfaces declared here, which server.Build fills with the real stores.
-// Only admins reach it: server.Build wraps every route in RequireAuth and
-// user's RequireAdmin, which reads the role from Postgres on every request.
+// Only admins reach it: server.Build wraps every route in RequireAuth, the
+// per-user rate limit and user's RequireAdmin, which reads the role from
+// Postgres on every request.
 //
 // See README.md for every rule and case, and how each file works.
 package admin

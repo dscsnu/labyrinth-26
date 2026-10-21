@@ -78,13 +78,18 @@ backend/
   main.go                   entry point: subcommands, startup and shutdown order
   config.toml               every tunable value (§10)
   AGENTS.md, README.md
+  compose.yaml              dev Postgres
+  compose.prod.yaml         production: backend + Postgres, restart policy (README, "Deploying")
+  Dockerfile, .dockerignore the backend image (.env never enters the build)
   cmd/docaudit/             checks every declaration has a doc comment (§11)
   cmd/loadtest/             10k-player load test against a bench database
+  cmd/spells/               offline damage generator (writes seeds/2026_spells.sql)
   internal/
-    atlas/ auth/ user/ teams/ teamstate/ qr/   use cases (§3)
+    atlas/ bosses/ auth/ user/ teams/ teamstate/ qr/ leaderboard/ admin/   use cases (§3)
+    spells/                 offline geometry and damage formula (cmd/spells; not imported by server)
     server/                 wires use cases together; cross-cutting routes
     platform/               shared plumbing, no business rules:
-      config/ httpx/ identity/ live/ postgres/
+      config/ httpx/ identity/ live/ postgres/ stats/
 frontend/                   SvelteKit app (separate rules)
 ```
 
@@ -180,7 +185,7 @@ Every write in an in-memory `write.go` runs these steps, in this order, **each m
 ## 7. API conventions (`api.go`)
 - `type API struct`, `NewAPI(...)`, and `Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler)`. Use method patterns: `"POST /api/teams/join"`.
 - **Who's calling** comes from `identity.UserID(r)`. Never trust an ID from the body for "who am I".
-- **Admin routes** live under `/api/admin/…`, **all in the `admin` use case** (`internal/admin`): it checks input and calls the owning use case's write (teams' `RemoveMember` and `Delete`, teamstate's `Revive` and `ResetCooldowns`, user's `SetRole`). A new admin tool is a route there plus, if needed, a write in the owner. `server.Build`'s `adminOnly` wraps a handler as `authAPI.RequireAuth(userAPI.RequireAdmin(h))`: `RequireAdmin` reads the role from Postgres (`user.Get`) on **every** request, never from the token (up to `auth.token_ttl` stale), and answers `403 not_admin` otherwise. Log every admin write with the admin's ID. An admin acting on a player takes IDs from the path (`/api/admin/teams/{team_id}/members/{user_id}`), not the body.
+- **Admin routes** live under `/api/admin/…`, **all in the `admin` use case** (`internal/admin`): it checks input and calls the owning use case's write (teams' `RemoveMember` and `Delete`, teamstate's `Revive` and `ResetCooldowns`, user's `SetRole`). A new admin tool is a route there plus, if needed, a write in the owner. `server.Build`'s `adminOnly` wraps a handler as `authAPI.RequireAuth(perUser(userAPI.RequireAdmin(h)))` (and `staff`, for the HELPER-or-ADMIN `/api/qr/{waypoint_id}`, as `authAPI.RequireAuth(perUser(userAPI.RequireStaff(h)))`): `RequireAdmin` reads the role from Postgres (`user.Get`) on **every** request, never from the token (up to `auth.token_ttl` stale), and answers `403 not_admin` otherwise. Log every admin write with the admin's ID. An admin acting on a player takes IDs from the path (`/api/admin/teams/{team_id}/members/{user_id}`), not the body.
 - **Auth middleware:** every route uses the server's `authed` wrapper (`RequireAuth`, Bearer header only, then the per-user rate limit `perUser`); admin and staff routes wrap `perUser` the same way, so every signed-in route is limited. `RequireStreamAuth`, which also accepts the `labyrinth_token` cookie, is for `GET /api/events` **only**: a browser's `EventSource` can't send headers. Never put it on a route that changes anything, or on any other route: a cookie is sent by the browser automatically, so a cookie-authenticated write could be triggered by another site (CSRF). `TestStreamCookieAuth` checks that reads and writes elsewhere refuse the cookie.
 - **Bodies:** `httpx.DecodeJSON` (rejects unknown fields). The server caps every body at `server.max_body_bytes`. Use pointer fields for required booleans.
 - **OpenAPI:** every route, request body, response schema and error code is in `internal/server/openapi.yaml`. Add or change it in the same change as the route. List a response's error codes in its `description` as ``Codes: `a`, `b` ``: `internal/server/tests/openapi_test.go` fails if a registered route or a sent code/status pair is missing from the spec, or the spec has one the code doesn't. It can't check schemas field by field, so keep them in step with the Go types yourself.
@@ -264,7 +269,7 @@ Follow Google's Go style for doc comments.
 - **Handlers** name their route: `// join handles POST /api/teams/join {"team_id"}: the caller joins that team.`
 - **Tests:** `// TestX checks that …`. Benchmarks: `// BenchmarkX measures …`.
 - **Package comment** in `doc.go`: what the use case owns and where its state lives, ending with `See README.md for every rule and case, and how each file works.`
-- **Inline comments explain why**, not what: write-through step markers, lock reasons, ordering constraints, measured performance choices (see `FitsShape`).
+- **Inline comments explain why**, not what: write-through step markers, lock reasons, ordering constraints, measured performance choices (see atlas's shape-fit scan, `internal/atlas/README.md`).
 - **Performance claims are measured,** with the numbers and the data they were measured on.
 - **Check:** `go run ./cmd/docaudit` must print `docaudit: ok`.
 
@@ -325,7 +330,7 @@ go vet ./...
 go run ./cmd/docaudit            # docaudit: ok
 docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t \
   -e POSTGRES_DB=t -p 55432:5432 postgres:17-alpine
-TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -race -count=1 ./...
+TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test -race -count=3 ./...
 ```
 - **CI runs this checklist** on every push to `main` and every pull request (`.github/workflows/ci.yml`), **one job per use case**:
   - `lint`: gofmt, vet, docaudit.

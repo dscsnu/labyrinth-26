@@ -162,8 +162,9 @@ a valid secret). Nothing else can fail: there is no database and no network.
 
 - ⚠ The frontend `/play` page still has no camera scanner: it submits the raw
   waypoint ID, which `POST /api/teams/me/state/scans` no longer accepts
-  (`400 invalid_body`). The backend verifies tokens; the play page and
-  `/test-scan` need to be wired to submit `{"qr"}` before the event.
+  (`400 invalid_body`). The backend verifies tokens; the play page needs to
+  be wired to submit `{"qr"}` before the event (`/test-scan` already submits
+  `{"qr"}` to `POST /api/qr/verify`).
 - ⚠ The signing key sits on the display's page. A player who can open `/qr`
   (staff-only in production) could sign their own tokens. The staff gate is
   what closes this; the per-waypoint key limits one display to its waypoint.

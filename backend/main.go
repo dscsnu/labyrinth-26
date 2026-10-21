@@ -32,7 +32,7 @@ import (
 // Serving, migrate and seed all take the single-instance lock first, so they
 // refuse to run while a backend is serving from the same database.
 //
-//	labyrinth keygen   print a new JWT_PRIVATE_KEY / JWT_PUBLIC_KEY pair
+//	labyrinth keygen   print a new JWT_PRIVATE_KEY / JWT_PUBLIC_KEY pair and a QR_SECRET
 //	labyrinth pubkey   print JWT_PUBLIC_KEY for the configured JWT_PRIVATE_KEY
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))

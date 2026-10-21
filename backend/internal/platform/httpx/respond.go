@@ -10,8 +10,7 @@ import (
 	"net/http"
 )
 
-// Response is the envelope for every JSON response, same shape as 2025's
-// ApiResponse.
+// Response is the envelope for every JSON response.
 type Response struct {
 	Success bool `json:"success"`
 	// Code is a stable machine-readable error identifier, e.g. "team_full".

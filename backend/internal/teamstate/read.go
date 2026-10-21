@@ -106,7 +106,7 @@ type Cast struct {
 	AlreadyCompleted bool
 	// Dealt is the damage the cast dealt to a boss: the pattern's damage ×
 	// the team's multiplier at the time, rounded; 0 if every boss was
-	// already defeated (or the cast predates bosses).
+	// already defeated.
 	Dealt int
 	// Boss is the serial of the boss it hit, or 0 if none.
 	Boss int
@@ -457,13 +457,15 @@ type Game struct {
 
 // GameShape is one selectable shape: what the client calls a pattern type.
 type GameShape struct {
-	// ID is what PUT /api/teams/me/state/selection takes, e.g. "square".
+	// ID is what PUT /api/teams/me/state/selection takes, e.g.
+	// "quadrilateral".
 	ID string `json:"id"`
-	// Name is for display, e.g. "Square".
+	// Name is for display, e.g. "Quadrilateral".
 	Name string `json:"name"`
 	// Patterns is how many valid patterns the shape has.
 	Patterns int `json:"patterns"`
-	// Points is the distinct sizes of its patterns, ascending, e.g. [4].
+	// Points is the distinct sizes of its patterns, ascending, e.g. [4] (one
+	// per shape in the 2026 seed).
 	Points []int `json:"points"`
 	// Damage is the min and max damage over the shape's patterns.
 	Damage DamageRange `json:"damage"`

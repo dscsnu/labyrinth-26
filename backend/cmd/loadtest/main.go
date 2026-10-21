@@ -5,7 +5,8 @@
 // (created next to the dev one, name must contain "bench"), creates players
 // directly in that database, and signs their tokens with JWT_PRIVATE_KEY, so
 // no Google login is needed. Your dev database is never touched. Each
-// scenario starts from an empty database and a fresh backend.
+// scenario (sse and reads share one) starts from an empty database and a
+// fresh backend.
 //
 //	cd backend && go run ./cmd/loadtest                       # everything, 10k players
 //	go run ./cmd/loadtest -scenarios rush,sse -players 3000
@@ -17,7 +18,6 @@ import (
 	"crypto/ed25519"
 	"flag"
 	"fmt"
-	"labyrinth/internal/qr"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,6 +30,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"labyrinth/internal/platform/config"
+	"labyrinth/internal/qr"
 )
 
 // main runs the load test and exits non-zero on failure.

@@ -50,7 +50,7 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
 
 ### `api.go`: routes
 - **`API`** holds `*Users` and the logger. **`NewAPI(users, log)`** builds it; `server.Build` calls it with the same `*Users` it gives auth.
-- **`Routes(mux, authed)`** registers `GET /api/me`, wrapped in auth's middleware (`authAPI.Authed`).
+- **`Routes(mux, authed)`** registers `GET /api/me`, wrapped in the server's `authed` wrapper (auth's `RequireAuth`, then the per-user rate limit `perUser`).
 - **`me`** handles `GET /api/me`:
   1. `identity.UserID(r)`: the caller's ID from their verified token (set by auth's `RequireAuth`).
   2. `users.Get(ctx, id)`.
@@ -67,8 +67,8 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
   2. Role isn't `RoleAdmin` → `403 not_admin`, message `only an admin can do this` (**`ErrNotAdmin`**).
   3. Otherwise `next`.
 
-  `server.Build` wraps admin routes as `authAPI.RequireAuth(userAPI.RequireAdmin(h))` and hands that to `admin.API.Routes`, where every `/api/admin/…` route lives ([`internal/admin/README.md`](../admin/README.md)). One Postgres read per admin request: admin traffic is a handful of people, not the game loop.
-- **`RequireStaff(next)`** is the same guard for `HELPER` **or** `ADMIN`. It reads the role from the database on every request like `RequireAdmin`, and answers `403 not_staff` (message `only staff can do this`, `ErrNotStaff`) unless the role is `RoleHelper` or `RoleAdmin`. `server.Build` wraps the QR mint route as `authAPI.RequireAuth(userAPI.RequireStaff(h))` and hands it to `qr.API.StaffRoutes`.
+  `server.Build` wraps admin routes as `authAPI.RequireAuth(perUser(userAPI.RequireAdmin(h)))` and hands that to `admin.API.Routes`, where every `/api/admin/…` route lives ([`internal/admin/README.md`](../admin/README.md)). One Postgres read per admin request: admin traffic is a handful of people, not the game loop.
+- **`RequireStaff(next)`** is the same guard for `HELPER` **or** `ADMIN`. It reads the role from the database on every request like `RequireAdmin`, and answers `403 not_staff` (message `only staff can do this`, `ErrNotStaff`) unless the role is `RoleHelper` or `RoleAdmin`. `server.Build` wraps the QR mint route as `authAPI.RequireAuth(perUser(userAPI.RequireStaff(h)))` and hands it to `qr.API.StaffRoutes`.
 
 ### `read.go`: types and reads
 - **`Role`** is a `string` type. Constants `RolePlayer = "PLAYER"`, `RoleHelper = "HELPER"`, `RoleAdmin = "ADMIN"`, matching the `user_role` enum.

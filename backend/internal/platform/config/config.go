@@ -25,8 +25,8 @@ type Config struct {
 	JWTKey ed25519.PrivateKey
 
 	// QRSecret signs and verifies the short-lived waypoint QR tokens
-	// (HMAC-SHA256). It never leaves the backend: the /qr display fetches a
-	// fresh signed token, it doesn't get the secret.
+	// (HMAC-SHA256). It never leaves the backend: the /qr display fetches a key
+	// derived from it for one waypoint and signs its own tokens with that.
 	QRSecret []byte
 
 	GoogleClientID     string

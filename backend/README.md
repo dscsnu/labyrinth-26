@@ -7,7 +7,7 @@ Go API server backed by plain Postgres. It handles Google sign-in itself and iss
 ```bash
 docker compose up -d          # Postgres 17 on localhost:5432
 cp .env.example .env          # fill in the Google OAuth client
-go run . keygen               # JWT_PRIVATE_KEY → .env, JWT_PUBLIC_KEY → ../frontend/.env
+go run . keygen               # JWT_PRIVATE_KEY, QR_SECRET → .env; JWT_PUBLIC_KEY → ../frontend/.env
 go run .                      # applies migrations, then serves on :3000
 ```
 
@@ -28,7 +28,7 @@ docker run -d --rm --name laby-test-pg -e POSTGRES_USER=t -e POSTGRES_PASSWORD=t
 TEST_DATABASE_URL="postgres://t:t@localhost:55432/t?sslmode=disable" go test ./...
 ```
 
-Every package's tests live in its own `tests/` subfolder (`internal/<package>/tests/`, package `tests`), black-box against the package's exported API; `go test ./internal/teamstate/...` runs one package's. The end-to-end tests in `internal/server/tests` run the full login flow against a fake Google OIDC provider, plus the team and live-stream flows. Store tests in `atlas`, `auth`, `user`, `teams`, `teamstate` and `platform/postgres` each use their own schema. They **wipe schemas** in `TEST_DATABASE_URL`, so never point it at a real database. Two simulations play **100 teams** through the game loop: `TestGameLoopSimulation` (`internal/teamstate/tests`, 90 minutes of game time on a fake clock, 12 strategies, checked against an independent model of the rules) and `TestSim100Teams` (`internal/server/tests`, over real HTTP and event streams with per-phone delays); `go test -run XXX -bench BenchmarkGameLoopCast ./internal/teamstate/tests` measures casts per second with 100 teams at once (AGENTS.md §13).
+Every package's tests live in its own `tests/` subfolder (`internal/<package>/tests/`, package `tests`), black-box against the package's exported API; `go test ./internal/teamstate/...` runs one package's. The end-to-end tests in `internal/server/tests` run the full login flow against a fake Google OIDC provider, plus the team and live-stream flows. Store tests in `atlas`, `bosses`, `auth`, `user`, `teams`, `teamstate` and `platform/postgres` each use their own schema. They **wipe schemas** in `TEST_DATABASE_URL`, so never point it at a real database. Two simulations play **100 teams** through the game loop: `TestGameLoopSimulation` (`internal/teamstate/tests`, 90 minutes of game time on a fake clock, 12 strategies, checked against an independent model of the rules) and `TestSim100Teams` (`internal/server/tests`, over real HTTP and event streams with per-phone delays); `go test -run XXX -bench BenchmarkGameLoopCast ./internal/teamstate/tests` measures casts per second with 100 teams at once (AGENTS.md §13).
 
 ## Code layout: one package per use case
 
@@ -80,7 +80,7 @@ It builds the backend and runs it on `:3100` against its own `labyrinth_bench` d
 
 - **rush:** all players form teams of `teams.size` (6) and start, at random moments within `-rush-window` (30 s).
 - **sse:** every player holds an event stream during a rush; measures how long a ready-up or start takes to reach teammates.
-- **reads:** players poll `GET /api/teams/me` flat out (streams still open).
+- **reads:** players poll `GET /api/teams/me` flat out (with every stream still open when `sse` runs too; the two share a backend).
 - **ramp:** mixed traffic (90 % reads, 10 % ready toggles, no think time) at rising worker counts until p99 > 500 ms or > 1 % errors.
 - **play:** the game loop. A fresh database gets the 2026 content, every player opens an event stream, all teams form and start, then for `-play-duration` (1 min) each team's leader selects a shape (alternating quadrilateral and triangle, as the spell cooldown requires) and its members scan the pattern's checkpoints with QR tokens signed as a `/qr` display signs them (needs `QR_SECRET`), picking only checkpoints the team's QR cooldown leaves free and waiting when too few are. It reports casts, bosses defeated, waits, knockouts and finished teams. `-qr-cooldown 0s` overrides `game.qr_cooldown` for the backend under test, so teams cast as fast as they can.
 
@@ -93,7 +93,30 @@ The load generator and the backend share the machine's CPUs, so results are cons
 
 ## Deploying
 
-Where it runs isn't decided yet. Whatever sits in front of the backend (nginx, Caddy, a cloud load balancer, a tunnel) must:
+The backend and its Postgres run with Docker Compose on one host: `compose.prod.yaml`.
+
+```bash
+# once: .env with the production secrets (see .env.example), POSTGRES_PASSWORD included
+docker compose -f compose.prod.yaml up -d --build               # start; also how to deploy a new version
+docker compose -f compose.prod.yaml stop backend                # seed (refused while serving), then start again:
+docker compose -f compose.prod.yaml run --rm backend seed
+docker compose -f compose.prod.yaml start backend
+docker compose -f compose.prod.yaml ps                          # both should say (healthy)
+docker compose -f compose.prod.yaml logs -f backend             # one line per request; panics at level=ERROR
+```
+
+What it handles on its own (each tested on 2026-10-21):
+
+| Failure | Recovery |
+|---|---|
+| The backend crashes | `restart: unless-stopped` brings it back with every team's state, read from Postgres (about 1 s). Phones reconnect after 1–6 s and get fresh state. |
+| Postgres goes away | The backend loses its instance lock or can't connect, exits, and keeps being restarted; once Postgres is back it recovers by itself. Docker doubles the wait between restarts (up to a minute), so after a 30 s outage it took 23 s more. |
+| A deploy (`up -d --build`) | The old container stops before the new one starts, so the single-instance lock never clashes. Never `--scale backend` above 1. |
+| The host reboots | Both containers start again with Docker. |
+
+`DATABASE_URL` and `PORT` in `.env` are ignored there (the file sets them for the container). Nothing is published on the host: both containers are on the Docker network `labyrinth`, where the backend is `http://backend:3000` and Postgres `postgres:5432`. The reverse proxy (or the frontend) joins that network to reach the backend; from another compose file, `networks: { labyrinth: { external: true } }`. Run `psql` and `pg_dump` inside the container: `docker compose -f compose.prod.yaml exec postgres psql -U labyrinth`. The backend has a 65,536 open-file limit (one per event stream) and 20 s to shut down. Its healthcheck marks it unhealthy when `/health` fails (Postgres unreachable included) but doesn't restart it: watch `/health` from outside and alert. `.dockerignore` keeps `.env` out of the image build. `config.toml` is baked into the image (`/config.toml`), so a change to it needs `up -d --build`, not just a restart.
+
+Whatever reverse proxy sits in front of the backend (nginx, Caddy, a tunnel) must:
 
 - **Not buffer `/api/events`.** It's a server-sent event stream: each event must reach the phone as it's written. nginx: `proxy_buffering off;` for that location (the backend also sends `X-Accel-Buffering: no` and `Cache-Control: no-store`); Caddy and most load balancers stream `text/event-stream` already. A proxy that buffers holds every event until its buffer fills, and the game looks frozen.
 - **Allow idle streams longer than `live.heartbeat` (25 s).** A quiet stream gets a `: ping` comment every 25 s, so a read/idle timeout of **60 s or more** keeps it open (nginx `proxy_read_timeout 1h;`; many cloud load balancers default to 60 s idle, so raise it to several minutes if possible). A stream that's cut reconnects after 1–6 s and gets fresh state, so a lower limit is survivable but wasteful.

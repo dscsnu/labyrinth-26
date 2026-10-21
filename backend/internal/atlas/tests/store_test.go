@@ -89,8 +89,8 @@ func TestPatternLookupIgnoresScanOrder(t *testing.T) {
 	}
 }
 
-// TestPatternIndexes checks the lookup tables newAtlas builds: waypoint and
-// shape indexes in ID order, each shape's patterns (what FitsShape and
+// TestPatternIndexes checks the lookup tables atlas.New builds: waypoint and
+// shape indexes in ID order, each shape's patterns (what FitsShapeCastable and
 // newGame walk), patterns by Postgres key, and WaypointIDs turning a set back
 // into sorted IDs.
 func TestPatternIndexes(t *testing.T) {
@@ -255,11 +255,13 @@ func TestMixedSizesAllowedWhenNotNested(t *testing.T) {
 	}
 }
 
-// TestFitsShape checks which sets can still grow into a pattern of a shape:
-// subsets of one of its patterns fit, anything spanning two patterns or
-// touching none doesn't.
-func TestFitsShape(t *testing.T) {
-	c, err := atlas.New(fixture(), atlas.Rules{MaxPatternPoints: maxPoints(t)})
+// TestFitsShapeAll checks which sets can still grow into a pattern of a
+// shape when every pattern counts (FitsShapeCastable with maxPoints at
+// game.max_pattern_points and no cooldown): subsets of one of its patterns
+// fit, anything spanning two patterns or touching none doesn't.
+func TestFitsShapeAll(t *testing.T) {
+	limit := maxPoints(t)
+	c, err := atlas.New(fixture(), atlas.Rules{MaxPatternPoints: limit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,17 +283,19 @@ func TestFitsShape(t *testing.T) {
 	}
 	for _, c2 := range cases {
 		set, _ := c.SetOf(c2.ids)
-		if got := c.FitsShape(c2.shape, set); got != c2.want {
-			t.Errorf("FitsShape(%s, %v) = %v, want %v", c.Shape(c2.shape).ID, c2.ids, got, c2.want)
+		if got := c.FitsShapeCastable(c2.shape, set, limit, ""); got != c2.want {
+			t.Errorf("FitsShapeCastable(%s, %v, %d, \"\") = %v, want %v", c.Shape(c2.shape).ID, c2.ids, limit, got, c2.want)
 		}
 	}
 }
 
-// TestFitsShapeWithin checks FitsShape limited to patterns of at most
-// maxPoints waypoints: with the line shape holding a 2-point and a 3-point
-// pattern, a point only in the 3-point one fits within 3 but not within 2,
-// and a limit below every pattern fits nothing.
-func TestFitsShapeWithin(t *testing.T) {
+// TestFitsShapeSizeLimit checks FitsShapeCastable's size limit, with no
+// cooldown: only patterns of at most maxPoints waypoints count. With the line
+// shape holding a 2-point and a 3-point pattern, a point only in the 3-point
+// one fits within 3 but not within 2, a limit below every pattern fits
+// nothing, and a limit at least the biggest pattern equals no limit
+// (game.max_pattern_points).
+func TestFitsShapeSizeLimit(t *testing.T) {
 	rows := fixture()
 	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
 	rows.Patterns = append(rows.Patterns, atlas.PatternSource{ID: 13, Shape: "line", Waypoints: []string{"1002", "1003", "1005"}, Damage: 50, Class: classOf([]string{"1002", "1003", "1005"})})
@@ -315,19 +319,20 @@ func TestFitsShapeWithin(t *testing.T) {
 	}
 	for _, c2 := range cases {
 		set, _ := c.SetOf(c2.ids)
-		if got := c.FitsShapeWithin(line, set, c2.max); got != c2.want {
-			t.Errorf("FitsShapeWithin(line, %v, %d) = %v, want %v", c2.ids, c2.max, got, c2.want)
+		if got := c.FitsShapeCastable(line, set, c2.max, ""); got != c2.want {
+			t.Errorf("FitsShapeCastable(line, %v, %d, \"\") = %v, want %v", c2.ids, c2.max, got, c2.want)
 		}
-		if c2.max >= 3 && c.FitsShapeWithin(line, set, c2.max) != c.FitsShape(line, set) {
-			t.Errorf("FitsShapeWithin(line, %v, %d) should equal FitsShape when nothing is excluded", c2.ids, c2.max)
+		if c2.max >= 3 && c.FitsShapeCastable(line, set, c2.max, "") != c.FitsShapeCastable(line, set, maxPoints(t), "") {
+			t.Errorf("FitsShapeCastable(line, %v, %d, \"\") should equal no size limit when nothing is excluded", c2.ids, c2.max)
 		}
 	}
 }
 
 // TestFitsShapeCastable checks the cooldown-aware fit: a line shape with a
 // 2-point (class_2) and a 3-point (class_3) pattern. Leaving a class out
-// counts only the other pattern; the size limit still applies on top; with
-// no cooldown it equals FitsShapeWithin; and the empty set fits nothing.
+// counts only the other pattern; the size limit still applies on top; no
+// cooldown ("") excludes nothing, like an unknown class; and the empty set
+// fits nothing.
 func TestFitsShapeCastable(t *testing.T) {
 	rows := fixture()
 	rows.Waypoints = append(rows.Waypoints, atlas.Waypoint{ID: "1005"})
@@ -359,8 +364,8 @@ func TestFitsShapeCastable(t *testing.T) {
 		if got := c.FitsShapeCastable(line, set, c2.max, c2.cooldown); got != c2.want {
 			t.Errorf("FitsShapeCastable(line, %v, %d, %q) = %v, want %v", c2.ids, c2.max, c2.cooldown, got, c2.want)
 		}
-		if c2.cooldown == "" && c.FitsShapeCastable(line, set, c2.max, "") != c.FitsShapeWithin(line, set, c2.max) {
-			t.Errorf("FitsShapeCastable(line, %v, %d, \"\") should equal FitsShapeWithin", c2.ids, c2.max)
+		if c2.cooldown == "" && c.FitsShapeCastable(line, set, c2.max, "") != c.FitsShapeCastable(line, set, c2.max, "class_9") {
+			t.Errorf("FitsShapeCastable(line, %v, %d, \"\") should equal an unknown class: no cooldown excludes nothing", c2.ids, c2.max)
 		}
 	}
 }
@@ -434,7 +439,7 @@ var (
 
 // BenchmarkLookups measures the lookups a scan relies on, on the small
 // fixture (four waypoints, three patterns). Numbers measured on the 2025 seed are in
-// FitsShape's comment and the README.
+// FitsShapeCastable's comment and the README.
 func BenchmarkLookups(b *testing.B) {
 	a, err := atlas.New(fixture(), atlas.Rules{MaxPatternPoints: maxPoints(b)})
 	if err != nil {
@@ -443,9 +448,10 @@ func BenchmarkLookups(b *testing.B) {
 	scanned, _ := a.SetOf([]string{"1001", "1002", "1003"})
 	triangle, _ := a.ShapeIndex("triangle")
 
-	b.Run("FitsShape", func(b *testing.B) {
+	limit := maxPoints(b)
+	b.Run("FitsShapeCastable", func(b *testing.B) {
 		for b.Loop() {
-			sinkBool = a.FitsShape(triangle, scanned)
+			sinkBool = a.FitsShapeCastable(triangle, scanned, limit, "")
 		}
 	})
 	b.Run("PatternFor", func(b *testing.B) {

@@ -1,4 +1,4 @@
-// Package teams manages teams of exactly teams.size players (config.toml)
+// Package teams manages teams of up to teams.size players (config.toml)
 // with a leader, from forming in the lobby to starting the game. Every team
 // is held in memory and every change is written through to Postgres before it
 // is applied.

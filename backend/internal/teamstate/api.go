@@ -95,8 +95,9 @@ func (a *API) getMine(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, v)
 }
 
-// selectShape handles PUT /api/teams/me/state/selection {"shape"}: any member
-// selects the shape the team will attempt. Returns the team state.
+// selectShape handles PUT /api/teams/me/state/selection {"shape"}: the
+// team's leader selects the shape the team will attempt (anyone else: 403
+// not_leader). Returns the team state.
 func (a *API) selectShape(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Shape string `json:"shape"`

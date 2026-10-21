@@ -1,5 +1,5 @@
 // Package postgres owns the database connection, schema migrations, the
-// single-instance lock and dev seed data. The SQL for each use case lives in
+// single-instance lock and the game content seeds. The SQL for each use case lives in
 // that use case's db.go.
 package postgres
 
@@ -42,7 +42,8 @@ func (db *DB) Ping(ctx context.Context) error { return db.pool.Ping(ctx) }
 // Close closes the pool.
 func (db *DB) Close() { db.pool.Close() }
 
-// seedFiles holds the dev seed SQL, embedded in the binary.
+// seedFiles holds the content seed SQL (seeds/2026*.sql), embedded in the
+// binary.
 //
 //go:embed seeds/*.sql
 var seedFiles embed.FS
