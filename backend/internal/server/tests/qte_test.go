@@ -66,6 +66,7 @@ func TestQTEsOverHTTP(t *testing.T) {
 		{"invalid_correct_option", func(b map[string]any) { b["quiz"].(map[string]any)["correct_option"] = 3 }},
 		{"invalid_window", func(b map[string]any) { b["window_s"] = 0 }},
 		{"invalid_window", func(b map[string]any) { b["window_s"] = 301 }},
+		{"invalid_window", func(b map[string]any) { b["window_s"] = 9223372037 }},
 	} {
 		b := quizBody("heart", true)
 		c.edit(b)

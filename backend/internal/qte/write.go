@@ -84,7 +84,9 @@ func (s *Store) validate(d Draft) error {
 	if q.CorrectOption < 0 || q.CorrectOption >= len(q.Options) {
 		return ErrInvalidCorrectOption
 	}
-	if w := d.WindowS; w != nil && (*w < 1 || time.Duration(*w)*time.Second > s.rules.MaxAnswerWindow) {
+	// In seconds: a huge window_s would overflow a time.Duration and wrap
+	// past the check.
+	if w := d.WindowS; w != nil && (*w < 1 || *w > int(s.rules.MaxAnswerWindow/time.Second)) {
 		return ErrInvalidWindow
 	}
 	return nil

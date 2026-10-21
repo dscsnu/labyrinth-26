@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -332,6 +333,7 @@ func TestValidation(t *testing.T) {
 	ctx := context.Background()
 	one, zero, over := 1, 0, int(f.rules.MaxAnswerWindow/time.Second)+1
 	maxW := over - 1
+	wrap, huge := 9223372037, math.MaxInt // wrap: × 1 s overflows an int64 to negative
 	cases := map[string]struct {
 		edit func(*qte.Draft)
 		want error
@@ -347,6 +349,8 @@ func TestValidation(t *testing.T) {
 		"correct option past end": {func(d *qte.Draft) { d.Quiz.CorrectOption = 4 }, qte.ErrInvalidCorrectOption},
 		"window 0":                {func(d *qte.Draft) { d.WindowS = &zero }, qte.ErrInvalidWindow},
 		"window over the max":     {func(d *qte.Draft) { d.WindowS = &over }, qte.ErrInvalidWindow},
+		"window that wraps":       {func(d *qte.Draft) { d.WindowS = &wrap }, qte.ErrInvalidWindow},
+		"window of max int":       {func(d *qte.Draft) { d.WindowS = &huge }, qte.ErrInvalidWindow},
 		"two options":             {func(d *qte.Draft) { d.Quiz.Options = []string{"A", "B"}; d.Quiz.CorrectOption = 1 }, nil},
 		"window 1 s":              {func(d *qte.Draft) { d.WindowS = &one }, nil},
 		"window at the max":       {func(d *qte.Draft) { d.WindowS = &maxW }, nil},
@@ -358,6 +362,12 @@ func TestValidation(t *testing.T) {
 			t.Errorf("%s: %v, want %v", name, err, c.want)
 		}
 	}
+	w := draft()
+	w.WindowS = &wrap
+	if _, err := f.store.Create(ctx, f.admin, w, true); !errors.Is(err, qte.ErrInvalidWindow) {
+		t.Fatalf("starting with a window that wraps: %v", err)
+	}
+	f.quiet(t, "a refused start")
 	d := draft()
 	sixty := 60
 	d.WindowS = &sixty

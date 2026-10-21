@@ -156,7 +156,7 @@ The admin routes (write, start, end, list with answers and stats) are in [`inter
 | Question empty or spaces | `ErrInvalidQuestion` |
 | Fewer than 2 options; an empty or repeated one | `ErrInvalidOptions` |
 | Correct option < 0 or ≥ the number of options | `ErrInvalidCorrectOption` |
-| Window < 1 s or > **5 min** (`qte.max_answer_window`); exactly 5 min passes | `ErrInvalidWindow` |
+| Window < 1 s or > **5 min** (`qte.max_answer_window`), however large (compared in seconds, so no `time.Duration` overflow wraps past it); exactly 5 min passes | `ErrInvalidWindow` |
 | Create started, or Start, while one is open | `ErrQTEOpen`, nothing published |
 | Start an unknown ID / one that ran | `ErrUnknownQTE` / `ErrQTEAlreadyRun` (create a copy to ask again) |
 | End an unknown ID / a draft / a closed one | `ErrUnknownQTE` / `ErrQTENotStarted` / `ErrQTEClosed` |
@@ -203,7 +203,7 @@ The admin routes (write, start, end, list with answers and stats) are in [`inter
 | `TestCloseTimer` | nothing 1 µs before `ends_at`; at it, `closed` with the answer; then `Public` and the snapshot are null, no timer left, nothing more sent |
 | `TestOneAtATime` | a second start, or a create started, while one is open: `ErrQTEOpen` from memory, nothing published; the first can't run again; the second starts after the close; an unknown ID |
 | `TestEndEarly` | End: `closed` with the answer, `ends_at` now, the timer gone, nothing at the original end; End again, a draft, an unknown ID; a new QTE starts at once |
-| `TestValidation` | every draft refusal and the boundaries (2 options, a window of 1 s and of exactly `qte.max_answer_window`); a QTE's own window sets `ends_at` |
+| `TestValidation` | every draft refusal and the boundaries (2 options, a window of 1 s and of exactly `qte.max_answer_window`); windows that would overflow a `time.Duration` (`9223372037`, max int) are `ErrInvalidWindow`, starting one broadcasts nothing; a QTE's own window sets `ends_at` |
 | `TestRestart` | a restart reproduces the list (JSON equal) and re-arms the open one's timer, which closes on time; one that closed while down loads closed |
 | `TestReadsWithDatabaseClosed` | `List`, `ByID`, `Public`, `Snapshot` with the database closed; a write fails |
 | `TestReconcile` | a draft started by hand in Postgres: `Start` fails, memory reloads, `resync` with it open |
