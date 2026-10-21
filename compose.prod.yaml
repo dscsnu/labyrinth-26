@@ -74,6 +74,12 @@ services:
     environment:
       DATABASE_URL: postgres://labyrinth:${POSTGRES_PASSWORD}@postgres:5432/labyrinth?sslmode=disable
       PORT: "3000"
+    # Least privilege: the image already runs as uid 10001; here it also
+    # gets a read-only filesystem (it writes no files), no Linux
+    # capabilities, and no way to gain any (setuid binaries included).
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     networks: [labyrinth]
     depends_on:
       postgres:
