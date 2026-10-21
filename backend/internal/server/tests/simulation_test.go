@@ -420,17 +420,32 @@ func TestSim100Teams(t *testing.T) {
 		cooldown int
 	}
 	sims := make([]*simTeam, teams)
+	players := make([][]player, teams)
 	for i := range sims {
 		strategy := httpStrategies[i%len(httpStrategies)]
-		ps := e.teamOfSize(fmt.Sprintf("h%d", i), 1+(i/len(httpStrategies))%e.cfg.Settings.Teams.Size)
-		st := &simTeam{strategy: strategy, removed: -1,
-			id: e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)}
+		players[i] = e.teamOfSize(fmt.Sprintf("h%d", i), 1+(i/len(httpStrategies))%e.cfg.Settings.Teams.Size)
+		sims[i] = &simTeam{strategy: strategy, removed: -1,
+			id: e.call("GET", "/api/teams/me", players[i][0], nil).payload["id"].(string)}
+	}
+	// Powered teams start one health down (bosses never attack here), so
+	// their first heart heals; the restart loads it, before any phone
+	// connects.
+	full := e.cfg.Settings.Game.Health
+	for _, st := range sims {
+		if st.strategy != "powered" {
+			continue
+		}
+		if _, err := e.db.Pool().Exec(ctx, "INSERT INTO team_boss (team_id, phase_health) VALUES ($1, $2)", st.id, full-1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e = e.restart()
+	for i, st := range sims {
 		rng := rand.New(rand.NewPCG(uint64(i), 7))
-		for _, p := range ps {
+		for _, p := range players[i] {
 			st.clients = append(st.clients, e.newSimClient(p,
 				time.Duration(rng.IntN(30))*time.Millisecond, time.Duration(rng.IntN(30))*time.Millisecond))
 		}
-		sims[i] = st
 	}
 
 	var wg sync.WaitGroup
@@ -578,6 +593,42 @@ func TestSim100Teams(t *testing.T) {
 					st.cooldown = len(p.waypoints)
 					status, code, _ = turns(0).call("POST", "/api/teams/me/state/powerups/instant_cast", body)
 					want("a resent instant cast", status, code, http.StatusConflict, "powerup_not_held")
+					// Rounds 0 and 1 also grant a heart and a short QR
+					// cooldown. In round 0 both work (the heart back to full
+					// health); in round 1 the heart is full_health and the
+					// second window powerup_active, both kept held.
+					if round > 1 {
+						continue
+					}
+					for _, kind := range []string{"heart", "short_qr_cooldown"} {
+						r := e.call("POST", fmt.Sprintf("/api/admin/teams/%s/powerups/%s", st.id, kind), admin, nil)
+						if want("grant "+kind, r.status, r.code, http.StatusOK, "") && r.payload["granted"] != true {
+							fail("grant %s: not granted: %v", kind, r.payload["granted"])
+						}
+					}
+					status, code, payload = turns(0).call("POST", "/api/teams/me/state/powerups/heart", nil)
+					if round == 1 {
+						want("a heart at full health", status, code, http.StatusConflict, "full_health")
+					} else if want("a heart", status, code, http.StatusOK, "") && payload["health"] != float64(full) {
+						fail("health after the heart: %v, want %d", payload["health"], full)
+					}
+					status, code, payload = turns(0).call("POST", "/api/teams/me/state/powerups/short_qr_cooldown", nil)
+					if round == 1 {
+						want("a second short qr cooldown", status, code, http.StatusConflict, "powerup_active")
+						continue
+					}
+					if !want("a short qr cooldown", status, code, http.StatusOK, "") {
+						continue
+					}
+					var until any
+					for _, a := range payload["powerups"].(map[string]any)["active"].([]any) {
+						if a := a.(map[string]any); a["kind"] == "short_qr_cooldown" {
+							until = a["until"]
+						}
+					}
+					if until == nil {
+						fail("no short_qr_cooldown window in %v", payload["powerups"])
+					}
 				case "shrinking":
 					if round == rounds/2 && len(st.clients) > 1 {
 						st.removed = len(st.clients) - 1
@@ -596,11 +647,43 @@ func TestSim100Teams(t *testing.T) {
 		t.FailNow()
 	}
 
-	// The quiz: a heart (nobody here holds one) for option 1.
-	quiz := e.call("POST", "/api/admin/qtes", admin, map[string]any{"kind": "quiz", "powerup": "heart", "window_s": 60, "start": true,
-		"quiz": map[string]any{"question": "Which?", "options": []string{"A", "B", "C"}, "correct_option": 1}})
-	expect(t, "send out the quiz", quiz, http.StatusOK, "")
+	// The quiz, for option 1, earns an instant cast: nobody holds one now
+	// (powered teams use theirs every round; their hearts and short QR
+	// cooldowns may still be held), so every right answer is granted. A
+	// draft first, then sent out by the start route.
+	quizBody := func(start bool) map[string]any {
+		return map[string]any{"kind": "quiz", "powerup": "instant_cast", "window_s": 60, "start": start,
+			"quiz": map[string]any{"question": "Which?", "options": []string{"A", "B", "C"}, "correct_option": 1}}
+	}
+	quiz := e.call("POST", "/api/admin/qtes", admin, quizBody(false))
+	expect(t, "write the quiz", quiz, http.StatusOK, "")
 	qid := quiz.payload["id"]
+	if status, _, payload := sims[0].clients[0].call("GET", "/api/qte", nil); status != http.StatusOK || payload != nil {
+		t.Fatalf("GET /api/qte with only a draft: %d %v", status, payload)
+	}
+	expect(t, "send out the quiz", e.call("POST", fmt.Sprintf("/api/admin/qtes/%v/start", qid), admin, nil), http.StatusOK, "")
+	expect(t, "start it again", e.call("POST", fmt.Sprintf("/api/admin/qtes/%v/start", qid), admin, nil), http.StatusConflict, "qte_already_run")
+	expect(t, "another quiz while it's open", e.call("POST", "/api/admin/qtes", admin, quizBody(true)), http.StatusConflict, "qte_open")
+	spare := e.call("POST", "/api/admin/qtes", admin, quizBody(false))
+	expect(t, "a spare draft", spare, http.StatusOK, "")
+	expect(t, "end the spare draft", e.call("POST", fmt.Sprintf("/api/admin/qtes/%v/end", spare.payload["id"]), admin, nil),
+		http.StatusConflict, "qte_not_started")
+	// Every phone reads the open quiz, without its answer (teams at once).
+	for i, st := range sims {
+		wg.Go(func() {
+			for _, c := range st.clients {
+				status, _, payload := c.call("GET", "/api/qte", nil)
+				if status != http.StatusOK || payload["id"] != qid || payload["quiz"].(map[string]any)["correct_option"] != nil {
+					t.Errorf("team %d: GET /api/qte while open: %d %v", i, status, payload)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
+	}
 	answerPath := fmt.Sprintf("/api/teams/me/state/qte/%v/answer", qid)
 	active := func(st *simTeam) []*simClient {
 		var out []*simClient
@@ -649,8 +732,13 @@ func TestSim100Teams(t *testing.T) {
 	}
 	wg.Wait()
 	_, list := e.callList("GET", "/api/admin/qtes", admin)
-	stats := list[0].(map[string]any)["stats"].(map[string]any)
-	if list[0].(map[string]any)["id"] != qid || stats["answered"] != float64(answered.Load()) ||
+	var stats map[string]any
+	for _, row := range list { // newest first: the spare draft, then the quiz
+		if row := row.(map[string]any); row["id"] == qid {
+			stats = row["stats"].(map[string]any)
+		}
+	}
+	if stats == nil || stats["answered"] != float64(answered.Load()) ||
 		stats["correct"] != float64(right.Load()) || stats["granted"] != float64(right.Load()) {
 		t.Fatalf("quiz stats %v, want %d answered, %d right", stats, answered.Load(), right.Load())
 	}
