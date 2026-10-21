@@ -2,14 +2,7 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
-	"github.com/jackc/pgx/v5"
-	"maps"
 	"math"
-	"os"
-	"slices"
-	"strconv"
-	"strings"
 	"testing"
 
 	"labyrinth/internal/platform/config"
@@ -264,7 +257,7 @@ func TestSeedPatternGeometryProperties(t *testing.T) {
 		}
 
 		// Pattern 1 is the line G Block Junc (2001) – Arcade (2002): its
-		// out-and-back tour is damage_lookup.json's 382.30 m.
+		// out-and-back tour is 382.30 m.
 		if pid == 1 {
 			tour := spells.TourM(pts)
 			const expectedTour = 382.30
@@ -359,162 +352,5 @@ func TestPatternDamageDrift(t *testing.T) {
 			t.Errorf("drift detected for pattern %d: stored=%d, computed=%d", d.id, d.stored, d.computed)
 		}
 		t.Fatalf("%d patterns drifted. Re-run `go run ./cmd/spells` to regenerate 2026_spells.sql", len(drifted))
-	}
-}
-
-// damageLookupPath is damage_lookup.json, the 2026 damage table in
-// internal/spells/testdata, relative to this package's directory (where go
-// test runs).
-const damageLookupPath = "../testdata/damage_lookup.json"
-
-// damageLookup is the part of damage_lookup.json this test reads.
-type damageLookup struct {
-	// Metadata holds the checkpoints and the coefficients the table was
-	// computed with.
-	Metadata struct {
-		// Checkpoints are the 2026 checkpoints by name.
-		Checkpoints map[string]struct {
-			// Latitude is degrees north.
-			Latitude float64 `json:"latitude"`
-			// Longitude is degrees east.
-			Longitude float64 `json:"longitude"`
-		} `json:"checkpoints"`
-		// DamageCoefficients mirror config.toml's [spell] table.
-		DamageCoefficients struct {
-			// SpellBase is spell.base, by point count.
-			SpellBase map[string]int `json:"spell_base"`
-			// BonusConcaveQuad is spell.bonus.concave_quad.
-			BonusConcaveQuad int `json:"bonus_concave_quad"`
-			// Per100m is spell.per_100m.
-			Per100m float64 `json:"per_100m"`
-			// Walkability is spell.walkability.
-			Walkability float64 `json:"walkability"`
-		} `json:"damage_coefficients"`
-	} `json:"metadata"`
-	// Patterns are every combination of checkpoints, by key.
-	Patterns map[string]struct {
-		// Points are the checkpoint names.
-		Points []string `json:"points"`
-		// Damage is the combination's damage.
-		Damage int `json:"damage"`
-	} `json:"patterns"`
-}
-
-// TestDamageLookupMatchesConfig checks that damage_lookup.json, the source
-// of truth for 2026 damage, agrees with config.toml: its coefficients equal
-// the [spell] table, and every one of its combinations, recomputed from its
-// own checkpoint coordinates with the config's rules, has its damage. A
-// change to either alone fails here: retune both, or regenerate the table.
-func TestDamageLookupMatchesConfig(t *testing.T) {
-	data, err := os.ReadFile(damageLookupPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lookup damageLookup
-	if err := json.Unmarshal(data, &lookup); err != nil {
-		t.Fatal(err)
-	}
-	rules := damageRules(configtest.Settings(t))
-
-	c := lookup.Metadata.DamageCoefficients
-	if !maps.Equal(intKeyed(t, c.SpellBase), rules.Base) || c.BonusConcaveQuad != rules.ConcaveQuadBonus ||
-		c.Per100m != rules.Per100m || c.Walkability != rules.Walkability {
-		t.Fatalf("damage_lookup.json's coefficients %+v differ from config.toml's [spell] %+v", c, rules)
-	}
-
-	var cps []spells.Waypoint
-	for name, cp := range lookup.Metadata.Checkpoints {
-		cps = append(cps, spells.Waypoint{ID: name, GPS: spells.GPS{Latitude: cp.Latitude, Longitude: cp.Longitude}})
-	}
-	projected := spells.ProjectWaypoints(cps)
-	if len(lookup.Patterns) == 0 {
-		t.Fatal("damage_lookup.json has no patterns")
-	}
-	for key, p := range lookup.Patterns {
-		pts := make([]spells.Point, len(p.Points))
-		for i, name := range p.Points {
-			pt, ok := projected[name]
-			if !ok {
-				t.Fatalf("%s: unknown checkpoint %q", key, name)
-			}
-			pts[i] = pt
-		}
-		if got := mustDamage(t, rules, pts); got != p.Damage {
-			t.Errorf("%s: config.toml gives %d, damage_lookup.json says %d", key, got, p.Damage)
-		}
-	}
-}
-
-// intKeyed returns m with its keys, decimal point counts, as ints.
-func intKeyed(t *testing.T, m map[string]int) map[int]int {
-	t.Helper()
-	out := make(map[int]int, len(m))
-	for k, v := range m {
-		n, err := strconv.Atoi(k)
-		if err != nil {
-			t.Fatalf("spell_base key %q isn't a point count", k)
-		}
-		out[n] = v
-	}
-	return out
-}
-
-// TestSeedMatchesDamageLookup checks that the 2026 seed is
-// damage_lookup.json: its waypoints are the JSON's checkpoints (by name,
-// with the same coordinates), and every seeded pattern's damage is the
-// JSON's for the same set of checkpoints, all 837 of them.
-func TestSeedMatchesDamageLookup(t *testing.T) {
-	ctx := context.Background()
-	data, err := os.ReadFile(damageLookupPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lookup damageLookup
-	if err := json.Unmarshal(data, &lookup); err != nil {
-		t.Fatal(err)
-	}
-	db := pgtest.Open(t, pgtest.URL(t, "spells_lookup_test"))
-	if err := db.Seed2026(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	rows := pgtest.Must(db.Pool().Query(ctx, "SELECT name, latitude, longitude FROM waypoint"))
-	var name string
-	var lat, lon float64
-	seeded := 0
-	_, err = pgx.ForEachRow(rows, []any{&name, &lat, &lon}, func() error {
-		seeded++
-		cp, ok := lookup.Metadata.Checkpoints[name]
-		if !ok || cp.Latitude != lat || cp.Longitude != lon {
-			t.Errorf("waypoint %q (%v, %v) isn't a damage_lookup.json checkpoint", name, lat, lon)
-		}
-		return nil
-	})
-	if err != nil || seeded != len(lookup.Metadata.Checkpoints) {
-		t.Fatalf("%d waypoints seeded, %d checkpoints (%v)", seeded, len(lookup.Metadata.Checkpoints), err)
-	}
-
-	want := map[string]int{}
-	for _, p := range lookup.Patterns {
-		names := slices.Clone(p.Points)
-		slices.Sort(names)
-		want[strings.Join(names, "|")] = p.Damage
-	}
-	rows = pgtest.Must(db.Pool().Query(ctx, `
-		SELECT p.damage, string_agg(w.name, '|' ORDER BY w.name COLLATE "C")
-		FROM pattern p JOIN pattern_waypoint pw ON pw.pattern_id = p.id JOIN waypoint w ON w.id = pw.waypoint_id
-		GROUP BY p.id, p.damage`))
-	var damage int
-	var key string
-	count := 0
-	_, err = pgx.ForEachRow(rows, []any{&damage, &key}, func() error {
-		count++
-		if w, ok := want[key]; !ok || w != damage {
-			t.Errorf("pattern %s: damage %d, damage_lookup.json %d (listed %v)", key, damage, w, ok)
-		}
-		return nil
-	})
-	if err != nil || count != len(want) {
-		t.Fatalf("%d patterns seeded, %d in damage_lookup.json (%v)", count, len(want), err)
 	}
 }

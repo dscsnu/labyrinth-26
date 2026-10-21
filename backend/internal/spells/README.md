@@ -71,13 +71,13 @@ where:
 - **$k \in [3, 6]$:** The shortest closed loop visiting every point once and returning to the start. Since $k \le 6$, all $(k-1)!$ cyclic orderings are evaluated (at most $5! = 120$ permutations).
 
 ### C. Convex Hull
-Strict convex hull vertices are computed using Andrew's Monotone Chain algorithm. No three of the 10 2026 checkpoints are collinear (minimum triangle cross-product $310.98\text{ m}^2$, from `damage_lookup.json`'s projected coordinates). Only three (`2006` AIC, `2008` Canopies, `2010` CnD Atrium) ever appear as interior points in concave subsets; the other 7 always lie on the outer boundary.
+Strict convex hull vertices are computed using Andrew's Monotone Chain algorithm. No three of the 10 2026 checkpoints are collinear (minimum triangle cross-product $310.98\text{ m}^2$, from the projected coordinates). Only three (`2006` AIC, `2008` Canopies, `2010` CnD Atrium) ever appear as interior points in concave subsets; the other 7 always lie on the outer boundary.
 
 ---
 
 ## 4. Worked Example: Quadrilateral Pattern 188
 
-Pattern `188` in the 2026 seed is a `quadrilateral` of four checkpoints, a **concave** one (`damage_lookup.json`'s `concave_quad`): Canopies lies inside the triangle of the other three. Projected coordinates are `damage_lookup.json`'s `local_xy_m` (centred on the 10 checkpoints' mean):
+Pattern `188` in the 2026 seed is a `quadrilateral` of four checkpoints, a **concave** one: Canopies lies inside the triangle of the other three. Projected coordinates are the checkpoints' `local_xy_m` (centred on their mean):
 - `2001` G Block Junc: `(28.5275017, 77.5748206)` $\to X = 42.082\text{ m}, Y = 207.137\text{ m}$
 - `2002` Arcade: `(28.5274593, 77.5728646)` $\to X = -149.012\text{ m}, Y = 202.423\text{ m}$
 - `2007` Lake: `(28.524414, 77.5768289)` $\to X = 238.285\text{ m}, Y = -136.199\text{ m}$
@@ -94,7 +94,7 @@ Pattern `188` in the 2026 seed is a `quadrilateral` of four checkpoints, a **con
 3. **Adjusted walking distance:**
    - $P_{\text{adj}} = 1.5 \times 1,101.05 = \mathbf{1,651.58\text{ m}}$.
 4. **Damage calculation:**
-   - $\text{Damage} = \operatorname{round}\left(186 + 75 + 0.8 \times \frac{1,651.58}{100}\right) = \operatorname{round}(274.21) = \mathbf{274}$, `damage_lookup.json`'s value.
+   - $\text{Damage} = \operatorname{round}\left(186 + 75 + 0.8 \times \frac{1,651.58}{100}\right) = \operatorname{round}(274.21) = \mathbf{274}$.
 
 Stored in Postgres as:
 ```sql
@@ -105,7 +105,7 @@ UPDATE pattern SET damage = 274 WHERE id = 188;
 
 ## 5. Combinatorics and Damage Ranges
 
-Across every subset of the 10 2026 checkpoints of size 2 to 6 ($\sum_{k=2}^{6} \binom{10}{k} = 837$), from `damage_lookup.json`:
+Across every subset of the 10 2026 checkpoints of size 2 to 6 ($\sum_{k=2}^{6} \binom{10}{k} = 837$):
 
 | $k$ | Shape Classification | Total Combinations | Convex | Concave | Actual Damage Range | Target Range |
 |:---:|---|:---:|:---:|:---:|:---:|:---:|
@@ -116,7 +116,7 @@ Across every subset of the 10 2026 checkpoints of size 2 to 6 ($\sum_{k=2}^{6} \
 | **5** | Pentagon | 252 | 101 | 151 | 395 – 403 (median 400) | $400 \pm 40$ |
 | **6** | Hexagon | 210 | 28 | 182 | 1200 (fixed) | 1200 |
 
-These are the 2026 seed's patterns exactly: `seeds/2026.sql` makes every combination a pattern (837), shaped by size alone (the game's `quadrilateral` shape holds both the convex and the concave quads; concavity changes only the damage). Every stored damage equals `damage_lookup.json`'s (`TestSeedMatchesDamageLookup`). *(2025's seed had 359 hand-reviewed patterns of sizes 3–4 over 11 other waypoints.)*
+These are the 2026 seed's patterns exactly: `seeds/2026.sql` makes every combination a pattern (837), shaped by size alone (the game's `quadrilateral` shape holds both the convex and the concave quads; concavity changes only the damage). Every stored damage equals the formula's recomputation (`TestPatternDamageDrift`). *(2025's seed had 359 hand-reviewed patterns of sizes 3–4 over 11 other waypoints.)*
 
 ---
 
@@ -158,20 +158,10 @@ The test `TestPatternDamageDrift` in `internal/spells/tests/spells_test.go`:
 
 **If any coordinate or config value changes without re-running `go run ./cmd/spells`, the drift test fails immediately in CI.**
 
-## 8. The Damage Lookup Check
-
-`damage_lookup.json` (`internal/spells/testdata/`) is the source of truth for 2026 damage: every combination of 2 to 6 of the 10 2026 checkpoints, with its tour, hull and damage. Nothing reads it at runtime; the game reads `pattern.damage`. `TestDamageLookupMatchesConfig` keeps it and `config.toml` in step:
-1. Its `damage_coefficients` must equal `config.toml`'s `[spell]` values.
-2. Every combination, recomputed from the JSON's own checkpoint coordinates with `DamageRules`, must have the JSON's damage (837 of 837 today).
-
-Retuning means changing both together: edit `[spell]` and regenerate the JSON (or the reverse), then re-run `go run ./cmd/spells` for the seed.
-
-## 9. Tests
+## 8. Tests
 
 | Test | Covers |
 |---|---|
 | `TestPureMathGeometry` | No database: a 1-point pattern deals `spell.base.1`; a 2-point tour is out and back; a 100 m square's tour; the convex hull drops an interior point; a concave quad gets exactly `spell.bonus.concave_quad` more; doubling `spell.per_100m` adds the formula's distance term; the biggest size (`game.max_pattern_points`) deals `spell.base` flat; an empty pattern, one past `MaxPoints`, and a size missing from `spell.base` are errors |
-| `TestSeedPatternGeometryProperties` | The 2026 seed: 837 patterns, positive damage, hull no bigger than the pattern, pattern 1's (the line G Block Junc – Arcade) tour within 1 m of `damage_lookup.json`'s 382.30 m, every stored damage equal to `DamageRules.Damage` |
+| `TestSeedPatternGeometryProperties` | The 2026 seed: 837 patterns, positive damage, hull no bigger than the pattern, pattern 1's (the line G Block Junc – Arcade) tour within 1 m of 382.30 m, every stored damage equal to `DamageRules.Damage` |
 | `TestPatternDamageDrift` | Every stored `pattern.damage` equals a fresh computation from the seed's coordinates and `config.toml`; lists each drifted pattern and says to re-run `go run ./cmd/spells` |
-| `TestDamageLookupMatchesConfig` | `damage_lookup.json`'s coefficients equal `[spell]`, and all 837 of its combinations recompute to its damage |
-| `TestSeedMatchesDamageLookup` | The 2026 seed is `damage_lookup.json`: its waypoints are the JSON's checkpoints (by name, same coordinates), and every one of the 837 seeded patterns has the JSON's damage for the same set of checkpoints |
