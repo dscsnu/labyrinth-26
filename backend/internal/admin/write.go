@@ -44,6 +44,12 @@ func (a *Admin) ResetCooldowns(ctx context.Context, teamID string) (teamstate.Vi
 	return a.state.ResetCooldowns(ctx, teamID)
 }
 
+// GrantPowerup gives teamID a powerup of kind (teamstate.GrantPowerup):
+// Granted is false when the team already held one, so it's wasted.
+func (a *Admin) GrantPowerup(ctx context.Context, teamID string, kind teamstate.Powerup) (teamstate.GrantResult, error) {
+	return a.state.GrantPowerup(ctx, teamID, kind)
+}
+
 // SetRole gives userID role (user.SetRole), acting as adminID.
 // ErrCannotChangeOwnRole if adminID is userID.
 func (a *Admin) SetRole(ctx context.Context, adminID, userID uuid.UUID, role user.Role) (user.User, error) {

@@ -62,7 +62,7 @@ Each write is one call to the owner:
 | `SetRole(ctx, adminID, userID, role)` | `user.SetRole` | `ErrCannotChangeOwnRole` when `adminID == userID`, checked first (the user use case isn't called) |
 
 ### `api.go`
-- **`Routes(mux, admin)`** registers the seven routes behind `admin`.
+- **`Routes(mux, admin)`** registers the eight routes behind `admin`.
 - **`errorCodes`**: one table for every error the routes can meet, admin's and the owners':
 
   | Error | Status | Code |

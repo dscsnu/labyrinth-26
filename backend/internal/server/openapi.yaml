@@ -336,6 +336,38 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
 
+  /api/admin/teams/{team_id}/powerups/{kind}:
+    post:
+      tags: [admin]
+      summary: Grant a team a powerup
+      description: >-
+        The team gets a powerup of `kind` to hold until its leader activates it. A team holds at most one of each
+        kind: if it already holds one, this one is wasted (`granted: false`, nothing changes, no event). Otherwise
+        members get `team_state` of type `powerup_granted`. Allowed while knocked out. Logged with the admin's ID.
+      parameters:
+        - { name: team_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{6}$" }, example: "482913" }
+        - { name: kind, in: path, required: true, schema: { $ref: "#/components/schemas/PowerupKind" } }
+      responses:
+        "200":
+          description: Granted, or wasted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: object
+                        required: [granted, state]
+                        properties:
+                          granted: { type: boolean, description: "The team now holds it because of this grant; false: it already held one." }
+                          state: { $ref: "#/components/schemas/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`, `unknown_powerup`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+
   /api/admin/users:
     get:
       tags: [admin]
@@ -631,6 +663,48 @@ paths:
           $ref: "#/components/responses/Error"
           description: "Codes: `not_in_game`, `knocked_out`, `no_shape_selected`, `selection_poisoned`, `waypoint_already_scanned`, `waypoint_on_cooldown`, `qr_expired`"
 
+  /api/teams/me/state/powerups/{kind}:
+    post:
+      tags: [game]
+      summary: Use a held powerup
+      description: |
+        The leader uses the team's held powerup of `kind` (powerups are temporary effects, at most one of each
+        kind held). Members get `team_state`.
+        - `damage_multiplier`: the team's next cast deals × `powerups.damage_multiplier` (2), then it's used up.
+        - `heart`: +`powerups.heart` (1) health, never above `game.health`; the attack clock doesn't move.
+          `full_health` at full health.
+        - `short_qr_cooldown`: for `powerups.short_qr_window` (5 min), casts cool their waypoints for
+          `powerups.short_qr_cooldown` (2 min) instead of `game.qr_cooldown`.
+        - `instant_cast`: body `{"pattern": [waypoint IDs]}`; that pattern is cast at once, with no scans,
+          whatever the class and QR cooldowns (a locked big pattern is still `pattern_locked`). Then it's a cast
+          like any other (`spell_cast` or `boss_defeated`, `last_cast.instant`); the selection and stack are
+          purged.
+
+        The first three publish `powerup_activated`. A kind still running (an armed multiplier, a running short
+        QR cooldown) is `powerup_active`. A resend finds it used: `powerup_not_held`.
+      parameters:
+        - { name: kind, in: path, required: true, schema: { $ref: "#/components/schemas/PowerupKind" } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Only for `instant_cast`; the other kinds read no body.
+              required: [pattern]
+              additionalProperties: false
+              properties:
+                pattern: { type: array, minItems: 1, items: { type: string }, description: "The pattern's waypoint IDs, each once, any order.", example: ["2001", "2002", "2007", "2008"] }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_leader`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_powerup`, `not_in_team`, `unknown_waypoint`, `unknown_pattern`" }
+        "409":
+          $ref: "#/components/responses/Error"
+          description: "Codes: `not_in_game`, `knocked_out`, `powerup_not_held`, `powerup_active`, `full_health`, `pattern_locked`"
+
   /api/qr/{waypoint_id}:
     get:
       tags: [qr]
@@ -858,11 +932,13 @@ components:
         attack clock starts now), `boss_attacked` (the boss's interval passed, with nobody acting: `health` down,
         `boss.attacks` up), `knocked_out` (an attack brought `health` to 0), `qr_cooldown_ended` (with nobody
         acting, waypoints left `qr_cooldowns` and can be scanned again; an attack due at the same moment sends
-        `boss_attacked` or `knocked_out` instead), `revived` (an admin revived the team), `resync` (reloaded
-        after a failed write).
+        `boss_attacked` or `knocked_out` instead), `revived` (an admin revived the team), `powerup_granted`
+        (`powerups.held` gained a kind), `powerup_activated` (the leader used a damage_multiplier, heart or
+        short_qr_cooldown), `powerup_ended` (with nobody acting, a short_qr_cooldown's window ended; an attack due
+        at the same moment sends `boss_attacked` or `knocked_out` instead), `resync` (reloaded after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, powerup_granted, powerup_activated, powerup_ended, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
     QRCooldown:
       type: object
@@ -975,7 +1051,7 @@ components:
     GameOverview:
       type: object
       description: What an admin needs to see about a team's game (the same values as its `team_state`).
-      required: [health, knocked_out, bosses_defeated, boss, cooldown_class, qr_cooldowns, cast_count]
+      required: [health, knocked_out, bosses_defeated, boss, cooldown_class, qr_cooldowns, cast_count, powerups]
       properties:
         health: { type: integer, minimum: 0, example: 3 }
         knocked_out: { type: boolean, description: Health 0; it needs a revive. }
@@ -984,6 +1060,7 @@ components:
         cooldown_class: { type: ["string", "null"], description: The spell class it can't cast now, as `team_state.cooldown_class`., example: class_4 }
         qr_cooldowns: { type: array, items: { $ref: "#/components/schemas/QRCooldown" } }
         cast_count: { type: integer, minimum: 0, example: 7 }
+        powerups: { $ref: "#/components/schemas/Powerups" }
     LeaderboardEntry:
       type: object
       description: One team's place on the leaderboard.
@@ -1063,7 +1140,7 @@ components:
 
     Game:
       type: object
-      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points, spell_classes]
+      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points, spell_classes, powerups]
       properties:
         shapes:
           type: array
@@ -1079,6 +1156,15 @@ components:
           type: array
           description: Every spell class, ascending by points. A pattern of n waypoints is in the class whose points is n.
           items: { $ref: "#/components/schemas/SpellClass" }
+        powerups:
+          type: object
+          description: What each powerup does, from config.toml's [powerups].
+          required: [damage_multiplier, heart, short_qr_cooldown_s, short_qr_window_s]
+          properties:
+            damage_multiplier: { type: number, minimum: 1, description: "What a damage_multiplier multiplies the next cast's damage by.", example: 2 }
+            heart: { type: integer, minimum: 1, description: The health a heart gives back., example: 1 }
+            short_qr_cooldown_s: { type: integer, minimum: 0, description: "Seconds a cast's waypoints cool while a short_qr_cooldown is active.", example: 120 }
+            short_qr_window_s: { type: integer, minimum: 1, description: Seconds a short_qr_cooldown stays active., example: 300 }
     SpellClass:
       type: object
       description: >-
@@ -1119,7 +1205,7 @@ components:
 
     TeamState:
       type: object
-      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, version]
+      required: [team_id, waypoints, patterns, shapes, selection, last_cast, stack, poisoned, bosses_defeated, boss, damage_multiplier, health, knocked_out, unlocked_points, locked_shapes, cooldown_class, cooldown_shapes, qr_cooldowns, cast_count, powerups, version]
       properties:
         team_id: { type: string, example: "482913" }
         waypoints: { type: array, items: { type: string }, description: Every waypoint ever accepted, sorted., example: ["2001", "2002"] }
@@ -1240,10 +1326,35 @@ components:
             (`GET /api/teams/me/casts`) adds each new `last_cast` it sees; when `cast_count` is more than its
             log's length, it missed some (a reconnect) and re-fetches the log.
           example: 1
+        powerups: { $ref: "#/components/schemas/Powerups" }
         version: { $ref: "#/components/schemas/Version" }
+    PowerupKind:
+      type: string
+      enum: [damage_multiplier, heart, short_qr_cooldown, instant_cast]
+      description: A kind of powerup (a temporary effect, not a spell).
+    Powerups:
+      type: object
+      description: >-
+        The team's powerups. `held`: the kinds it holds, at most one of each, in kind order. `active`: the effects
+        running, in kind order: a `damage_multiplier` (until null: used up by the next cast) and a
+        `short_qr_cooldown` (until its window ends, then it leaves with `powerup_ended`). A heart or an instant
+        cast takes effect at once, so never shows in `active`. Rebuilt from the database and the clock on a
+        restart.
+      required: [held, active]
+      properties:
+        held: { type: array, items: { $ref: "#/components/schemas/PowerupKind" }, example: [heart] }
+        active:
+          type: array
+          items:
+            type: object
+            required: [kind, until]
+            properties:
+              kind: { $ref: "#/components/schemas/PowerupKind" }
+              until: { type: ["string", "null"], format: date-time, description: "When it stops; null for a damage_multiplier." }
+          example: [{kind: short_qr_cooldown, until: "2026-10-17T12:05:00Z"}]
     Cast:
       type: object
-      required: [pattern, shape, class, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss]
+      required: [pattern, shape, class, cast_by, cast_at, already_completed, damage, dealt, boss, defeated_boss, instant, boosted, short_qr_cooldown]
       properties:
         pattern: { type: array, items: { type: string }, description: The cast pattern's waypoint IDs, sorted., example: ["2001", "2002", "2007", "2008"] }
         shape: { type: string, description: The pattern's type., example: quadrilateral }
@@ -1262,6 +1373,9 @@ components:
           example: 274
         boss: { type: ["integer", "null"], description: The serial of the boss it hit, or null if none., example: 1 }
         defeated_boss: { type: boolean, description: This cast defeated that boss. }
+        instant: { type: boolean, description: "An instant_cast powerup cast it, with no scans (cast_by is the leader)." }
+        boosted: { type: boolean, description: "A damage_multiplier powerup multiplied `dealt`." }
+        short_qr_cooldown: { type: boolean, description: "A short_qr_cooldown powerup was active: its waypoints cool for `powerups.short_qr_cooldown`." }
     Boss:
       type: object
       required: [serial, name, asset, description, hp, attack_interval_s, attack_damage]

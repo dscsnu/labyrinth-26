@@ -53,6 +53,11 @@ func (fakeState) ResetCooldowns(context.Context, string) (teamstate.View, error)
 	return teamstate.View{}, nil
 }
 
+// GrantPowerup is unused here.
+func (fakeState) GrantPowerup(context.Context, string, teamstate.Powerup) (teamstate.GrantResult, error) {
+	return teamstate.GrantResult{}, nil
+}
+
 // fakeUsers is an admin.Users recording what it was asked.
 type fakeUsers struct {
 	limit   int
@@ -76,13 +81,15 @@ func (f *fakeUsers) SetRole(_ context.Context, id uuid.UUID, role user.Role) (us
 func TestTeamsOverview(t *testing.T) {
 	cooldown := "class_4"
 	ft := fakeTeams{list: []teams.Team{{ID: "111111", Status: teams.Lobby}, {ID: "222222", Status: teams.InGame}}}
-	fs := fakeState{"222222": {Health: 3, KnockedOut: false, BossesDefeated: 2, CooldownClass: &cooldown, CastCount: 7}}
+	fs := fakeState{"222222": {Health: 3, KnockedOut: false, BossesDefeated: 2, CooldownClass: &cooldown, CastCount: 7,
+		Powerups: teamstate.PowerupsView{Held: []string{"heart"}, Active: []teamstate.ActivePowerupView{{Kind: "damage_multiplier"}}}}}
 	a := admin.New(ft, fs, &fakeUsers{}, admin.Rules{UserSearchLimit: 5})
 	got := a.Teams()
 	if len(got) != 2 || got[0].Game != nil || got[1].Game == nil {
 		t.Fatalf("overview: %+v", got)
 	}
-	if g := got[1].Game; g.Health != 3 || g.BossesDefeated != 2 || g.CooldownClass == nil || *g.CooldownClass != "class_4" || g.CastCount != 7 {
+	if g := got[1].Game; g.Health != 3 || g.BossesDefeated != 2 || g.CooldownClass == nil || *g.CooldownClass != "class_4" || g.CastCount != 7 ||
+		len(g.Powerups.Held) != 1 || g.Powerups.Held[0] != "heart" || len(g.Powerups.Active) != 1 {
 		t.Fatalf("started team's game: %+v", g)
 	}
 }

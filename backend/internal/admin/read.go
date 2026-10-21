@@ -23,6 +23,7 @@ type TeamState interface {
 	TeamView(teamID string) teamstate.View
 	Revive(ctx context.Context, teamID string) (teamstate.View, error)
 	ResetCooldowns(ctx context.Context, teamID string) (teamstate.View, error)
+	GrantPowerup(ctx context.Context, teamID string, kind teamstate.Powerup) (teamstate.GrantResult, error)
 }
 
 // Users is what admin needs from the user use case.
@@ -76,6 +77,8 @@ type GameOverview struct {
 	QRCooldowns   []teamstate.QRCooldownView `json:"qr_cooldowns"`
 	// CastCount is how many spells it has cast.
 	CastCount int `json:"cast_count"`
+	// Powerups are the powerups it holds and the ones running.
+	Powerups teamstate.PowerupsView `json:"powerups"`
 }
 
 // Teams returns every team, by ID, each with its game at a glance. Read
@@ -91,7 +94,7 @@ func (a *Admin) Teams() []TeamOverview {
 		v := a.state.TeamView(t.ID)
 		out[i].Game = &GameOverview{
 			Health: v.Health, KnockedOut: v.KnockedOut, BossesDefeated: v.BossesDefeated, Boss: v.Boss,
-			CooldownClass: v.CooldownClass, QRCooldowns: v.QRCooldowns, CastCount: v.CastCount,
+			CooldownClass: v.CooldownClass, QRCooldowns: v.QRCooldowns, CastCount: v.CastCount, Powerups: v.Powerups,
 		}
 	}
 	return out

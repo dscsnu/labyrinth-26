@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"labyrinth/internal/platform/httpx"
 	"labyrinth/internal/platform/identity"
@@ -28,6 +29,7 @@ func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Hand
 	mux.Handle("PUT /api/teams/me/state/selection", authed(a.selectShape))
 	mux.Handle("DELETE /api/teams/me/state/selection", authed(a.clearSelection))
 	mux.Handle("POST /api/teams/me/state/scans", authed(a.scan))
+	mux.Handle("POST /api/teams/me/state/powerups/{kind}", authed(a.usePowerup))
 	mux.Handle("GET /api/game/shapes", authed(a.shapes))
 }
 
@@ -52,6 +54,12 @@ var errorCodes = []struct {
 	{ErrWaypointOnCooldown, http.StatusConflict, "waypoint_on_cooldown"},
 	{ErrInvalidQR, http.StatusBadRequest, "invalid_qr"},
 	{ErrExpiredQR, http.StatusConflict, "qr_expired"},
+	{ErrUnknownPowerup, http.StatusNotFound, "unknown_powerup"},
+	{ErrPowerupNotHeld, http.StatusConflict, "powerup_not_held"},
+	{ErrPowerupActive, http.StatusConflict, "powerup_active"},
+	{ErrFullHealth, http.StatusConflict, "full_health"},
+	{ErrUnknownPattern, http.StatusNotFound, "unknown_pattern"},
+	{ErrPatternLocked, http.StatusConflict, "pattern_locked"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or
@@ -141,4 +149,35 @@ func (a *API) scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, res)
+}
+
+// usePowerup handles POST /api/teams/me/state/powerups/{kind}: the leader
+// uses the team's held powerup of that kind. An instant_cast takes
+// {"pattern": [waypoint IDs]} and casts that pattern; the other kinds read
+// no body. Returns the team state (an instant cast is its last_cast).
+func (a *API) usePowerup(w http.ResponseWriter, r *http.Request) {
+	kind, ok := PowerupByID(r.PathValue("kind"))
+	if !ok {
+		a.fail(w, ErrUnknownPowerup)
+		return
+	}
+	var v View
+	var err error
+	if kind == PowerupInstantCast {
+		var req struct {
+			Pattern []string `json:"pattern"`
+		}
+		if err := httpx.DecodeJSON(w, r, &req); err != nil || len(req.Pattern) == 0 || len(slices.Compact(slices.Sorted(slices.Values(req.Pattern)))) != len(req.Pattern) {
+			httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body", `body must be {"pattern": [waypoint IDs]}, each ID once`)
+			return
+		}
+		v, err = a.store.InstantCast(r.Context(), identity.UserID(r), req.Pattern)
+	} else {
+		v, err = a.store.Activate(r.Context(), identity.UserID(r), kind)
+	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	httpx.OK(w, v)
 }

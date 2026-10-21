@@ -35,6 +35,7 @@ func (a *API) Routes(mux *http.ServeMux, admin func(http.HandlerFunc) http.Handl
 	mux.Handle("DELETE /api/admin/teams/{team_id}/members/{user_id}", admin(a.removeMember))
 	mux.Handle("POST /api/admin/teams/{team_id}/revive", admin(a.revive))
 	mux.Handle("POST /api/admin/teams/{team_id}/cooldowns/reset", admin(a.resetCooldowns))
+	mux.Handle("POST /api/admin/teams/{team_id}/powerups/{kind}", admin(a.grantPowerup))
 	mux.Handle("GET /api/admin/users", admin(a.searchUsers))
 	mux.Handle("PUT /api/admin/users/{user_id}/role", admin(a.setRole))
 }
@@ -52,6 +53,7 @@ var errorCodes = []struct {
 	{teams.ErrNewLeaderRequired, http.StatusConflict, "new_leader_required"},
 	{teams.ErrInvalidNewLeader, http.StatusConflict, "invalid_new_leader"},
 	{teamstate.ErrNotInGame, http.StatusConflict, "not_in_game"},
+	{teamstate.ErrUnknownPowerup, http.StatusNotFound, "unknown_powerup"},
 	{user.ErrUserNotFound, http.StatusNotFound, "user_not_found"},
 	{user.ErrInvalidRole, http.StatusBadRequest, "invalid_role"},
 	{ErrCannotChangeOwnRole, http.StatusConflict, "cannot_change_own_role"},
@@ -173,6 +175,28 @@ func (a *API) resetCooldowns(w http.ResponseWriter, r *http.Request) {
 	}
 	a.log.Info("admin reset team cooldowns", "admin_id", identity.UserID(r), "team_id", id)
 	httpx.OK(w, v)
+}
+
+// grantPowerup handles POST /api/admin/teams/{team_id}/powerups/{kind}: the
+// team gets a powerup of that kind, or keeps the one it holds (granted
+// false). Returns {granted, state}.
+func (a *API) grantPowerup(w http.ResponseWriter, r *http.Request) {
+	id, ok := teamID(w, r)
+	if !ok {
+		return
+	}
+	kind, ok := teamstate.PowerupByID(r.PathValue("kind"))
+	if !ok {
+		a.fail(w, teamstate.ErrUnknownPowerup)
+		return
+	}
+	res, err := a.admin.GrantPowerup(r.Context(), id, kind)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin granted powerup", "admin_id", identity.UserID(r), "team_id", id, "kind", kind.ID(), "granted", res.Granted)
+	httpx.OK(w, res)
 }
 
 // searchUsers handles GET /api/admin/users[?email=<part>]: up to
