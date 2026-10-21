@@ -22,6 +22,12 @@ const MaxTeamSize = 16
 // tunable.
 const MaxPatternPoints = 15
 
+// MaxPowerupMultiplier is the largest powerups.damage_multiplier
+// config.toml may set: a sanity bound (any sensible boost is a few times),
+// not a tunable. It also keeps the value finite: a cast's damage times it
+// must still fit the INTEGER columns a cast writes.
+const MaxPowerupMultiplier = 100
+
 // maxNameLength is the database's limit on team names (migration 0002).
 const maxNameLength = 32
 
@@ -365,7 +371,9 @@ func (s Settings) validate() []error {
 		check(v > 0, "spell.base.%s must be positive", k)
 	}
 	check(s.Spell.Bonus.ConcaveQuad >= 0, "spell.bonus.concave_quad must not be negative")
-	check(s.Powerups.DamageMultiplier >= 1, "powerups.damage_multiplier must be at least 1")
+	// NaN fails both comparisons; +Inf fails the upper bound.
+	check(s.Powerups.DamageMultiplier >= 1 && s.Powerups.DamageMultiplier <= MaxPowerupMultiplier,
+		"powerups.damage_multiplier must be 1-%d", MaxPowerupMultiplier)
 	check(s.Powerups.Heart >= 1, "powerups.heart must be at least 1")
 	check(s.Powerups.ShortQRCooldown.Duration >= 0 && s.Powerups.ShortQRCooldown.Duration <= s.Game.QRCooldown.Duration,
 		"powerups.short_qr_cooldown must be 0 to game.qr_cooldown")

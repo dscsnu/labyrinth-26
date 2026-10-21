@@ -422,7 +422,7 @@ Every team fights the same **6** (`game.bosses`) bosses in serial order. The bos
 
 **Defeating boss 5 unlocks the big patterns** (`game.unlock_after_bosses`, **5**): `unlocked_points` goes from 4 to 6 and `locked_shapes` empties in the same `boss_defeated` event.
 
-**The multiplier** is stored per team (`team_boss.multiplier`) and applied to every cast, but **nothing sets it**, and a `damage_multiplier` powerup multiplies one cast on top of it: it's 1 for every team unless changed in Postgres with the backend stopped. A future powerup would change it as a teamstate write.
+**The multiplier** is stored per team (`team_boss.multiplier`) and applied to every cast, but **nothing sets it**, and a `damage_multiplier` powerup multiplies one cast on top of it: it's 1 for every team unless changed in Postgres with the backend stopped. A future powerup would change it as a teamstate write. A cast deals at most 2³¹ − 1 (`maxDealt`, the INTEGER columns it writes): an absurd multiplier is clamped there rather than failing every cast, and the clamped cast still defeats its boss.
 
 **What the client shows** (`/play`): the current boss from `GET /api/game/bosses` by `boss.serial` (image, name, description), an HP bar of `hp − boss.damage` of `hp`, the multiplier when it isn't 1, "Every boss defeated!" when `boss` is `null`; a `boss_defeated` event shows "<name> defeated!" on every phone; the cast log shows each cast's `dealt` and the boss it hit.
 
@@ -1081,7 +1081,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
 | Attack interval **10 min** | `config.toml` `game.boss_attack.interval` (positive; whole seconds, checked by `bosses.New`) | Edit, restart; applies retroactively (above) |
 | Attack damage, by boss (**= serial**, 1…6) | `config.toml` `[game.boss_attack.damage]` (exactly serials 1…`game.bosses`, each ≥ 0) | Edit, restart; applies retroactively |
 | QR cooldown **5 min** | `config.toml` `game.qr_cooldown` (≥ 0; 0 turns it off) | Edit, restart; applies retroactively (above) |
-| Powerups: ×**2**, +**1** health, **2 min** for **5 min** | `config.toml` `[powerups]` (`damage_multiplier` ≥ 1, `heart` ≥ 1, `short_qr_cooldown` 0–`game.qr_cooldown`, `short_qr_window` > 0) | Edit, restart. `short_qr_cooldown` applies retroactively; a window running at a restart keeps its start, with the new length |
+| Powerups: ×**2**, +**1** health, **2 min** for **5 min** | `config.toml` `[powerups]` (`damage_multiplier` 1–100, `heart` ≥ 1, `short_qr_cooldown` 0–`game.qr_cooldown`, `short_qr_window` > 0) | Edit, restart. `short_qr_cooldown` applies retroactively; a window running at a restart keeps its start, with the new length |
 | One pending timer per started team (attacks and QR cooldowns share it) | `time.AfterFunc` | ~100 bytes and no goroutine while waiting; 1,666 teams at 10,000 players is negligible |
 | 64 waypoints, 64 shapes, 2048 patterns | the atlas's set types (`atlas.MaxWaypoints`, `atlas.MaxShapes`, `atlas.MaxPatterns`) | See [`internal/atlas/README.md`](../atlas/README.md), "Limits and how to change them". `State` holds one of each set, so a wider set makes every snapshot bigger |
 
@@ -1150,6 +1150,7 @@ The admin use case checks first (`401`, `403 not_admin`, `400 invalid_team_id`);
   |---|---|
   | `TestCastsDamageBosses` | walkthrough 7 against a model built from the seed's HPs: casts the quadrilateral and the triangle in turn (the cooldown) until two bosses fall, checking after each `dealt`, `boss`, `defeated_boss`, `boss.serial`/`damage`, `bosses_defeated`, the event type (`spell_cast`, then `boss_defeated` on a defeat), the excess lost; `team_boss` in Postgres; a restart reproduces the view (except `version`) and the cast log |
   | `TestDamageMultiplier` | `team_boss.multiplier = 1.5` set in Postgres, restart: `damage_multiplier` 1.5; a cast's `dealt` is `round(damage × 1.5)` while `damage` is the pattern's; the multiplier survives the cast's upsert and another restart |
+  | `TestDealtClamped` | a stored multiplier of 1e12: the cast writes, dealing `math.MaxInt32` and defeating the boss; a restart reproduces it |
   | `TestEveryBossDefeated` | every boss at 1 HP: each cast (quadrilateral and triangle in turn) defeats one; after the last, `boss` null and `bosses_defeated` = the count; one more cast counts (`cast_count`) but deals 0 and hits no boss |
   | `TestLoadRefusesTooManyDefeated` | a `team_boss` row with `defeated` above `game.bosses` stops `Load` |
   | `TestPersistFailures` (`failure_test.go`) | every write-through failing in Postgres at each step (a trigger raising on one table): select (nothing stored yet, so the reload is the empty state), clear, a cast's `team_scan`, `team_pattern`, `team_cast` and `team_boss`, revive, cooldown reset, grant, a heart's `team_powerup` and `team_boss`, an instant cast's `team_powerup` and `team_cast`: the write returns the error, members get `resync` with the state as it was, and a restart agrees |

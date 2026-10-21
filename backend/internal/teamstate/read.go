@@ -303,6 +303,11 @@ func (p BossProgress) nextAttack(b Bosses) (at time.Time, ok bool) {
 	return p.PhaseStart.Add(time.Duration(p.Attacks+1) * b.At(p.Defeated).AttackInterval()), true
 }
 
+// maxDealt is the most one cast deals: the INTEGER columns that hold it
+// (team_cast.dealt, team_boss.damage). Far above any boss's HP, so a clamped
+// cast still defeats its boss, and damage resets.
+const maxDealt = math.MaxInt32
+
 // deal applies a cast of the given damage at now to p, against bosses: the
 // new progress, the damage dealt (damage × multiplier × factor, rounded,
 // multiplied in that order; factor is a damage_multiplier powerup's, or 1),
@@ -316,7 +321,14 @@ func deal(p BossProgress, damage int, factor float64, now time.Time, b Bosses) (
 		return p, 0, 0, false
 	}
 	boss := b.At(p.Defeated)
-	dealt = int(math.Round(float64(damage) * p.Multiplier * factor))
+	// Clamped: team_cast.dealt is INTEGER, and an absurd multiplier (a
+	// stored one has no upper bound) would overflow it, failing every cast.
+	// !(v < maxDealt) also catches +Inf and NaN.
+	v := math.Round(float64(damage) * p.Multiplier * factor)
+	if !(v < maxDealt) {
+		v = maxDealt
+	}
+	dealt = int(v)
 	next = p
 	next.Damage += dealt
 	if next.Damage >= boss.HP {

@@ -120,6 +120,10 @@ func TestLoadSettings(t *testing.T) {
 		s.Auth.TokenTTL.Duration != 12*time.Hour || s.Live.SubscriberBuffer != 16 || s.Storage.WriteTimeout.Duration != 5*time.Second || s.Leaderboard.Size != 10 || s.Leaderboard.PublishEvery.Duration != 5*time.Second || s.Admin.UserSearchLimit != 20 || s.RateLimit.PerSecond != 10 || s.RateLimit.Burst != 40 || s.RateLimit.Idle.Duration != 10*time.Minute {
 		t.Fatalf("decoded %+v", s)
 	}
+	at100 := strings.Replace(validTOML, "damage_multiplier = 2.0", "damage_multiplier = 100.0", 1)
+	if _, err := config.LoadSettings(writeTOML(t, at100)); err != nil {
+		t.Fatalf("powerups.damage_multiplier 100, the bound: %v", err)
+	}
 }
 
 // TestLoadSettingsRejects checks every kind of bad file is refused, naming
@@ -150,7 +154,10 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"negative unlock":                     {"unlock_after_bosses = 5", "unlock_after_bosses = -1", "game.unlock_after_bosses must be 0-6"},
 		"no health":                           {"health = 10", "health = 0", "game.health must be at least 1"},
 		"negative qr cooldown":                {`qr_cooldown = "5m"`, `qr_cooldown = "-1m"`, "game.qr_cooldown must not be negative"},
-		"powerup multiplier under 1":          {"damage_multiplier = 2.0", "damage_multiplier = 0.5", "powerups.damage_multiplier must be at least 1"},
+		"powerup multiplier under 1":          {"damage_multiplier = 2.0", "damage_multiplier = 0.5", "powerups.damage_multiplier must be 1-100"},
+		"powerup multiplier over 100":         {"damage_multiplier = 2.0", "damage_multiplier = 101.0", "powerups.damage_multiplier must be 1-100"},
+		"powerup multiplier inf":              {"damage_multiplier = 2.0", "damage_multiplier = inf", "powerups.damage_multiplier must be 1-100"},
+		"powerup multiplier nan":              {"damage_multiplier = 2.0", "damage_multiplier = nan", "powerups.damage_multiplier must be 1-100"},
 		"zero heart":                          {"heart = 1", "heart = 0", "powerups.heart must be at least 1"},
 		"negative short qr cooldown":          {`short_qr_cooldown = "2m"`, `short_qr_cooldown = "-1s"`, "powerups.short_qr_cooldown must be 0 to game.qr_cooldown"},
 		"short qr cooldown over qr_cooldown":  {`short_qr_cooldown = "2m"`, `short_qr_cooldown = "6m"`, "powerups.short_qr_cooldown must be 0 to game.qr_cooldown"},

@@ -68,8 +68,8 @@ interval = "10m"
 # Powerups are temporary effects a team holds (at most one of each kind) and
 # its leader activates.
 # damage_multiplier: the team's next cast after activation deals this many
-# times its damage (on top of its stored multiplier), rounded. Allowed: at
-# least 1.
+# times its damage (on top of its stored multiplier), rounded. Allowed: 1
+# to 100.
 damage_multiplier = 2.0
 # heart: health given back, never above game.health. Allowed: at least 1.
 heart = 1
