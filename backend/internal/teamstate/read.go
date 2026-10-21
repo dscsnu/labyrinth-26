@@ -196,17 +196,19 @@ func (p BossProgress) nextAttack(b Bosses) (at time.Time, ok bool) {
 }
 
 // deal applies a cast of the given damage at now to p, against bosses: the
-// new progress, the damage dealt (damage × multiplier, rounded), the serial
+// new progress, the damage dealt (damage × multiplier × factor, rounded,
+// multiplied in that order; factor is a damage_multiplier powerup's, or 1),
+// the serial
 // of the boss hit (0 if every boss is already defeated, in which case
 // nothing is dealt), and whether the cast defeated it. A defeat starts the
 // next boss's phase at now, with the team's current health. p must already
 // be at now.
-func deal(p BossProgress, damage int, now time.Time, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
+func deal(p BossProgress, damage int, factor float64, now time.Time, b Bosses) (next BossProgress, dealt, serial int, defeated bool) {
 	if p.Defeated >= b.Count() {
 		return p, 0, 0, false
 	}
 	boss := b.At(p.Defeated)
-	dealt = int(math.Round(float64(damage) * p.Multiplier))
+	dealt = int(math.Round(float64(damage) * p.Multiplier * factor))
 	next = p
 	next.Damage += dealt
 	if next.Damage >= boss.HP {

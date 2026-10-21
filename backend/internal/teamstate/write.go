@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 
 	"labyrinth/internal/atlas"
+	"labyrinth/internal/platform/live"
 	"labyrinth/internal/qr"
 	"labyrinth/internal/teams"
 )
@@ -335,25 +337,10 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	isComplete = !wrong && isComplete && s.atlas.Pattern(completed).Shape == cur.Selection.Shape
 	var cast Cast
 	if isComplete {
-		res.Outcome, typ = OutcomePatternCompleted, SpellCast
+		res.Outcome = OutcomePatternCompleted
 		res.Pattern = s.atlas.WaypointIDs(set)
-		res.AlreadyCompleted = cur.Patterns.Has(completed)
-		next.Patterns = cur.Patterns.With(completed)
-		next.Shapes = cur.Shapes.With(cur.Selection.Shape)
-		next.Selection = Selection{}
-		next.Stack = NewStack(s.rules.MaxPatternPoints)
-		// The cast's damage (× the multiplier) goes to the current boss.
-		cast = Cast{Pattern: completed, By: userID, At: now, AlreadyCompleted: res.AlreadyCompleted}
-		next.Boss, cast.Dealt, cast.Boss, cast.DefeatedBoss = deal(cur.Boss, s.atlas.Pattern(completed).Spell.Damage, now, s.bosses)
-		if cast.DefeatedBoss {
-			typ = BossDefeated
-			finished = next.Boss.Defeated >= s.bosses.Count()
-		}
-		// Copy-on-write: never append to the current snapshot's slice.
-		next.Casts = append(slices.Clip(cur.Casts), cast)
-		// The cast's waypoints are disabled for the team for
-		// game.qr_cooldown.
-		next.QRCooldowns = s.qrCooldowns(next.Casts, next.CooldownsReset, now)
+		cast, typ, finished = s.applyCast(cur, &next, completed, userID, now)
+		res.AlreadyCompleted = cast.AlreadyCompleted
 	}
 
 	// 4. persist
@@ -376,6 +363,30 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	}
 	res.State = s.view(t.ID, next)
 	return res, nil
+}
+
+// applyCast casts pattern p for by at now onto next, a copy of cur, as part
+// of a write's build step: the pattern and its shape are completed, the
+// selection and stack purged, its damage dealt to the current boss (deal),
+// the cast appended to the log (copy-on-write: never to cur's slice) and its
+// waypoints put on QR cooldown. It returns the cast, the event type
+// (SpellCast, or BossDefeated) and whether it defeated the last boss (the
+// caller then calls Rules.OnFinished once unlocked).
+func (s *Store) applyCast(cur, next *State, p int, by uuid.UUID, now time.Time) (Cast, live.EventType, bool) {
+	pat := s.atlas.Pattern(p)
+	next.Patterns = cur.Patterns.With(p)
+	next.Shapes = cur.Shapes.With(pat.Shape)
+	next.Selection = Selection{}
+	next.Stack = NewStack(s.rules.MaxPatternPoints)
+	c := Cast{Pattern: p, By: by, At: now, AlreadyCompleted: cur.Patterns.Has(p)}
+	next.Boss, c.Dealt, c.Boss, c.DefeatedBoss = deal(cur.Boss, pat.Spell.Damage, 1, now, s.bosses)
+	typ := SpellCast
+	if c.DefeatedBoss {
+		typ = BossDefeated
+	}
+	next.Casts = append(slices.Clip(cur.Casts), c)
+	next.QRCooldowns = s.qrCooldowns(next.Casts, next.CooldownsReset, now)
+	return c, typ, c.DefeatedBoss && next.Boss.Defeated >= s.bosses.Count()
 }
 
 // isMember reports whether userID is in teamID's current roster, read from
