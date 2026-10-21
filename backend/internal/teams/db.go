@@ -231,3 +231,16 @@ func mapMemberInsertErr(err error) error {
 	}
 	return err
 }
+
+// updateFinished moves an IN_GAME team to FINISHED (execOne: exactly one
+// row, so a team that isn't IN_GAME in Postgres is a disagreement).
+func (d db) updateFinished(ctx context.Context, teamID string) error {
+	return execOne(ctx, d.pool, "UPDATE team SET status = 'FINISHED' WHERE id = $1 AND status = 'IN_GAME'", teamID)
+}
+
+// deleteTeam deletes a team (execOne). ON DELETE CASCADE removes its
+// teammember rows and every teamstate row (team_scan, team_pattern,
+// team_selection, team_cast, team_boss).
+func (d db) deleteTeam(ctx context.Context, teamID string) error {
+	return execOne(ctx, d.pool, "DELETE FROM team WHERE id = $1", teamID)
+}

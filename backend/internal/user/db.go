@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -65,4 +66,31 @@ func (d db) upsertGoogle(ctx context.Context, p GoogleProfile) (User, error) {
 		return u, ErrEmailInUse
 	}
 	return u, err
+}
+
+// updateRole sets a user's role and returns the row: UPDATE … RETURNING.
+// postgres.ErrNotFound if there's no such user.
+func (d db) updateRole(ctx context.Context, id uuid.UUID, role Role) (User, error) {
+	return scanUser(d.pool.QueryRow(ctx, "UPDATE userprofile SET role = $2 WHERE id = $1 RETURNING "+userColumns, id, role))
+}
+
+// selectByEmailLike returns up to limit users whose email contains query,
+// case insensitive (the % and _ in query are matched literally), by email.
+func (d db) selectByEmailLike(ctx context.Context, query string, limit int) ([]User, error) {
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(query)
+	rows, err := d.pool.Query(ctx,
+		"SELECT "+userColumns+" FROM userprofile WHERE email ILIKE '%' || $1 || '%' ORDER BY email LIMIT $2", escaped, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := []User{}
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
 }

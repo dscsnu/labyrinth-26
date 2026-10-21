@@ -156,3 +156,17 @@ write_timeout = "5s"
 # shuts down rather than risk a second instance running alongside it.
 # Allowed: more than 0.
 instance_lock_check = "5s"
+
+[leaderboard]
+# How many teams the leaderboard shows: the game-wide "leaderboard" event and
+# GET /api/leaderboard carry this many (the GET adds the caller's team).
+# Allowed: at least 1.
+size = 10
+# How often the server checks whether the top changed, and so the most often
+# it broadcasts the leaderboard to every stream. Allowed: at least 1s.
+publish_every = "5s"
+
+[admin]
+# The most users an admin's user search (GET /api/admin/users) returns.
+# Allowed: at least 1.
+user_search_limit = 20

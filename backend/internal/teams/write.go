@@ -433,3 +433,81 @@ func (s *Store) RemoveMember(ctx context.Context, teamID string, userID uuid.UUI
 	}
 	return next, nil
 }
+
+// Finish marks teamID FINISHED: it has defeated the last boss. Called by
+// teamstate (Rules.OnFinished) without its lock, so this takes the team's
+// lock freely. A no-op unless the team exists and is IN_GAME, so a repeat
+// (a restart finding it again) changes nothing. Publishes the team with type
+// finished.
+func (s *Store) Finish(ctx context.Context, teamID string) error {
+	// 1. lock
+	e, t, err := s.lockTeam(teamID)
+	if err != nil {
+		return err
+	}
+	defer e.mu.Unlock()
+
+	// 2. validate
+	if t.Status != InGame {
+		return nil // already finished: nothing to do
+	}
+
+	// 3. build
+	next := *t
+	next.Status = Finished
+	next.Version = t.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.updateFinished(ctx, teamID)
+	}); err != nil {
+		return s.reconcile(e, teamID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish
+	s.publish(&next, TeamFinished)
+	return nil
+}
+
+// Delete is the admin's deletion of teamID, in any status: the team and,
+// through ON DELETE CASCADE, its members and every row of its progress go
+// from Postgres; its members get no_team (team_deleted) and are free to
+// create or join a team. Then it calls Rules.OnDelete (if set), still
+// holding the team's lock. ErrTeamNotFound if there's no such team.
+func (s *Store) Delete(ctx context.Context, teamID string) error {
+	// 1. lock
+	e, t, err := s.lockTeam(teamID)
+	if err != nil {
+		return err
+	}
+	defer e.mu.Unlock()
+
+	// 4. persist (nothing to build: the team goes)
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.deleteTeam(ctx, teamID)
+	}); err != nil {
+		return s.reconcile(e, teamID, err)
+	}
+
+	// 5. apply
+	s.mu.Lock()
+	for _, m := range t.Members {
+		delete(s.userTeam, m.ID)
+	}
+	delete(s.teams, teamID)
+	s.mu.Unlock()
+	e.gone = true
+	// 6. publish: no_team to everyone who was in it, then (through
+	// OnDelete) whatever other use cases hold for the team
+	members := make([]uuid.UUID, len(t.Members))
+	for i, m := range t.Members {
+		members[i] = m.ID
+	}
+	s.sendNoTeam(noTeamDeleted, members...)
+	if s.rules.OnDelete != nil {
+		s.rules.OnDelete(teamID)
+	}
+	return nil
+}

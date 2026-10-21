@@ -10,8 +10,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/google/uuid"
-
 	"labyrinth/internal/platform/httpx"
 	"labyrinth/internal/platform/identity"
 )
@@ -43,13 +41,6 @@ func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Hand
 	mux.Handle("POST /api/teams/me/start", authed(a.start))
 }
 
-// AdminRoutes registers the admin team routes; admin wraps a handler in the
-// auth middleware plus the admin-role check.
-func (a *API) AdminRoutes(mux *http.ServeMux, admin func(http.HandlerFunc) http.Handler) {
-	mux.Handle("GET /api/admin/teams", admin(a.all))
-	mux.Handle("DELETE /api/admin/teams/{team_id}/members/{user_id}", admin(a.removeMember))
-}
-
 // errorCodes maps rule violations to an HTTP status and a stable code the
 // frontend can switch on.
 var errorCodes = []struct {
@@ -65,10 +56,6 @@ var errorCodes = []struct {
 	{ErrNotLeader, http.StatusForbidden, "not_leader"},
 	{ErrLeaderReady, http.StatusConflict, "leader_cannot_ready"},
 	{ErrNotAllReady, http.StatusConflict, "not_all_ready"},
-	{ErrNotMember, http.StatusNotFound, "not_a_member"},
-	{ErrLastMember, http.StatusConflict, "last_member"},
-	{ErrNewLeaderRequired, http.StatusConflict, "new_leader_required"},
-	{ErrInvalidNewLeader, http.StatusConflict, "invalid_new_leader"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or
@@ -174,45 +161,6 @@ func (a *API) start(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, err)
 		return
 	}
-	httpx.OK(w, t)
-}
-
-// all handles GET /api/admin/teams: every team, sorted by ID.
-func (a *API) all(w http.ResponseWriter, _ *http.Request) {
-	httpx.OK(w, a.store.All())
-}
-
-// removeMember handles DELETE /api/admin/teams/{team_id}/members/{user_id}
-// [?new_leader=<user id>]: an admin removes a member from a team, naming the
-// new leader when the member leads it. Returns the team after the removal.
-// Logged with the admin's ID.
-func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
-	teamID := r.PathValue("team_id")
-	if !teamIDPattern.MatchString(teamID) {
-		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_team_id", "team id must be 6 digits")
-		return
-	}
-	userID, err := uuid.Parse(r.PathValue("user_id"))
-	if err != nil {
-		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_user_id", "user id must be a UUID")
-		return
-	}
-	var newLeader *uuid.UUID
-	if raw := r.URL.Query().Get("new_leader"); raw != "" {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			httpx.ErrorCode(w, http.StatusBadRequest, "invalid_user_id", "new_leader must be a UUID")
-			return
-		}
-		newLeader = &id
-	}
-	t, err := a.store.RemoveMember(r.Context(), teamID, userID, newLeader)
-	if err != nil {
-		a.fail(w, err)
-		return
-	}
-	a.log.Info("admin removed team member", "admin_id", identity.UserID(r), "team_id", teamID, "user_id", userID,
-		"new_leader", newLeader)
 	httpx.OK(w, t)
 }
 

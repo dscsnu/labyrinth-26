@@ -40,6 +40,12 @@ type State struct {
 	// dropped by catchUp, which publishes qr_cooldown_ended. A write builds
 	// a new slice (copy-on-write).
 	QRCooldowns []QRCooldown
+	// CooldownsReset is how many casts the log held when an admin last
+	// reset the team's cooldowns (ResetCooldowns): only the casts after
+	// those (Casts[CooldownsReset:]) put anything on cooldown, class or QR.
+	// 0 if never. A position, not a time, so a cast at the same instant as
+	// the reset still counts. Stored in team_boss.cooldowns_reset_casts.
+	CooldownsReset int
 	// Version orders this team's snapshots (see live.Version): every apply
 	// sets the next one. Memory-only; it starts again, in a new Epoch, after a
 	// restart.
@@ -492,17 +498,19 @@ func (s *Store) shapeLocked(shape, unlocked int) bool {
 // time plus game.qr_cooldown (the latest cast decides), soonest first, ties
 // by waypoint index. Nil when game.qr_cooldown is 0. The log is oldest first,
 // so it walks back from the newest cast and stops at the first one too old.
-func (s *Store) qrCooldowns(casts []Cast, now time.Time) []QRCooldown {
+//
+// Only casts from index reset on count (an admin's ResetCooldowns).
+func (s *Store) qrCooldowns(casts []Cast, reset int, now time.Time) []QRCooldown {
 	cd := s.rules.QRCooldown
 	if cd <= 0 {
 		return nil
 	}
 	seen := atlas.WaypointSet(0)
 	var out []QRCooldown
-	for i := len(casts) - 1; i >= 0; i-- {
+	for i := len(casts) - 1; i >= reset; i-- {
 		until := casts[i].At.Add(cd)
 		if !now.Before(until) {
-			break // this cast and every older one are past their cooldown
+			break // this cast and every older one are past their cooldown, or reset
 		}
 		for _, w := range s.atlas.Pattern(casts[i].Pattern).Waypoints.Indexes() {
 			if !seen.Has(w) {
@@ -525,7 +533,7 @@ func (s *Store) qrCooldowns(casts []Cast, now time.Time) []QRCooldown {
 // restart reproduces it with nothing more stored.
 func (s *Store) cooldown(st State) string {
 	lc, ok := st.LastCast()
-	if !ok {
+	if !ok || len(st.Casts) <= st.CooldownsReset { // none, or none since the reset
 		return ""
 	}
 	return s.atlas.Pattern(lc.Pattern).Spell.Class
@@ -632,6 +640,10 @@ func (s *Store) ForTeam(teamID string) State {
 	return *e.cur.Load()
 }
 
+// TeamView returns teamID's state as the API shows it (the admin's view of
+// a team); a team that hasn't done anything has the empty state's view.
+func (s *Store) TeamView(teamID string) View { return s.view(teamID, s.ForTeam(teamID)) }
+
 // ForUser returns the state of userID's team, or ErrNotInTeam.
 func (s *Store) ForUser(userID uuid.UUID) (View, error) {
 	t, err := s.teams.ForUser(userID)
@@ -737,4 +749,39 @@ func (s *Store) CastsForUser(userID uuid.UUID) ([]CastView, error) {
 		out = append(out, s.castView(st.Casts[i]))
 	}
 	return out, nil
+}
+
+// Standing is one team's place in the game, for the leaderboard: what it
+// has defeated and when, and how far into its current boss it is.
+type Standing struct {
+	// TeamID is the team.
+	TeamID string
+	// BossesDefeated is how many bosses it has defeated.
+	BossesDefeated int
+	// LastDefeatAt is when its latest boss fell (the cast that defeated
+	// it); zero if none has.
+	LastDefeatAt time.Time
+	// Damage is what it has dealt to its current boss so far.
+	Damage int
+}
+
+// Standings returns every team with state, in no particular order: a
+// lock-free load of each snapshot, so one call reads every team as it was
+// at some moment, not all at the same instant.
+func (s *Store) Standings() []Standing {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Standing, 0, len(s.states))
+	for id, e := range s.states {
+		st := e.cur.Load()
+		sd := Standing{TeamID: id, BossesDefeated: st.Boss.Defeated, Damage: st.Boss.Damage}
+		for i := len(st.Casts) - 1; i >= 0; i-- {
+			if st.Casts[i].DefeatedBoss {
+				sd.LastDefeatAt = st.Casts[i].At
+				break
+			}
+		}
+		out = append(out, sd)
+	}
+	return out
 }

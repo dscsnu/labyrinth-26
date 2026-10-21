@@ -14,6 +14,7 @@
 
     <p><a href="/team">Team</a></p>
     <p><a href="/test-scan">Test scan</a></p>
+    <p><a href="/leaderboard">Leaderboard</a></p>
     {#if user.role === "ADMIN"}<p><a href="/admin">Admin</a></p>{/if}
     {#if user.role === "HELPER" || user.role === "ADMIN"}<p><a href="/qr">QR display</a></p>{/if}
 

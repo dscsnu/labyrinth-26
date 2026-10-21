@@ -149,6 +149,14 @@ type Rules struct {
 	// QRCooldown is how long a cast's waypoints stay disabled for the team
 	// that cast it (game.qr_cooldown); 0 turns it off.
 	QRCooldown time.Duration
+	// OnFinished, if not nil, is called with a team's ID once a cast has
+	// defeated its last boss (and at Load for a team found like that still
+	// IN_GAME), after the team's lock is released: server.Build passes
+	// teams' Finish, which marks it FINISHED. Called without the lock
+	// because teams calls back into team state (RosterChanged) under its
+	// own lock; holding both the other way round could deadlock. Not in
+	// config.toml.
+	OnFinished func(teamID string)
 	// Clock is the store's time source; nil means the real one
 	// (systemClock). Tests pass a fake. Not in config.toml.
 	Clock Clock
@@ -219,6 +227,15 @@ func Load(ctx context.Context, pg *postgres.DB, a Atlas, b Bosses, t Teams, qr Q
 		e.mu.Lock()
 		s.schedule(e, teamID, e.cur.Load())
 		e.mu.Unlock()
+	}
+	// A team that defeated its last boss but wasn't marked FINISHED (the
+	// backend stopped between the cast and the mark) is finished now.
+	if rules.OnFinished != nil && b.Count() > 0 {
+		for _, team := range t.All() {
+			if team.Status == teams.InGame && s.ForTeam(team.ID).Boss.Defeated >= b.Count() {
+				rules.OnFinished(team.ID)
+			}
+		}
 	}
 	log.Info("loaded team state", "teams", len(s.states))
 	return s, nil
@@ -303,8 +320,9 @@ func (s *Store) stateOf(teamID string, rows *teamRows) (State, error) {
 		}
 		st.Boss.Health = st.Boss.PhaseHealth
 		st.Boss = st.Boss.at(s.now(), s.bosses)
+		st.CooldownsReset = bp.cooldownsReset
 	}
-	st.QRCooldowns = s.qrCooldowns(st.Casts, s.now())
+	st.QRCooldowns = s.qrCooldowns(st.Casts, st.CooldownsReset, s.now())
 	for _, sc := range rows.stack {
 		w, ok := s.atlas.WaypointIndex(sc.waypointID)
 		if !ok {
@@ -452,6 +470,9 @@ const (
 	// waypoints of a cast game.qr_cooldown ago can be scanned again
 	// (qr_cooldowns shrank). One event per change, however many ended.
 	QRCooldownEnded live.EventType = "qr_cooldown_ended"
+	// CooldownsReset: an admin reset the team's cooldowns: cooldown_class
+	// is null and qr_cooldowns empty.
+	CooldownsReset live.EventType = "cooldowns_reset"
 	// SpellCast: a scan completed a pattern: last_cast is the new cast,
 	// cast_count went up, the selection and stack were purged, and the
 	// cast's damage went to the current boss.

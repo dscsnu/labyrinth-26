@@ -44,6 +44,10 @@ type Settings struct {
 	Server ServerSettings `toml:"server"`
 	// Storage are the write-through settings.
 	Storage StorageSettings `toml:"storage"`
+	// Leaderboard is the leaderboard's size and publishing rate.
+	Leaderboard LeaderboardSettings `toml:"leaderboard"`
+	// Admin are the admin tools' limits.
+	Admin AdminSettings `toml:"admin"`
 }
 
 // SpellSettings is config.toml's [spell] table.
@@ -67,6 +71,21 @@ type SpellBonusSettings struct {
 // BaseDamage returns Base keyed by point count as an int. validate has checked
 // every key is a size from 1 to game.max_pattern_points.
 func (s SpellSettings) BaseDamage() map[int]int { return intKeys(s.Base) }
+
+// LeaderboardSettings is config.toml's [leaderboard] table.
+type LeaderboardSettings struct {
+	// Size is how many teams the leaderboard event and GET carry.
+	Size int `toml:"size"`
+	// PublishEvery is how often the server checks whether the top changed,
+	// and so the most often it broadcasts the leaderboard.
+	PublishEvery Duration `toml:"publish_every"`
+}
+
+// AdminSettings is config.toml's [admin] table.
+type AdminSettings struct {
+	// UserSearchLimit is the most users an admin's user search returns.
+	UserSearchLimit int `toml:"user_search_limit"`
+}
 
 // TeamSettings is config.toml's [teams] table.
 type TeamSettings struct {
@@ -304,6 +323,9 @@ func (s Settings) validate() []error {
 		check(v > 0, "spell.base.%s must be positive", k)
 	}
 	check(s.Spell.Bonus.ConcaveQuad >= 0, "spell.bonus.concave_quad must not be negative")
+	check(s.Leaderboard.Size >= 1, "leaderboard.size must be at least 1")
+	check(s.Leaderboard.PublishEvery.Duration >= time.Second, "leaderboard.publish_every must be at least 1s")
+	check(s.Admin.UserSearchLimit >= 1, "admin.user_search_limit must be at least 1")
 	check(s.Auth.TokenTTL.Duration > 0, "auth.token_ttl must be positive")
 	check(s.Auth.LoginCodeTTL.Duration > 0, "auth.login_code_ttl must be positive")
 	check(s.Auth.OAuthStateTTL.Duration >= time.Second, "auth.oauth_state_ttl must be at least 1s")

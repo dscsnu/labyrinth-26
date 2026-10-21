@@ -268,6 +268,14 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 	if err != nil {
 		return ScanResult{}, err
 	}
+	// A cast that defeats the last boss finishes the team, once the lock
+	// below is released (Rules.OnFinished: no lock held while teams works).
+	var finished bool
+	defer func() {
+		if finished && s.rules.OnFinished != nil {
+			s.rules.OnFinished(t.ID)
+		}
+	}()
 
 	// 1. lock, then 2. validate membership again under it: an admin may
 	// have removed the user since the lookup.
@@ -339,12 +347,13 @@ func (s *Store) Scan(ctx context.Context, userID uuid.UUID, token string) (ScanR
 		next.Boss, cast.Dealt, cast.Boss, cast.DefeatedBoss = deal(cur.Boss, s.atlas.Pattern(completed).Spell.Damage, now, s.bosses)
 		if cast.DefeatedBoss {
 			typ = BossDefeated
+			finished = next.Boss.Defeated >= s.bosses.Count()
 		}
 		// Copy-on-write: never append to the current snapshot's slice.
 		next.Casts = append(slices.Clip(cur.Casts), cast)
 		// The cast's waypoints are disabled for the team for
 		// game.qr_cooldown.
-		next.QRCooldowns = s.qrCooldowns(next.Casts, now)
+		next.QRCooldowns = s.qrCooldowns(next.Casts, next.CooldownsReset, now)
 	}
 
 	// 4. persist
@@ -450,7 +459,7 @@ func (s *Store) catchUp(e *entry, teamID string) *State {
 	next := *cur
 	next.Boss = p
 	if ended {
-		next.QRCooldowns = s.qrCooldowns(cur.Casts, now)
+		next.QRCooldowns = s.qrCooldowns(cur.Casts, cur.CooldownsReset, now)
 	}
 	next.Version = cur.Version.Next(s.rules.Epoch)
 	// 4. persist: none, memory-only (see above)
@@ -472,8 +481,15 @@ func (s *Store) catchUp(e *entry, teamID string) *State {
 // (catchUp) and arms the timer for the next. Run by the Clock in its own
 // goroutine; does nothing once the store is closed.
 func (s *Store) due(teamID string) {
-	// 1. lock
-	e := s.lockTeam(teamID)
+	// 1. lock: the existing entry only. One TeamDeleted removed is never
+	// recreated (it's closed, or gone from the index).
+	s.mu.RLock()
+	e := s.states[teamID]
+	s.mu.RUnlock()
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
 		return
@@ -521,4 +537,71 @@ func (s *Store) Revive(ctx context.Context, teamID string) (View, error) {
 	s.publish(e, teamID, &next, Revived)
 	s.schedule(e, teamID, &next)
 	return s.view(teamID, next), nil
+}
+
+// ResetCooldowns is the admin's reset of teamID's cooldowns: no cast so far
+// puts its spell class or its waypoints on cooldown any more
+// (State.CooldownsReset, the log's length now). Every later cast starts its
+// cooldowns as usual, even one in the same instant.
+// ErrTeamNotFound if there's no such team, ErrNotInGame unless it's IN_GAME.
+func (s *Store) ResetCooldowns(ctx context.Context, teamID string) (View, error) {
+	// 2. validate, before 1. lock: an IN_GAME team's status never goes back
+	t, ok := s.teams.ByID(teamID)
+	if !ok {
+		return View{}, ErrTeamNotFound
+	}
+	if t.Status != teams.InGame {
+		return View{}, ErrNotInGame
+	}
+
+	// 1. lock
+	e := s.lockTeam(teamID)
+	defer e.mu.Unlock()
+	cur := s.catchUp(e, teamID)
+
+	// 3. build
+	next := *cur
+	next.CooldownsReset = len(cur.Casts)
+	next.QRCooldowns = nil
+	next.Version = cur.Version.Next(s.rules.Epoch)
+
+	// 4. persist
+	if err := s.persist(ctx, func(ctx context.Context) error {
+		return s.db.upsertCooldownsReset(ctx, teamID, next.CooldownsReset)
+	}); err != nil {
+		return View{}, s.reconcile(e, teamID, err)
+	}
+
+	// 5. apply
+	e.cur.Store(&next)
+	// 6. publish, and re-arm the timer: no QR cooldown expiry is due now
+	s.publish(e, teamID, &next, CooldownsReset)
+	s.schedule(e, teamID, &next)
+	return s.view(teamID, next), nil
+}
+
+// TeamDeleted is teams.Rules.OnDelete: an admin deleted teamID, whose rows
+// Postgres has already removed (ON DELETE CASCADE). It stops the team's
+// timer and drops its entry. Memory-only (AGENTS.md §6): the data is gone
+// from Postgres, which is what Load would rebuild. A write already holding
+// the entry finishes first; one after finds no team (not_in_team).
+//
+// The entry leaves the index first and is then closed under its own lock,
+// never holding both (Close takes them the other way round): a timer that
+// fires after either step finds nothing to do (due).
+func (s *Store) TeamDeleted(teamID string) {
+	s.mu.Lock()
+	e := s.states[teamID]
+	delete(s.states, teamID)
+	s.mu.Unlock()
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopTimer != nil {
+		e.stopTimer()
+		e.stopTimer = nil
+	}
+	e.closed = true
 }

@@ -270,8 +270,11 @@ paths:
   /api/admin/teams:
     get:
       tags: [admin]
-      summary: Every team
-      description: Every team in memory, sorted by ID, with its members, leader and status. For the admin panel.
+      summary: Every team, with its game at a glance
+      description: >-
+        Every team in memory, sorted by ID: the team (members, leader, status) and, for a started or finished one,
+        its game at a glance (health, knocked out, boss, cooldowns), so an admin sees who needs a revive or a
+        cooldown reset. For the admin panel.
       responses:
         "200":
           description: Every team.
@@ -283,9 +286,128 @@ paths:
                   - properties:
                       payload:
                         type: array
-                        items: { $ref: "#/components/schemas/Team" }
+                        items: { $ref: "#/components/schemas/TeamOverview" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+
+  /api/admin/teams/{team_id}:
+    delete:
+      tags: [admin]
+      summary: Delete a team
+      description: >-
+        Deletes the team in any status, and with it (ON DELETE CASCADE) its members and all its progress: scans,
+        patterns, casts, boss progress. Every member gets `no_team` of type `team_deleted` and is free to create or
+        join a team; team state forgets the team and stops its timer. Logged with the admin's ID.
+      parameters:
+        - { name: team_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{6}$" }, example: "482913" }
+      responses:
+        "200":
+          description: Deleted. No payload.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Success" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
+
+  /api/admin/teams/{team_id}/cooldowns/reset:
+    post:
+      tags: [admin]
+      summary: Reset a team's cooldowns
+      description: >-
+        From now, none of the team's casts so far puts its spell class or its waypoints on cooldown:
+        `cooldown_class` becomes null and `qr_cooldowns` empty. Later casts start new cooldowns as usual. Stored
+        (`team_boss.cooldowns_reset_casts`, the cast log's length at the reset), so it survives a restart. Members get `team_state` of type
+        `cooldowns_reset`. Returns the team's state. Logged with the admin's ID.
+      parameters:
+        - { name: team_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{6}$" }, example: "482913" }
+      responses:
+        "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
+
+  /api/admin/users:
+    get:
+      tags: [admin]
+      summary: Find users by email
+      description: Up to `admin.user_search_limit` (20) users whose email contains `email` (case insensitive), by email. No `email` lists the first ones.
+      parameters:
+        - { name: email, in: query, required: false, schema: { type: string }, example: "snu.edu.in" }
+      responses:
+        "200":
+          description: The users found.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload:
+                        type: array
+                        items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+
+  /api/admin/users/{user_id}/role:
+    put:
+      tags: [admin]
+      summary: Set a user's role
+      description: >-
+        Gives the user `PLAYER`, `HELPER` or `ADMIN`. Every route that checks the role reads it from the database,
+        so it applies at once (the token's copy updates at their next sign-in). An admin can't change their own
+        role (`cannot_change_own_role`): another admin must. Returns the user. Logged with the admin's ID.
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              additionalProperties: false
+              properties:
+                role: { type: string, enum: [PLAYER, HELPER, ADMIN] }
+      responses:
+        "200":
+          description: The user, with the new role.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_user_id`, `invalid_body`, `invalid_role`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `user_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `cannot_change_own_role`" }
+
+  /api/leaderboard:
+    get:
+      tags: [game]
+      summary: The leaderboard
+      description: >-
+        The top `leaderboard.size` (10) started or finished teams, ranked now: bosses defeated (more first), then
+        when the latest boss fell (earlier first; a team with none after any with some), then damage on the current
+        boss (more first), then team ID. Plus the caller's own team's entry (`me`, null without a started team).
+        Every stream also gets the top as the game-wide `leaderboard` event.
+      responses:
+        "200":
+          description: The top, and the caller's team.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/LeaderboardMine" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
 
   /api/admin/teams/{team_id}/members/{user_id}:
     delete:
@@ -325,12 +447,13 @@ paths:
         Works whether or not the team is knocked out (so it also heals). Members get `team_state` of type
         `revived`. Returns the team's state. Logged with the admin's ID.
       parameters:
-        - { name: team_id, in: path, required: true, schema: { type: string }, example: "482913" }
+        - { name: team_id, in: path, required: true, schema: { type: string, pattern: "^[0-9]{6}$" }, example: "482913" }
       responses:
         "200": { $ref: "#/components/responses/TeamState" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_team_id`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
         "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
-        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found` (any malformed ID too)" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `team_not_found`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `not_in_game`" }
 
   /api/game/shapes:
@@ -585,9 +708,10 @@ paths:
         | event | scope | data | `type` values |
         |---|---|---|---|
         | `hello` | stream | `HelloEvent` | `connected` |
-        | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `resync` |
+        | `team` | team | `TeamEvent` | `snapshot`, `created`, `member_joined`, `member_left`, `leader_changed`, `member_removed`, `ready_changed`, `started`, `profile_updated`, `finished`, `resync` |
         | `no_team` | user | `NoTeamEvent` | `snapshot`, `left`, `team_deleted`, `removed`, `resync` |
-        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `revived`, `resync` |
+        | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `resync` |
+        | `leaderboard` | game | `LeaderboardEvent` | `snapshot`, `updated` |
 
         ```
         retry: 3412
@@ -678,14 +802,14 @@ components:
         (reloaded after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, created, member_joined, member_left, leader_changed, member_removed, ready_changed, started, profile_updated, resync] }
+        type: { type: string, enum: [snapshot, created, member_joined, member_left, leader_changed, member_removed, ready_changed, started, profile_updated, finished, resync] }
         message: { $ref: "#/components/schemas/Team" }
     NoTeamEvent:
       type: object
       description: |
         The data of a `no_team` event, sent to one user who is in no team; `message` is always `{}`. Types:
-        `snapshot` (on connect), `left` (they left, the team carries on), `team_deleted` (they were the last
-        member, so the team is gone), `removed` (an admin removed them), `resync` (a reload after a failed
+        `snapshot` (on connect), `left` (they left, the team carries on), `team_deleted` (the team is gone:
+        they were its last member, or an admin deleted it), `removed` (an admin removed them), `resync` (a reload after a failed
         write found them no longer in it). Clear both the team and its team state.
       required: [type, message]
       properties:
@@ -707,7 +831,7 @@ components:
         after a failed write).
       required: [type, message]
       properties:
-        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, revived, resync] }
+        type: { type: string, enum: [snapshot, game_started, shape_selected, selection_cleared, scan_added, wrong_scan, spell_cast, boss_defeated, boss_attacked, knocked_out, qr_cooldown_ended, cooldowns_reset, revived, resync] }
         message: { $ref: "#/components/schemas/TeamState" }
     QRCooldown:
       type: object
@@ -768,6 +892,70 @@ components:
         expires_at: { type: string, format: date-time, description: Whole seconds; equals the token's exp. }
         user: { $ref: "#/components/schemas/User" }
 
+    TeamOverview:
+      type: object
+      description: One team in the admin's teams list.
+      required: [team, game]
+      properties:
+        team: { $ref: "#/components/schemas/Team" }
+        game:
+          description: Its game at a glance, or null for a team still in the lobby.
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/GameOverview"
+    GameOverview:
+      type: object
+      description: What an admin needs to see about a team's game (the same values as its `team_state`).
+      required: [health, knocked_out, bosses_defeated, boss, cooldown_class, qr_cooldowns, cast_count]
+      properties:
+        health: { type: integer, minimum: 0, example: 3 }
+        knocked_out: { type: boolean, description: Health 0; it needs a revive. }
+        bosses_defeated: { type: integer, minimum: 0, example: 2 }
+        boss: { description: "As `team_state.boss`: serial, damage, phase_started_at, attacks, next_attack_at; null after the last boss." }
+        cooldown_class: { type: ["string", "null"], description: The spell class it can't cast now, as `team_state.cooldown_class`., example: class_4 }
+        qr_cooldowns: { type: array, items: { $ref: "#/components/schemas/QRCooldown" } }
+        cast_count: { type: integer, minimum: 0, example: 7 }
+    LeaderboardEntry:
+      type: object
+      description: One team's place on the leaderboard.
+      required: [rank, team_id, name, bosses_defeated, last_defeat_at, damage, finished]
+      properties:
+        rank: { type: integer, minimum: 1, description: "Its place; every team has its own (ties break by team ID).", example: 1 }
+        team_id: { type: string, example: "482913" }
+        name: { type: string, example: Scanners }
+        bosses_defeated: { type: integer, minimum: 0, description: The first key, more first., example: 4 }
+        last_defeat_at: { type: ["string", "null"], format: date-time, description: "When its latest boss fell: the second key, earlier first; null if none has." }
+        damage: { type: integer, minimum: 0, description: "Damage on its current boss: the third key, more first.", example: 120 }
+        finished: { type: boolean, description: It defeated every boss (FINISHED). }
+    LeaderboardBoard:
+      type: object
+      description: The top of the leaderboard.
+      required: [top, teams]
+      properties:
+        top: { type: array, items: { $ref: "#/components/schemas/LeaderboardEntry" }, description: "The first `leaderboard.size` (10) teams, best first." }
+        teams: { type: integer, minimum: 0, description: How many teams are ranked (started or finished)., example: 140 }
+    LeaderboardMine:
+      description: GET /api/leaderboard's answer.
+      allOf:
+        - $ref: "#/components/schemas/LeaderboardBoard"
+        - type: object
+          required: [me]
+          properties:
+            me:
+              description: The caller's team's entry, or null if they have no started team.
+              oneOf:
+                - type: "null"
+                - $ref: "#/components/schemas/LeaderboardEntry"
+    LeaderboardEvent:
+      type: object
+      description: |
+        The data of a `leaderboard` event, sent to every stream (game-wide); `message` is the top of the
+        leaderboard. Types: `snapshot` (on connect), `updated` (the top changed: the server checks every
+        `leaderboard.publish_every` (5 s) and broadcasts only on a change).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, updated] }
+        message: { $ref: "#/components/schemas/LeaderboardBoard" }
     User:
       type: object
       required: [id, email, name, avatar_url, role, created_at]

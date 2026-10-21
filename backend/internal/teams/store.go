@@ -83,6 +83,12 @@ type Rules struct {
 	// user and refuses their writes. Same constraints as OnStart. Not in
 	// config.toml.
 	OnRosterChange func(Team)
+	// OnDelete, if not nil, is called by Delete with the deleted team's ID,
+	// once it's gone from memory and Postgres and its members got no_team,
+	// with the team's lock still held. server.Build passes teamstate's
+	// TeamDeleted, so team state drops the team and its timer. Same
+	// constraints as OnStart. Not in config.toml.
+	OnDelete func(teamID string)
 }
 
 // lockRetries bounds lockUsersTeam's retries when the user changes team
@@ -243,6 +249,8 @@ const (
 	TeamStarted live.EventType = "started"
 	// TeamProfileUpdated: a member signed in with a new name or avatar.
 	TeamProfileUpdated live.EventType = "profile_updated"
+	// TeamFinished: the team defeated the last boss; it's FINISHED.
+	TeamFinished live.EventType = "finished"
 )
 
 // The causes of "no_team" events, besides live.Snapshot and live.Resync.
@@ -250,8 +258,8 @@ const (
 const (
 	// NoTeamLeft: the user left; the team carries on without them.
 	NoTeamLeft live.EventType = "left"
-	// NoTeamDeleted: the user was the last member, so leaving deleted the
-	// team.
+	// NoTeamDeleted: the team is gone: the user was the last member, so
+	// leaving deleted it, or an admin deleted it (Delete).
 	NoTeamDeleted live.EventType = "team_deleted"
 	// NoTeamRemoved: an admin removed the user from their team.
 	NoTeamRemoved live.EventType = "removed"

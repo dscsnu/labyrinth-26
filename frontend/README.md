@@ -56,20 +56,33 @@ Apart from the event stream (`/api/events`, above), the browser never calls the 
 | `POST /qr/verify` `{"qr"}` (`src/routes/qr/verify/+server.ts`) | `POST /api/qr/verify` |
 
 ## The `/admin` page
-For organisers: removing a member from a team, and reviving a knocked-out team. The home page links to it when the session's role is `ADMIN`, but the link is only a convenience. **The backend decides who's an admin**, from the role in Postgres on every request (`403 not_admin` otherwise), because the session's role is as of sign-in and may be stale.
+For organisers: every team at a glance, and the admin tools. The home page links to it when the session's role is `ADMIN`, but the link is only a convenience. **The backend decides who's an admin**, from the role in Postgres on every request (`403 not_admin` otherwise), because the session's role is as of sign-in and may be stale. Every route it calls is the backend's `admin` use case ([`backend/internal/admin/README.md`](../backend/internal/admin/README.md)).
 
 `src/routes/admin/+page.server.ts`:
-- **load:** no session redirects to `/`. `GET /api/admin/teams` with the session token; a `403` becomes SvelteKit's `error(403, 'Admins only')`. Returns every team (`TeamSchema[]`).
-- **`remove` action** (form fields `team_id`, `user_id`, `new_leader`): `DELETE /api/admin/teams/{team_id}/members/{user_id}`, adding `?new_leader=` when given. Success returns `{removed}`; a backend error comes back as `fail(status, {code, message})`, shown in red.
-- **`revive` action** (form field `team_id`): `POST /api/admin/teams/{team_id}/revive`. Success returns `{revived: team_id}` ("Revived team …: full health, and its boss's attack clock restarted"); errors as above (`404 team_not_found`, `409 not_in_game`). Both actions share `adminCall`.
+- **load:** no session redirects to `/`. `GET /api/admin/teams` (each team with its `game` at a glance: `TeamOverviewListSchema`); a `403` becomes SvelteKit's `error(403, 'Admins only')`. With `?email=` in the page's URL it also searches users (`GET /api/admin/users?email=`, `UserListSchema`) and returns them as `users` (`null` without a search).
+- **Actions**, all through `adminCall` (a backend error comes back as `fail(status, {code, message})`, shown in red; success as `{done: "…"}`, shown in green):
+  - `revive` (`team_id`): `POST /api/admin/teams/{team_id}/revive`
+  - `reset` (`team_id`): `POST /api/admin/teams/{team_id}/cooldowns/reset`
+  - `delete` (`team_id`): `DELETE /api/admin/teams/{team_id}`
+  - `remove` (`team_id`, `user_id`, `new_leader`): `DELETE /api/admin/teams/{team_id}/members/{user_id}`, adding `?new_leader=` when given
+  - `role` (`user_id`, `role`): `PUT /api/admin/users/{user_id}/role {"role"}`
 
 `src/routes/admin/+page.svelte`:
-- Every team with its code, status and members, filterable by code, team name or player name.
-- Each member has a **remove** button. The leader's has a required **new leader** picker listing the other members, since the backend refuses a leader's removal without one (`new_leader_required`). A team's only member shows "can't be removed" (the backend's `last_member`).
-- Every `IN_GAME` team has a **revive (full health)** button. The list doesn't show health (`GET /api/admin/teams` returns teams, not their state), so it's on every started team; reviving one that isn't knocked out heals it and restarts its boss's attack clock, which the confirm prompt says.
-- The forms use `use:enhance`; each submit function asks `confirm()` first and calls `cancel()` on "no". After a removal SvelteKit reloads the page's data, so the list is current. The page doesn't listen to events: it shows the teams as of the last load or action.
+- **Teams:** every team with its code, status and members, filterable by code, team name or player name, and by a **knocked out only** checkbox (with the count). A started team shows its game: **KNOCKED OUT** in red, health, bosses defeated, the current boss and its damage, casts, the class on cooldown and the waypoints cooling.
+- **Per team:** **revive (full health)** and **reset cooldowns** (disabled when nothing is cooling) on an `IN_GAME` team; **delete team** on any. Each member has a **remove** button; the leader's has a required **new leader** picker (the backend refuses a leader's removal without one: `new_leader_required`); a team's only member shows "can't be removed" (`last_member`).
+- **Users and roles:** a search form (`GET` with `?email=`) and, per user found, a role picker and **set role**; your own row says another admin must change your role (the backend's `cannot_change_own_role`).
+- Every write form uses `use:enhance` with `confirmFirst(question)`, which asks `confirm()` and calls `cancel()` on "no" (the role form doesn't ask). After an action SvelteKit reloads the page's data, so the list is current. The page doesn't listen to events: it shows the teams as of the last load or action.
 
-What the removal does to players: the removed player's stream gets `no_team` (so `/team` shows "No team" and `/play` sends them to `/team`); the rest get the smaller `team`, and a started team keeps playing. See [`backend/internal/teams/README.md`, "Remove a member (admin)"](../backend/internal/teams/README.md#remove-a-member-admin-delete-apiadminteamsteam_idmembersuser_id).
+What the actions do to players: a removed player's stream gets `no_team` (`/team` shows "No team", `/play` sends them to `/team`), the rest get the smaller `team`; a deleted team's members all get `no_team`; a revive or reset reaches the team as `team_state` (`revived`, `cooldowns_reset`). See [`backend/internal/teams/README.md`](../backend/internal/teams/README.md) and [`backend/internal/teamstate/README.md`](../backend/internal/teamstate/README.md).
+
+The types are in `src/lib/types/Admin.type.ts` (`GameOverviewSchema`, `TeamOverviewSchema`, `TeamOverviewListSchema`, `UserListSchema`).
+
+## The `/leaderboard` page
+The top teams, live. The home page links to it.
+
+- `src/routes/leaderboard/+page.server.ts`: no session redirects to `/`; `GET /api/leaderboard` (`LeaderboardMineSchema`: the top, the number of ranked teams, and your own team's entry `me`).
+- `src/routes/leaderboard/+page.svelte`: a table of the top (rank, team, bosses, when the last boss fell, damage on the current boss; 🏆 for a finished team; your team in bold). It opens `/api/events` and replaces the top with each game-wide `leaderboard` event's `message` (`snapshot` on connect, `updated` when the top changed, at most every **5 s**, `leaderboard.publish_every`). Your own entry is the page load's, shown below the table when you're outside the top; reload to refresh it.
+- The types are in `src/lib/types/Leaderboard.type.ts` (`LeaderboardEntrySchema`, `LeaderboardBoardSchema`, `LeaderboardMineSchema`).
 
 ## The `/qr` display page
 

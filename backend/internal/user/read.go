@@ -57,3 +57,10 @@ func (u *Users) Get(ctx context.Context, id uuid.UUID) (User, error) {
 	}
 	return usr, err
 }
+
+// Search returns up to limit users whose email contains query (case
+// insensitive), ordered by email: an admin finding someone to give a role.
+// An empty query matches everyone.
+func (u *Users) Search(ctx context.Context, query string, limit int) ([]User, error) {
+	return u.db.selectByEmailLike(ctx, query, limit)
+}

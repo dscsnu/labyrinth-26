@@ -2,11 +2,14 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // newAdmin signs in a player and makes them ADMIN in the database. Their token
@@ -272,4 +275,245 @@ func TestAdminRevive(t *testing.T) {
 	}
 	expect(t, "select after revive", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "square"}),
 		http.StatusOK, "")
+}
+
+// callList sends a request as p and returns the status and the payload as
+// an array (call decodes objects only).
+func (e *env) callList(method, path string, p player) (int, []any) {
+	e.t.Helper()
+	req, _ := http.NewRequest(method, e.backend.URL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	res := e.do(req)
+	defer res.Body.Close()
+	var env struct {
+		Payload []any `json:"payload"`
+	}
+	json.NewDecoder(res.Body).Decode(&env)
+	return res.StatusCode, env.Payload
+}
+
+// castOver selects shape as the leader and scans ids over HTTP, failing
+// unless the last scan completes the pattern.
+func (e *env) castOver(leader player, shape string, ids []string) apiResult {
+	e.t.Helper()
+	expect(e.t, "select "+shape, e.call("PUT", "/api/teams/me/state/selection", leader, map[string]string{"shape": shape}), http.StatusOK, "")
+	var r apiResult
+	for _, w := range ids {
+		r = e.call("POST", "/api/teams/me/state/scans", leader, map[string]string{"qr": qrToken(w, time.Now().Unix())})
+		expect(e.t, "scan "+w, r, http.StatusOK, "")
+	}
+	if r.payload["outcome"] != "pattern_completed" {
+		e.t.Fatalf("cast %s: %v", shape, r.payload)
+	}
+	return r
+}
+
+// TestAdminTeamsOverview checks GET /api/admin/teams: a lobby team's game is
+// null; a started team's has its health, boss, cooldowns and cast count.
+func TestAdminTeamsOverview(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	admin := e.newAdmin("admin")
+	ps := e.startedTeam("o")
+	e.call("POST", "/api/teams", e.newPlayer("lobby"), map[string]string{"name": "Lobby"})
+	e.castOver(ps[0], "square", []string{"1001", "1002", "1007", "1008"})
+
+	status, list := e.callList("GET", "/api/admin/teams", admin)
+	if status != http.StatusOK || len(list) != 2 {
+		t.Fatalf("teams: %d %v", status, list)
+	}
+	for _, row := range list {
+		row := row.(map[string]any)
+		team := row["team"].(map[string]any)
+		switch team["status"] {
+		case "LOBBY":
+			if row["game"] != nil {
+				t.Fatalf("a lobby team has a game: %v", row)
+			}
+		case "IN_GAME":
+			g := row["game"].(map[string]any)
+			if g["health"] != float64(e.cfg.Settings.Game.Health) || g["cast_count"] != float64(1) || g["cooldown_class"] != "class_4" ||
+				g["knocked_out"] != false || g["boss"] == nil {
+				t.Fatalf("a started team's game: %v", g)
+			}
+		}
+	}
+}
+
+// TestAdminDeleteTeam deletes a started team over HTTP: the guard and bad
+// IDs first; then every member's stream gets no_team (team_deleted), their
+// game routes answer not_in_team, the team is gone from the admin's list,
+// a member can create a team at once, and deleting it again is
+// team_not_found.
+func TestAdminDeleteTeam(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	admin := e.newAdmin("admin")
+	ps := e.startedTeam("d")
+	teamID := e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)
+	expect(t, "player deletes", e.call("DELETE", "/api/admin/teams/"+teamID, ps[0], nil), http.StatusForbidden, "not_admin")
+	expect(t, "bad team id", e.call("DELETE", "/api/admin/teams/12", admin, nil), http.StatusBadRequest, "invalid_team_id")
+
+	s := e.openStream(ps[1])
+	s.next(t, "connect")
+	s.nextState(t, "connect")
+	expect(t, "delete", e.call("DELETE", "/api/admin/teams/"+teamID, admin, nil), http.StatusOK, "")
+	if ev := s.next(t, "deleted"); ev.name != "no_team" || ev.typ != "team_deleted" {
+		t.Fatalf("member's event: %s %s", ev.name, ev.typ)
+	}
+	expect(t, "state after the delete", e.call("GET", "/api/teams/me/state", ps[0], nil), http.StatusNotFound, "not_in_team")
+	if _, list := e.callList("GET", "/api/admin/teams", admin); len(list) != 0 {
+		t.Fatalf("teams after the delete: %v", list)
+	}
+	expect(t, "member creates a team", e.call("POST", "/api/teams", ps[2], map[string]string{"name": "Again"}), http.StatusCreated, "")
+	expect(t, "delete again", e.call("DELETE", "/api/admin/teams/"+teamID, admin, nil), http.StatusNotFound, "team_not_found")
+}
+
+// TestAdminResetCooldownsOverHTTP casts the square, so its class and its
+// waypoints cool down; the reset route clears both (stream type
+// cooldowns_reset), so the waypoint scans again; and the route's guard and
+// errors.
+func TestAdminResetCooldownsOverHTTP(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if e.cfg.Settings.Game.QRCooldown.Duration <= 0 {
+		t.Skip("needs game.qr_cooldown > 0")
+	}
+	e = e.restart()
+	admin := e.newAdmin("admin")
+	ps := e.startedTeam("r")
+	teamID := e.call("GET", "/api/teams/me", ps[0], nil).payload["id"].(string)
+	reset := func(p player, id string) apiResult {
+		return e.call("POST", "/api/admin/teams/"+id+"/cooldowns/reset", p, nil)
+	}
+	e.castOver(ps[0], "square", []string{"1001", "1002", "1007", "1008"})
+	expect(t, "select the triangle", e.call("PUT", "/api/teams/me/state/selection", ps[0], map[string]string{"shape": "triangle"}), http.StatusOK, "")
+	expect(t, "a cooled waypoint", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix())}),
+		http.StatusConflict, "waypoint_on_cooldown")
+
+	expect(t, "player resets", reset(ps[0], teamID), http.StatusForbidden, "not_admin")
+	expect(t, "bad team id", reset(admin, "12"), http.StatusBadRequest, "invalid_team_id")
+	expect(t, "unknown team", reset(admin, "000000"), http.StatusNotFound, "team_not_found")
+	lobby := e.call("POST", "/api/teams", e.newPlayer("lobby"), map[string]string{"name": "Lobby"}).payload["id"].(string)
+	expect(t, "lobby team", reset(admin, lobby), http.StatusConflict, "not_in_game")
+
+	s := e.openStream(ps[1])
+	s.next(t, "connect")
+	s.nextState(t, "connect")
+	r := reset(admin, teamID)
+	expect(t, "reset", r, http.StatusOK, "")
+	if r.payload["cooldown_class"] != nil || len(r.payload["qr_cooldowns"].([]any)) != 0 {
+		t.Fatalf("after the reset: %v", r.payload)
+	}
+	if ev := s.nextState(t, "reset"); ev.typ != "cooldowns_reset" {
+		t.Fatalf("reset event: %s", ev.typ)
+	}
+	expect(t, "the waypoint after the reset", e.call("POST", "/api/teams/me/state/scans", ps[0], map[string]string{"qr": qrToken("1001", time.Now().Unix())}),
+		http.StatusOK, "")
+}
+
+// TestAdminUsersAndRoles checks the user routes: search by email (case
+// insensitive), setting a role (and the promoted user reaching an admin
+// route at once, with a token that still says PLAYER), and every refusal:
+// a player, an admin's own role, an unknown role, a bad or unknown user.
+func TestAdminUsersAndRoles(t *testing.T) {
+	e := setup(t)
+	admin := e.newAdmin("admin")
+	p := e.newPlayer("helpme")
+	if status, found := e.callList("GET", "/api/admin/users?email=HELPME", admin); status != http.StatusOK ||
+		len(found) != 1 || found[0].(map[string]any)["id"] != p.id {
+		t.Fatalf("search: %d %v", status, found)
+	}
+	role := func(as player, id string, body any) apiResult {
+		return e.call("PUT", "/api/admin/users/"+id+"/role", as, body)
+	}
+	expect(t, "player sets a role", role(p, p.id, map[string]string{"role": "ADMIN"}), http.StatusForbidden, "not_admin")
+	expect(t, "own role", role(admin, admin.id, map[string]string{"role": "PLAYER"}), http.StatusConflict, "cannot_change_own_role")
+	expect(t, "unknown role", role(admin, p.id, map[string]string{"role": "OWNER"}), http.StatusBadRequest, "invalid_role")
+	expect(t, "no role", role(admin, p.id, map[string]string{}), http.StatusBadRequest, "invalid_body")
+	expect(t, "bad user id", role(admin, "nope", map[string]string{"role": "HELPER"}), http.StatusBadRequest, "invalid_user_id")
+	expect(t, "unknown user", role(admin, uuid.NewString(), map[string]string{"role": "HELPER"}), http.StatusNotFound, "user_not_found")
+
+	r := role(admin, p.id, map[string]string{"role": "ADMIN"})
+	expect(t, "promote", r, http.StatusOK, "")
+	if r.payload["role"] != "ADMIN" {
+		t.Fatalf("promoted: %v", r.payload)
+	}
+	if status, _ := e.callList("GET", "/api/admin/teams", p); status != http.StatusOK {
+		t.Fatalf("the promoted user on an admin route: %d", status)
+	}
+}
+
+// TestLeaderboardAndFinish gives every boss 1 HP: one team casts until the
+// last falls (square and triangle in turn, for the spell cooldown; no QR
+// cooldown). It becomes FINISHED (team event finished) and its scans are
+// not_in_game. GET /api/leaderboard puts it first, marked finished, with
+// the other team's own entry as me; streams open with the leaderboard
+// snapshot, and a refresh broadcasts the change as updated.
+func TestLeaderboardAndFinish(t *testing.T) {
+	e := setup(t)
+	if err := e.db.SeedDev2025(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Pool().Exec(context.Background(), "UPDATE boss SET hp = 1"); err != nil {
+		t.Fatal(err)
+	}
+	e.cfg.Settings.Game.QRCooldown.Duration = 0
+	e = e.restart()
+	winners := e.startedTeam("w")
+	others := e.startedTeam("x")
+	watcher := e.openStream(e.newPlayer("watcher"))
+	if ev := <-watcher.boards; ev.typ != "snapshot" {
+		t.Fatalf("a stream opens with the leaderboard snapshot, got %s", ev.typ)
+	}
+	team := e.openStream(winners[1])
+	team.next(t, "connect")
+
+	for i := range e.cfg.Settings.Game.Bosses {
+		if i%2 == 0 {
+			e.castOver(winners[0], "square", []string{"1001", "1002", "1007", "1008"})
+		} else {
+			e.castOver(winners[0], "triangle", []string{"1001", "1002", "1003"})
+		}
+	}
+	eventually(t, "the team is finished", func() bool {
+		return e.call("GET", "/api/teams/me", winners[0], nil).payload["status"] == "FINISHED"
+	})
+	for {
+		ev := team.next(t, "finished event")
+		if ev.typ == "finished" {
+			break
+		}
+	}
+	expect(t, "select after finishing", e.call("PUT", "/api/teams/me/state/selection", winners[0], map[string]string{"shape": "square"}),
+		http.StatusConflict, "not_in_game")
+
+	r := e.call("GET", "/api/leaderboard", others[0], nil)
+	expect(t, "leaderboard", r, http.StatusOK, "")
+	top := r.payload["top"].([]any)
+	first := top[0].(map[string]any)
+	me := r.payload["me"].(map[string]any)
+	if r.payload["teams"] != float64(2) || first["finished"] != true || first["bosses_defeated"] != float64(e.cfg.Settings.Game.Bosses) ||
+		me["rank"] != float64(2) || me["bosses_defeated"] != float64(0) {
+		t.Fatalf("leaderboard: %v", r.payload)
+	}
+	if !e.app.Leaderboard.Refresh() {
+		t.Fatal("the refresh after the game didn't broadcast")
+	}
+	select {
+	case ev := <-watcher.boards:
+		if ev.typ != "updated" || len(ev.data["top"].([]any)) == 0 {
+			t.Fatalf("broadcast: %s %v", ev.typ, ev.data)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no leaderboard broadcast")
+	}
 }

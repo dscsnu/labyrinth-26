@@ -17,6 +17,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,6 +27,7 @@ import (
 
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/bosses"
+	"labyrinth/internal/leaderboard"
 	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/live"
 	"labyrinth/internal/platform/postgres"
@@ -85,7 +87,12 @@ var simStrategies = []string{
 	"racer",      // two members scan the same point at once: exactly one is accepted
 	"shrinking",  // an admin removes a member (the leader for even teams), or is refused the last one
 	"multiplier", // a stored damage multiplier (×2, ×1.5, ×0.5, ×3) scales every cast
+	"pampered",   // casts every 2 steps; every 4 an admin resets its cooldowns, and it casts its last spell again at once
+	"doomed",     // casts every 2 steps until an admin deletes the team (simDeleteAt); then its scans are not_in_team
 }
+
+// simDeleteAt is the step at which an admin deletes the doomed teams.
+const simDeleteAt = 30
 
 // simMultipliers are the multipliers multiplier teams get, by team index.
 var simMultipliers = []float64{2, 1.5, 0.5, 3}
@@ -110,6 +117,11 @@ type league struct {
 	// waypoints (the league adds a pentagon and a hexagon: the seed has
 	// none), locked until a team has defeated game.unlock_after_bosses.
 	big []int
+	// board is the leaderboard over the league, checked against the models.
+	board *leaderboard.Leaderboard
+	// hookErr holds an error from OnFinished (teams' Finish), which runs
+	// without a test to report to; steps fail on it.
+	hookErr atomic.Value
 }
 
 // simBigPatterns adds a 5-point pentagon and a 6-point hexagon, each a shape
@@ -144,7 +156,8 @@ type simTeam struct {
 type simCounts struct {
 	casts, defeats, allDefeated, knockouts, revives, wrongScans, poisoned, retries,
 	cleared, already, races, removals, lastMember, refusedRemoved, knockedRefused,
-	lockedRefused, bigCasts, cooldownRefused, qrRefused, qrBlocked atomic.Int64
+	lockedRefused, bigCasts, cooldownRefused, qrRefused, qrBlocked,
+	finishedRefused, resets, deletions, deletedRefused atomic.Int64
 }
 
 // newLeague seeds the dev content and starts simTeams teams of every size,
@@ -171,6 +184,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 		Size: set.Teams.Size, NameMaxLength: set.Teams.NameMaxLength,
 		WriteTimeout: set.Storage.WriteTimeout.Duration, CodeAttempts: set.Teams.CodeAttempts,
 		OnRosterChange: func(tm teams.Team) { l.state.RosterChanged(tm.ID) },
+		OnDelete:       func(id string) { l.state.TeamDeleted(id) },
 	}
 	ts := pgtest.Must(teams.Load(ctx, db, l.hub, pgtest.Quiet, teamRules))
 	users := user.New(db)
@@ -209,7 +223,13 @@ func newLeague(t testing.TB, attacks bool) *league {
 	l.rules = teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints, Health: set.Game.Health,
 		LockedPatternPoints: set.Game.LockedPatternPoints, UnlockAfterBosses: set.Game.UnlockAfterBosses,
-		QRCooldown:   simQRCooldown,
+		QRCooldown: simQRCooldown,
+		// A team through its last boss is FINISHED, as in server.Build.
+		OnFinished: func(id string) {
+			if err := l.teams.Finish(context.Background(), id); err != nil {
+				l.hookErr.Store(err)
+			}
+		},
 		WriteTimeout: set.Storage.WriteTimeout.Duration, Epoch: 1, Clock: l.clock,
 	}
 	l.atlas = pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: l.rules.MaxPatternPoints}))
@@ -226,6 +246,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 	}
 	l.bosses = pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, br))
 	l.state = pgtest.Must(teamstate.Load(ctx, db, l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
+	l.board = leaderboard.New(l.state, l.teams, l.hub, pgtest.Quiet, leaderboard.Rules{Size: 5, PublishEvery: time.Second})
 	return l
 }
 
@@ -245,7 +266,22 @@ type model struct {
 	// latest cast's time + game.qr_cooldown. A waypoint is cooling while now
 	// is before it.
 	qr map[int]time.Time
+	// lastDefeat is when the team's latest boss fell (the leaderboard's
+	// second key); zero if none has.
+	lastDefeat time.Time
+	// deleted is set once an admin deleted the team.
+	deleted bool
+	// last is the pattern of the team's latest cast; hasLast reports one.
+	last    int
+	hasLast bool
 }
+
+// finished reports whether the team has defeated every boss: it's FINISHED,
+// and its game writes are not_in_game.
+func (m *model) finished(b *bosses.Bosses) bool { return b.Count() > 0 && m.defeated >= b.Count() }
+
+// reset is an admin's cooldown reset: nothing is on cooldown.
+func (m *model) reset() { m.cooldown, m.qr = "", map[int]time.Time{} }
 
 // cooling reports whether waypoint w is on the team's QR cooldown at now.
 func (m *model) cooling(w int, now time.Time) bool {
@@ -304,6 +340,7 @@ func (m *model) cast(now time.Time, damage int, b *bosses.Bosses) (dealt, boss i
 	if m.damage >= b.At(m.defeated).HP {
 		h, _ := m.health(now, b)
 		m.defeated, m.damage, m.phaseStart, m.phaseHealth = m.defeated+1, 0, now, h
+		m.lastDefeat = now
 		defeated = true
 	}
 	return dealt, boss, defeated
@@ -332,6 +369,7 @@ func TestGameLoopSimulation(t *testing.T) {
 	l.watchAll(t)
 	l.steps(t, 1, simSteps, &counts)
 	l.converge(t)
+	l.checkLeaderboard(t)
 
 	for name, c := range map[string]*atomic.Int64{
 		"casts": &counts.casts, "boss defeats": &counts.defeats, "teams through every boss": &counts.allDefeated,
@@ -343,6 +381,8 @@ func TestGameLoopSimulation(t *testing.T) {
 		"locked shapes refused": &counts.lockedRefused, "big patterns cast after the unlock": &counts.bigCasts,
 		"cooldown refusals": &counts.cooldownRefused, "QR cooldown refusals": &counts.qrRefused,
 		"steps with every pattern's QR codes cooling": &counts.qrBlocked,
+		"finished teams refused":                      &counts.finishedRefused, "cooldown resets": &counts.resets,
+		"deleted teams": &counts.deletions, "deleted teams refused": &counts.deletedRefused,
 	} {
 		if c.Load() == 0 {
 			t.Errorf("the simulation never exercised %s", name)
@@ -377,6 +417,7 @@ func TestGameLoopRestart(t *testing.T) {
 			knockedWhileDown := counts.knockouts.Load() - knockedBefore
 			l.steps(t, simDownAt+1, 2*simDownAt, &counts)
 			l.converge(t)
+			l.checkLeaderboard(t)
 			t.Logf("knocked out while down: %d; casts: %d", knockedWhileDown, counts.casts.Load())
 			if down >= time.Hour && knockedWhileDown == 0 {
 				t.Errorf("an hour down should knock some teams out")
@@ -418,6 +459,9 @@ func (l *league) steps(t *testing.T, from, to int, counts *simCounts) {
 			}()
 		}
 		wg.Wait()
+		if err, _ := l.hookErr.Load().(error); err != nil {
+			t.Fatalf("step %d: marking a team finished: %v", step, err)
+		}
 		if t.Failed() {
 			t.Fatalf("step %d failed", step)
 		}
@@ -460,6 +504,9 @@ func (l *league) view(t *testing.T, st *simTeam) teamstate.View {
 func (l *league) converge(t *testing.T) {
 	t.Helper()
 	for _, st := range l.sims {
+		if st.model.deleted {
+			continue // no state to converge on
+		}
 		want := pgtest.Must(json.Marshal(l.view(t, st)))
 		deadline := time.Now().Add(2 * time.Second)
 		for {
@@ -490,14 +537,21 @@ func (l *league) downAndRestart(t *testing.T, down time.Duration, step int, coun
 	l.converge(t) // nothing from the old store still in flight
 	before := map[string]string{}
 	for _, st := range l.sims {
-		before[st.id] = withoutVersionJSON(t, l.view(t, st))
+		if !st.model.deleted {
+			before[st.id] = withoutVersionJSON(t, l.view(t, st))
+		}
 	}
 	l.state.Close()
 	l.elapsed += down
 	l.clock.at(l.elapsed) // fires nothing: the store is closed
 	l.rules.Epoch++
 	l.state = pgtest.Must(teamstate.Load(context.Background(), pgtest.Open(t, l.dbURL), l.atlas, l.bosses, l.teams, passQR{}, l.hub, pgtest.Quiet, l.rules))
+	l.board = leaderboard.New(l.state, l.teams, l.hub, pgtest.Quiet, leaderboard.Rules{Size: 5, PublishEvery: time.Second})
 	for _, st := range l.sims {
+		if st.model.deleted {
+			l.check(t, st, step, counts)
+			continue
+		}
 		if after := withoutVersionJSON(t, l.view(t, st)); down == 0 && after != before[st.id] {
 			t.Fatalf("team %d (%s) across the restart\nbefore: %s\nafter:  %s", st.i, st.strategy, before[st.id], after)
 		}
@@ -531,6 +585,12 @@ func withoutVersionJSON(t *testing.T, v teamstate.View) string {
 func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	t.Helper()
 	now := l.clock.Now()
+	if st.model.deleted { // no team, no state
+		if _, err := l.state.ForUser(st.members[st.watcher]); !errors.Is(err, teamstate.ErrNotInTeam) {
+			t.Fatalf("step %d, team %d: a deleted team's state: %v", step, st.i, err)
+		}
+		return
+	}
 	v := l.view(t, st)
 	m := &st.model
 	health, attacks := m.health(now, l.bosses)
@@ -605,7 +665,54 @@ func (l *league) play(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	knocked := health == 0
 	every := func(n int) bool { return (step+st.i)%n == 0 }
 
+	// A deleted team is gone: its members have no team.
+	if st.model.deleted {
+		if every(3) {
+			if _, err := l.state.Select(context.Background(), st.members[0], "square"); !errors.Is(err, teamstate.ErrNotInTeam) {
+				t.Errorf("team %d: a deleted team's select: %v, want not_in_team", st.i, err)
+			}
+			counts.deletedRefused.Add(1)
+		}
+		return
+	}
+	// A finished team plays no more: every game write is not_in_game.
+	if st.model.finished(l.bosses) {
+		if every(3) {
+			if _, err := l.state.Select(context.Background(), st.members[rotate(st)(0)], "square"); !errors.Is(err, teamstate.ErrNotInGame) {
+				t.Errorf("team %d (%s): a finished team's select: %v, want not_in_game", st.i, st.strategy, err)
+			}
+			counts.finishedRefused.Add(1)
+		}
+		return
+	}
+
 	switch st.strategy {
+	case "pampered":
+		if every(4) && (st.model.cooldown != "" || len(st.model.qrCooldowns(now)) > 0) {
+			v, err := l.state.ResetCooldowns(context.Background(), st.id)
+			if err != nil || v.CooldownClass != nil || len(v.QRCooldowns) != 0 {
+				t.Errorf("team %d: reset: %v %+v", st.i, err, v)
+				return
+			}
+			st.model.reset()
+			counts.resets.Add(1)
+			if lc, ok := st.lastPattern(); ok { // its last spell, cooling a moment ago, casts at once
+				l.castPattern(t, st, lc, knocked, counts, rotate(st), false)
+			}
+		} else if every(2) {
+			l.castRandom(t, st, knocked, counts, rotate(st))
+		}
+	case "doomed":
+		if step == simDeleteAt {
+			if err := l.teams.Delete(context.Background(), st.id); err != nil {
+				t.Errorf("team %d: delete: %v", st.i, err)
+				return
+			}
+			st.model.deleted = true
+			counts.deletions.Add(1)
+		} else if every(2) {
+			l.castRandom(t, st, knocked, counts, rotate(st))
+		}
 	case "steady", "multiplier":
 		if st.strategy == "steady" && every(7) && st.model.cooldown != "" {
 			l.tryCooldown(t, st, knocked, counts)
@@ -933,6 +1040,7 @@ func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.Scan
 	already := m.patterns[p]
 	m.patterns[p] = true
 	m.cooldown = l.atlas.Pattern(p).Spell.Class
+	m.last, m.hasLast = p, true
 	for _, w := range l.atlas.Pattern(p).Waypoints.Indexes() {
 		m.qr[w] = l.clock.Now().Add(l.rules.QRCooldown)
 	}
@@ -1140,4 +1248,52 @@ func BenchmarkGameLoopCast(b *testing.B) {
 			}
 		}
 	})
+}
+
+// lastPattern returns the pattern of st's latest cast, if any.
+func (st *simTeam) lastPattern() (int, bool) { return st.model.last, st.model.hasLast }
+
+// checkLeaderboard ranks the models the way the README says (bosses
+// defeated, then the latest defeat's time, earlier first and none last,
+// then damage on the current boss, then team ID; deleted teams left out)
+// and checks every team's leaderboard entry against it: rank, bosses,
+// damage, finished.
+func (l *league) checkLeaderboard(t *testing.T) {
+	t.Helper()
+	var ranked []*simTeam
+	for _, st := range l.sims {
+		if !st.model.deleted {
+			ranked = append(ranked, st)
+		}
+	}
+	slices.SortFunc(ranked, func(a, b *simTeam) int {
+		ma, mb := a.model, b.model
+		if ma.defeated != mb.defeated {
+			return mb.defeated - ma.defeated
+		}
+		switch {
+		case !ma.lastDefeat.IsZero() && mb.lastDefeat.IsZero():
+			return -1
+		case ma.lastDefeat.IsZero() && !mb.lastDefeat.IsZero():
+			return 1
+		case !ma.lastDefeat.Equal(mb.lastDefeat):
+			return ma.lastDefeat.Compare(mb.lastDefeat)
+		}
+		if ma.damage != mb.damage {
+			return mb.damage - ma.damage
+		}
+		return strings.Compare(a.id, b.id)
+	})
+	for i, st := range ranked {
+		got := l.board.ForUser(st.members[st.watcher])
+		if got.Teams != len(ranked) {
+			t.Fatalf("the leaderboard ranks %d teams, want %d", got.Teams, len(ranked))
+		}
+		me := got.Me
+		if me == nil || me.Rank != i+1 || me.BossesDefeated != st.model.defeated || me.Damage != st.model.damage ||
+			me.Finished != st.model.finished(l.bosses) {
+			t.Fatalf("team %d (%s): leaderboard entry %+v, want rank %d with %d bosses, %d damage, finished %v",
+				st.i, st.strategy, me, i+1, st.model.defeated, st.model.damage, st.model.finished(l.bosses))
+		}
+	}
 }

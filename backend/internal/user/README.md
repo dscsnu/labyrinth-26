@@ -67,7 +67,7 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
   2. Role isn't `RoleAdmin` → `403 not_admin`, message `only an admin can do this` (**`ErrNotAdmin`**).
   3. Otherwise `next`.
 
-  `server.Build` wraps admin routes as `authAPI.RequireAuth(userAPI.RequireAdmin(h))` and hands that to `teams.API.AdminRoutes`. One Postgres read per admin request: admin traffic is a handful of people, not the game loop.
+  `server.Build` wraps admin routes as `authAPI.RequireAuth(userAPI.RequireAdmin(h))` and hands that to `admin.API.Routes`, where every `/api/admin/…` route lives ([`internal/admin/README.md`](../admin/README.md)). One Postgres read per admin request: admin traffic is a handful of people, not the game loop.
 - **`RequireStaff(next)`** is the same guard for `HELPER` **or** `ADMIN`. It reads the role from the database on every request like `RequireAdmin`, and answers `403 not_staff` (message `only staff can do this`, `ErrNotStaff`) unless the role is `RoleHelper` or `RoleAdmin`. `server.Build` wraps the QR mint route as `authAPI.RequireAuth(userAPI.RequireStaff(h))` and hands it to `qr.API.StaffRoutes`.
 
 ### `read.go`: types and reads
@@ -86,12 +86,14 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
   `google_sub` and `last_login_at` are deliberately not in `User`: they're never sent to clients.
 - **`Users`** is the use case: just a `db`. **`New(pg)`** builds it from the shared pool. `server.Build` calls it first, before auth, because auth depends on it.
 - **`ErrUserNotFound`** (`user no longer exists`): no user has that ID.
+- **`Search(ctx, query, limit)`** → `db.selectByEmailLike`: up to `limit` users whose email contains `query`, case insensitive, by email (`[]` when none). An empty query matches everyone. Called by the admin use case's user search (`GET /api/admin/users`, limit **20**, `admin.user_search_limit`).
 - **`Get(ctx, id)`** → `db.selectByID`. Returns the user, or `ErrUserNotFound` wrapping `postgres.ErrNotFound` (so callers may test either). Called by `me` (→ `401 user_not_found`) and by auth's `token` (which maps not found to its own `404 user_not_found`).
 
 ### `write.go`: writes
 - **`GoogleProfile`** `{Subject, Email, Name, AvatarURL string}`: what Google's verified ID token says. Auth fills it from `sub`, `email`, `name`, `picture`.
 - **`ErrEmailInUse`** (`email already belongs to another account`): a different Google account's user already has this email. Auth maps it to `reason=email_in_use`.
 - **`SignInWithGoogle(ctx, p)`** → `db.upsertGoogle(p)`. Returns the stored user (with the avatar actually stored, so a kept avatar is returned too), or `ErrEmailInUse`. Called by auth's `callback`; tests also call it directly (`newPlayer` in `internal/server`). It doesn't validate anything itself: auth has already checked that the email is verified, non-empty and in an allowed domain.
+- **`ErrInvalidRole`** (`role must be PLAYER, HELPER or ADMIN`) and **`SetRole(ctx, id, role)`**: an admin's role change (the admin use case's `PUT /api/admin/users/{user_id}/role`). Refuses a role outside the three (`ErrInvalidRole`, nothing written), then `db.updateRole`; `ErrUserNotFound` (wrapping `postgres.ErrNotFound`) if there's no such user. Returns the updated user. It applies at once to every route that reads the role from here (`RequireAdmin`, `RequireStaff`, `/api/me`); the token's copy updates at the user's next sign-in. A later sign-in never touches it. That an admin can't change their **own** role is the admin use case's rule, not this one's.
 
 ### `db.go`: SQL
 One `db` struct holding the pool. No transactions: each method is one statement on `userprofile`.
@@ -99,6 +101,8 @@ One `db` struct holding the pool. No transactions: each method is one statement 
 - **`userColumns`** = `id, email, name, avatar_url, role, created_at`, the order `scanUser` reads.
 - **`scanUser(row)`** scans one row into a `User`, mapping `pgx.ErrNoRows` to `postgres.ErrNotFound`.
 - **`selectByID(id)`**: `SELECT <userColumns> FROM userprofile WHERE id = $1`. A primary-key lookup.
+- **`updateRole(id, role)`**: `UPDATE userprofile SET role = $2 WHERE id = $1 RETURNING <userColumns>`; no row → `postgres.ErrNotFound`.
+- **`selectByEmailLike(query, limit)`**: escapes `\`, `%` and `_` in `query` (so they match literally), then `SELECT <userColumns> FROM userprofile WHERE email ILIKE '%' || $1 || '%' ORDER BY email LIMIT $2`.
 - **`upsertGoogle(p)`**: turns an empty `AvatarURL` into SQL `NULL`, then:
   ```sql
   INSERT INTO userprofile (google_sub, email, name, avatar_url)
@@ -264,7 +268,23 @@ Called only after auth has verified the email (see `internal/auth/README.md`).
 
 ### General rules
 - One account per Google subject; one account per email.
-- Roles change only by hand in Postgres. No route changes them.
+- Roles change by an admin's `SetRole` (`PUT /api/admin/users/{user_id}/role`, in the admin use case) or by hand in Postgres; a sign-in never changes them.
+
+### `SetRole` (an admin's `PUT /api/admin/users/{user_id}/role`)
+The admin use case first checks the guard, the ID's format and that it isn't the admin's own (`409 cannot_change_own_role`); then:
+
+| Case | Result |
+|---|---|
+| Role not `PLAYER`, `HELPER` or `ADMIN` | `ErrInvalidRole` → `400 invalid_role`; nothing written |
+| No such user | `ErrUserNotFound` → `404 user_not_found` (here `404`: the user acted on, not the caller) |
+| Otherwise | stored; returned; `RequireAdmin`, `RequireStaff` and `/api/me` see it on their next request |
+
+### `Search` (an admin's `GET /api/admin/users?email=`)
+| Case | Result |
+|---|---|
+| Empty query | the first `limit` users by email |
+| `%`, `_` or `\` in the query | matched literally |
+| No match | `[]` |
 - Code that gates on role must read it with `Get`; the token's role (`identity.Role`) can be up to **12 h** (`auth.token_ttl`) stale. Routes do it through `RequireAdmin` (admin) or `RequireStaff` (helper/admin).
 
 ### `RequireAdmin` (every `/api/admin` route)
@@ -316,7 +336,7 @@ No locks and no memory: Postgres settles every race.
 - **An email clash blocks sign-in.** A Google account whose email belongs to another row gets `reason=email_in_use` and can't sign in until the other account's email changes. Whether to drop the `email` unique constraint, or let an organiser merge accounts, is open.
 - **A removed avatar can't be cleared.** Since an empty `picture` keeps the stored avatar, a user who deletes their Google photo keeps the old URL (which may stop loading).
 - **Emails are case-sensitive.** Google normally sends lowercase, but nothing enforces it.
-- **No role management.** Roles are set by SQL. The admin routes that exist (`/api/admin/teams…`, in teams) use roles but can't change them.
+- **Role changes aren't audited** beyond the admin use case's log line (`admin set role`, with `admin_id`).
 - **`HELPER` gates only QR minting.** `RequireStaff` (HELPER/ADMIN) is used by `GET /api/qr/{waypoint_id}`; nothing else gates on `HELPER` yet.
 - **No account deletion.** Deleting a user who has played is blocked by foreign keys without `ON DELETE` actions on `team`, `team_scan` and `team_selection`.
 - **`last_login_at` is written but never read.**
@@ -332,6 +352,13 @@ No locks and no memory: Postgres settles every race.
 | `TestGetUnknownUser` | `Get` of a random UUID → `ErrUserNotFound`, which also matches `postgres.ErrNotFound` |
 | `TestConcurrentFirstSignIns` | 8 concurrent first sign-ins of one subject: one row, every call gets the same `id` |
 
+`tests/admin_test.go`:
+
+| Test | Covers |
+|---|---|
+| `TestSetRole` | each role is stored and returned, and `Get` sees it at once; an unknown role is `ErrInvalidRole` and changes nothing; an unknown user is `ErrUserNotFound`; a later sign-in keeps the role |
+| `TestSearch` | case insensitive, ordered by email, cut at the limit; an empty query matches everyone; `_` and `%` match literally; no match is empty |
+
 End to end in `internal/server` (real Postgres):
 
 | Test | Covers |
@@ -341,6 +368,7 @@ End to end in `internal/server` (real Postgres):
 | `internal/server/tests/auth_test.go` `TestEmailInUse` | A sign-in whose email another account has → `reason=email_in_use` |
 | `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile` | A second sign-in with a new name and no picture: the team shows the new name and keeps the avatar |
 | `internal/server/tests/admin_test.go` `TestAdminGuard` | `RequireAdmin`: no token `401 missing_token`; a player `403 not_admin`; made `ADMIN` by SQL (token still says `PLAYER`) is let in; demoted by SQL is refused on the next request |
+| `internal/server/tests/admin_test.go` `TestAdminUsersAndRoles` | search by email over HTTP; setting a role (the promoted user reaches an admin route at once, token still `PLAYER`); `not_admin`, `cannot_change_own_role`, `invalid_role`, `invalid_body`, `invalid_user_id`, `user_not_found` |
 | `internal/server/tests/qr_test.go` `TestQRGuard` | `RequireStaff`: no token `401 missing_token`; a player `403 not_staff`; made `HELPER` (and `ADMIN`) by SQL is let in; demoted by SQL is refused on the next request |
 | `internal/server/tests/teams_test.go` `newPlayer` helper | every team and team-state test creates its users through `SignInWithGoogle` |
 

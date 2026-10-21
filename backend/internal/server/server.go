@@ -11,9 +11,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/admin"
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/auth"
 	"labyrinth/internal/bosses"
+	"labyrinth/internal/leaderboard"
 	"labyrinth/internal/platform/config"
 	"labyrinth/internal/platform/httpx"
 	"labyrinth/internal/platform/identity"
@@ -34,6 +36,8 @@ type App struct {
 	LoginCodes *auth.LoginCodes
 	Teams      *teams.Store
 	TeamState  *teamstate.Store
+	// Leaderboard broadcasts the top teams; main runs its loop (Run).
+	Leaderboard *leaderboard.Leaderboard
 
 	db     *postgres.DB
 	stream *live.Streamer
@@ -83,7 +87,9 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		// An admin removing a member from a started team: team state stops
 		// sending to them and refuses their writes.
 		OnRosterChange: func(t teams.Team) { stateStore.RosterChanged(t.ID) },
-		Epoch:          epoch,
+		// An admin deleting a team: team state forgets it and its timer.
+		OnDelete: func(teamID string) { stateStore.TeamDeleted(teamID) },
+		Epoch:    epoch,
 	})
 	if err != nil {
 		return nil, err
@@ -106,12 +112,23 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		QRCooldown:          set.Game.QRCooldown.Duration,
 		WriteTimeout:        set.Storage.WriteTimeout.Duration,
 		Epoch:               epoch,
+		// A team that defeats its last boss is FINISHED (teams' write).
+		OnFinished: func(teamID string) {
+			if err := teamStore.Finish(context.Background(), teamID); err != nil {
+				log.Error("mark team finished", "team_id", teamID, "error", err)
+			}
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore, db: db,
+	board := leaderboard.New(stateStore, teamStore, hub, log, leaderboard.Rules{
+		Size: set.Leaderboard.Size, PublishEvery: set.Leaderboard.PublishEvery.Duration,
+	})
+
+	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore,
+		Leaderboard: board, db: db,
 		stream: &live.Streamer{
 			Heartbeat:    set.Live.Heartbeat.Duration,
 			WriteTimeout: set.Live.WriteTimeout.Duration,
@@ -128,15 +145,15 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	userAPI.Routes(mux, authAPI.Authed)
 	// Admin routes: signed in, and ADMIN by the role in the database (never
 	// the token's, which can be stale).
-	admin := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }
+	adminOnly := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireAdmin(h)) }
 	// Staff routes: signed in, and HELPER or ADMIN by the role in the database.
 	staff := func(h http.HandlerFunc) http.Handler { return authAPI.RequireAuth(userAPI.RequireStaff(h)) }
-	teamsAPI := teams.NewAPI(teamStore, log)
-	teamsAPI.Routes(mux, authAPI.Authed)
-	teamsAPI.AdminRoutes(mux, admin)
-	stateAPI := teamstate.NewAPI(stateStore, log)
-	stateAPI.Routes(mux, authAPI.Authed)
-	stateAPI.AdminRoutes(mux, admin)
+	teams.NewAPI(teamStore, log).Routes(mux, authAPI.Authed)
+	teamstate.NewAPI(stateStore, log).Routes(mux, authAPI.Authed)
+	leaderboard.NewAPI(board).Routes(mux, authAPI.Authed)
+	// Every /api/admin/… route lives in the admin use case.
+	admin.NewAPI(admin.New(teamStore, stateStore, users, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
+		Routes(mux, adminOnly)
 	bosses.NewAPI(theBosses).Routes(mux, authAPI.Authed)
 	qrAPI := qr.NewAPI(qrVerifier, log)
 	qrAPI.Routes(mux, authAPI.Authed)
@@ -224,7 +241,10 @@ func (a *App) snapshot(userID uuid.UUID) []live.Event {
 	if ev, ok := a.TeamState.Snapshot(userID); ok {
 		evs = append(evs, ev)
 	}
-	// Game-wide snapshots go here, after the user's own.
+	// Game-wide snapshots, after the user's own.
+	if ev, err := a.Leaderboard.Snapshot(); err == nil {
+		evs = append(evs, ev)
+	}
 	return evs
 }
 

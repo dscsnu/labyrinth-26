@@ -37,6 +37,7 @@ type bossRow struct {
 	multiplier     float64
 	phaseHealth    *int       // NULL: full health (game.health)
 	phaseStartedAt *time.Time // NULL: the team's start
+	cooldownsReset int        // the cast log's length at the last reset; 0: never
 }
 
 // castRow is a team_cast row.
@@ -124,13 +125,13 @@ func (d db) selectTeams(ctx context.Context, teamID string, stackSize int) (map[
 
 	// Each team's progress through the bosses, if it has a row.
 	rows, err = d.pool.Query(ctx,
-		"SELECT team_id, defeated, damage, multiplier, phase_health, phase_started_at FROM team_boss"+filter, teamID)
+		"SELECT team_id, defeated, damage, multiplier, phase_health, phase_started_at, cooldowns_reset_casts FROM team_boss"+filter, teamID)
 	if err != nil {
 		return nil, err
 	}
 	var boss bossRow
 	if _, err := pgx.ForEachRow(rows, []any{&id, &boss.defeated, &boss.damage, &boss.multiplier,
-		&boss.phaseHealth, &boss.phaseStartedAt}, func() error {
+		&boss.phaseHealth, &boss.phaseStartedAt, &boss.cooldownsReset}, func() error {
 		row := boss
 		get(id).boss = &row
 		return nil
@@ -279,5 +280,16 @@ func upsertBoss(ctx context.Context, q interface {
 		ON CONFLICT (team_id) DO UPDATE SET defeated = EXCLUDED.defeated, damage = EXCLUDED.damage,
 			phase_health = EXCLUDED.phase_health, phase_started_at = EXCLUDED.phase_started_at`,
 		teamID, p.Defeated, p.Damage, p.PhaseHealth, p.PhaseStart)
+	return err
+}
+
+// upsertCooldownsReset records an admin's cooldown reset of teamID with the
+// cast log's length then: one INSERT … ON CONFLICT DO UPDATE of
+// team_boss.cooldowns_reset_casts (a new row takes every other column's
+// default: no progress).
+func (d db) upsertCooldownsReset(ctx context.Context, teamID string, casts int) error {
+	_, err := d.pool.Exec(ctx, `
+		INSERT INTO team_boss (team_id, cooldowns_reset_casts) VALUES ($1, $2)
+		ON CONFLICT (team_id) DO UPDATE SET cooldowns_reset_casts = EXCLUDED.cooldowns_reset_casts`, teamID, casts)
 	return err
 }

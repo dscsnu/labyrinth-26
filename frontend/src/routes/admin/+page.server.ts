@@ -1,28 +1,42 @@
 import { apiResponse, backendFetch } from "#lib/server/backend.ts";
-import { TeamSchema } from "#lib/types/Team.type.ts";
+import { TeamOverviewListSchema, UserListSchema } from "#lib/types/Admin.type.ts";
 import { error, fail, redirect } from "@sveltejs/kit";
-import { z } from "zod";
 import type { Actions, PageServerLoad } from "./$types";
 
-const TeamsResponseSchema = apiResponse(z.array(TeamSchema));
+const TeamsResponseSchema = apiResponse(TeamOverviewListSchema);
+const UsersResponseSchema = apiResponse(UserListSchema);
 
 // The backend decides who's an admin, from the role in the database: the
 // session's role is as of sign-in and may be stale, so it isn't trusted here.
-export const load: PageServerLoad = async ({ locals }) => {
+// ?email= searches users for the role tools.
+export const load: PageServerLoad = async ({ locals, url }) => {
     if (!locals.user || !locals.token) redirect(303, '/');
 
-    const response = await backendFetch('/api/admin/teams', locals.token);
-    if (response.status === 403) error(403, 'Admins only');
-    if (!response.ok) throw new Error(`GET /api/admin/teams failed with ${response.status}`);
+    const email = url.searchParams.get('email');
+    const [teamsRes, usersRes] = await Promise.all([
+        backendFetch('/api/admin/teams', locals.token),
+        email === null ? null : backendFetch(`/api/admin/users?email=${encodeURIComponent(email)}`, locals.token),
+    ]);
+    if (teamsRes.status === 403) error(403, 'Admins only');
+    if (!teamsRes.ok) throw new Error(`GET /api/admin/teams failed with ${teamsRes.status}`);
+    if (usersRes && !usersRes.ok) throw new Error(`GET /api/admin/users failed with ${usersRes.status}`);
 
-    return { teams: TeamsResponseSchema.parse(await response.json()).payload ?? [] };
+    return {
+        teams: TeamsResponseSchema.parse(await teamsRes.json()).payload ?? [],
+        email,
+        users: usersRes ? UsersResponseSchema.parse(await usersRes.json()).payload ?? [] : null,
+    };
 }
 
 // Calls an admin route; errors come back as form data with the backend's
 // code and message.
-const adminCall = async (token: string | null, path: string, method: string) => {
+const adminCall = async (token: string | null, path: string, method: string, body?: unknown) => {
     if (!token) redirect(303, '/');
-    const response = await backendFetch(path, token, { method });
+    const response = await backendFetch(path, token, {
+        method,
+        headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    });
     if (response.ok) return null;
     const data = await response.json().catch(() => ({}));
     return fail(response.status, {
@@ -31,34 +45,46 @@ const adminCall = async (token: string | null, path: string, method: string) => 
     });
 }
 
+// field reads one form field as a string.
+const field = (form: FormData, name: string) => String(form.get(name) ?? '');
+
 export const actions: Actions = {
-    // Revives a started team: full health (game.health) and a fresh attack
-    // clock for its current boss.
+    // Health back to game.health and the boss's attack clock restarted.
     revive: async ({ request, locals }) => {
-        const teamId = String((await request.formData()).get('team_id') ?? '');
+        const teamId = field(await request.formData(), 'team_id');
         return (await adminCall(locals.token, `/api/admin/teams/${encodeURIComponent(teamId)}/revive`, 'POST'))
-            ?? { revived: teamId };
+            ?? { done: `Revived team ${teamId}: full health, and its boss's attack clock restarted.` };
+    },
+    // No spell class or waypoint on cooldown for the team any more.
+    reset: async ({ request, locals }) => {
+        const teamId = field(await request.formData(), 'team_id');
+        return (await adminCall(locals.token, `/api/admin/teams/${encodeURIComponent(teamId)}/cooldowns/reset`, 'POST'))
+            ?? { done: `Reset team ${teamId}'s cooldowns.` };
+    },
+    // The team and all its progress go; its members become teamless.
+    delete: async ({ request, locals }) => {
+        const teamId = field(await request.formData(), 'team_id');
+        return (await adminCall(locals.token, `/api/admin/teams/${encodeURIComponent(teamId)}`, 'DELETE'))
+            ?? { done: `Deleted team ${teamId}. Its members can create or join a team.` };
     },
     // Removes a member; new_leader is required (by the backend) when the
-    // member leads the team. Errors come back as form data so the page can
-    // show the backend's code and message.
+    // member leads the team.
     remove: async ({ request, locals }) => {
-        if (!locals.token) redirect(303, '/');
         const form = await request.formData();
-        const teamId = String(form.get('team_id') ?? '');
-        const userId = String(form.get('user_id') ?? '');
-        const newLeader = String(form.get('new_leader') ?? '');
+        const teamId = field(form, 'team_id');
+        const userId = field(form, 'user_id');
+        const newLeader = field(form, 'new_leader');
         const query = newLeader ? `?new_leader=${encodeURIComponent(newLeader)}` : '';
-
-        const response = await backendFetch(
-            `/api/admin/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}${query}`,
-            locals.token, { method: 'DELETE' });
-        if (response.ok) return { removed: { teamId, userId } };
-
-        const data = await response.json().catch(() => ({}));
-        return fail(response.status, {
-            code: (data.code as string | undefined) ?? 'error',
-            message: (data.message as string | undefined) ?? `request failed with ${response.status}`,
-        });
+        return (await adminCall(locals.token,
+            `/api/admin/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}${query}`, 'DELETE'))
+            ?? { done: "Removed. They're teamless and can create or join a team." };
+    },
+    // Gives a user PLAYER, HELPER or ADMIN (not your own).
+    role: async ({ request, locals }) => {
+        const form = await request.formData();
+        const userId = field(form, 'user_id');
+        const role = field(form, 'role');
+        return (await adminCall(locals.token, `/api/admin/users/${encodeURIComponent(userId)}/role`, 'PUT', { role }))
+            ?? { done: `Role set to ${role}.` };
     },
 };

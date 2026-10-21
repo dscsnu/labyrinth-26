@@ -552,7 +552,7 @@ There are no locks and no in-memory state. Everything concurrent is settled by P
 
 ## Not decided yet
 - **⚠ No revocation.** A stolen access token works for up to **12 h** (`auth.token_ttl`). Logout only drops SvelteKit's cookie. The only kill switch is rotating the keypair, which signs everyone out.
-- **⚠ Stale roles in tokens.** `identity.Role` is the role at redemption. No route gates on it yet. Any future admin or helper route must read the role from `user.Get`, or tokens must get much shorter.
+- **Stale roles in tokens.** `identity.Role` is the role at redemption and can be up to **12 h** (`auth.token_ttl`) stale, so **no route gates on it**. The routes that need a role read it from Postgres on every request instead: every `/api/admin/…` route through `user.API.RequireAdmin`, and the QR mint route through `RequireStaff` (see `internal/user/README.md`). A new role-gated route must do the same, never read `identity.Role`.
 - **⚠ `POST /auth/token` is public.** It's meant to be server to server, but anyone holding a code within **2 m** (`auth.login_code_ttl`) can redeem it. Codes are 256-bit, so guessing is infeasible, and there's no rate limit.
 - **`hd` isn't read.** The domain rule uses the email's domain, exact match only. Subdomains aren't allowed unless listed. Whether to require Google's `hd` claim instead is open.
 - **No OIDC nonce.** The flow relies on state, PKCE and the back-channel code exchange. Adding a nonce would mean storing it in the state cookie.

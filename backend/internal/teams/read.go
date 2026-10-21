@@ -20,7 +20,9 @@ const (
 	// InGame means the team has started: players can't join or leave, and
 	// only an admin can remove a member (RemoveMember).
 	InGame Status = "IN_GAME"
-	// Finished means the team is done playing. Nothing sets it yet.
+	// Finished means the team is done playing: it defeated the last boss
+	// (Finish, called by teamstate). Its game writes are refused (not in
+	// game), and its members stay in it, so they can't join another team.
 	Finished Status = "FINISHED"
 )
 
