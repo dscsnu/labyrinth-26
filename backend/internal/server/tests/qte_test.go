@@ -55,6 +55,9 @@ func TestQTEsOverHTTP(t *testing.T) {
 
 	expect(t, "a player creates", e.call("POST", "/api/admin/qtes", ps[0], quizBody("heart", false)), http.StatusForbidden, "not_admin")
 	expect(t, "not an object", create("quiz"), http.StatusBadRequest, "invalid_body")
+	noCorrect := quizBody("heart", true)
+	delete(noCorrect["quiz"].(map[string]any), "correct_option")
+	expect(t, "no correct_option", create(noCorrect), http.StatusBadRequest, "invalid_body")
 	for _, c := range []struct {
 		code string
 		edit func(b map[string]any)

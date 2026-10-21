@@ -100,7 +100,7 @@ Each write is one call to the owner:
 - **`teamID(w, r)`**: `{team_id}` must match `teamIDPattern` (6 digits, teams' format), else `400 invalid_team_id`. Every team route checks it first.
 - **`userID(w, raw, what)`**: a UUID, else `400 invalid_user_id` naming the field.
 - **`qteID(w, r)`**: `{qte_id}` a positive integer, else `400 invalid_qte_id`.
-- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `grantPowerup` (`{kind}` through `teamstate.PowerupByID`, else `404 unknown_powerup`), `qtes`, `createQTE` (the body is a `qte.Draft` plus `start`; one that doesn't decode is `400 invalid_body`), `startQTE`, `endQTE`, `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
+- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `grantPowerup` (`{kind}` through `teamstate.PowerupByID`, else `404 unknown_powerup`), `qtes`, `createQTE` (the body has a `qte.Draft`'s fields plus `start`, with `correct_option` a pointer so a missing one isn't option 0; one that doesn't decode, or a quiz without `correct_option`, is `400 invalid_body`), `startQTE`, `endQTE`, `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
 
 ## Data model
 **Memory:** none. **Postgres:** none of its own; the owners' tables (see their READMEs).
@@ -184,7 +184,7 @@ In validation order, per route (after the guard: `401`, then `403 not_admin`).
 
 | Case | Result |
 |---|---|
-| create: body doesn't decode | `400 invalid_body` |
+| create: body doesn't decode, or a quiz has no `correct_option` (it would otherwise read as option 0) | `400 invalid_body` |
 | create: kind not `quiz`; powerup not one of the four; question blank; under 2 options, a blank or repeated one; `correct_option` not an option; `window_s` under 1 or over **300** (`qte.max_answer_window`) | `400 invalid_kind`, `invalid_powerup`, `invalid_question`, `invalid_options`, `invalid_correct_option`, `invalid_window`, in that order |
 | create with `start`, or start: another QTE is open | `409 qte_open` (a create with `start` writes nothing) |
 | start / end: `qte_id` isn't a positive integer; no such QTE | `400 invalid_qte_id`; `404 unknown_qte` |

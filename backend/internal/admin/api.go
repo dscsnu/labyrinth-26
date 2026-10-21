@@ -237,17 +237,30 @@ func (a *API) qtes(w http.ResponseWriter, _ *http.Request) {
 // {"question", "options", "correct_option"}, "window_s"?, "start"}: a draft
 // to launch later, or, with start, sent out at once. Returns its row.
 func (a *API) createQTE(w http.ResponseWriter, r *http.Request) {
+	// Its own shape, not qte.Draft's: correct_option is required, and only a
+	// pointer tells a missing one from option 0.
 	var req struct {
-		qte.Draft
-		Start bool `json:"start"`
+		Kind    string `json:"kind"`
+		Powerup string `json:"powerup"`
+		Quiz    *struct {
+			Question      string   `json:"question"`
+			Options       []string `json:"options"`
+			CorrectOption *int     `json:"correct_option"`
+		} `json:"quiz"`
+		WindowS *int `json:"window_s"`
+		Start   bool `json:"start"`
 	}
-	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+	if err := httpx.DecodeJSON(w, r, &req); err != nil || (req.Quiz != nil && req.Quiz.CorrectOption == nil) {
 		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body",
 			`body must be {"kind", "powerup", "quiz": {"question", "options", "correct_option"}, "window_s"?, "start"}`)
 		return
 	}
+	d := qte.Draft{Kind: req.Kind, Powerup: req.Powerup, WindowS: req.WindowS}
+	if q := req.Quiz; q != nil {
+		d.Quiz = &qte.Quiz{Question: q.Question, Options: q.Options, CorrectOption: *q.CorrectOption}
+	}
 	adminID := identity.UserID(r)
-	o, err := a.admin.CreateQTE(r.Context(), adminID, req.Draft, req.Start)
+	o, err := a.admin.CreateQTE(r.Context(), adminID, d, req.Start)
 	if err != nil {
 		a.fail(w, err)
 		return
