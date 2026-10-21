@@ -448,21 +448,35 @@
         class="h-full w-full [image-rendering:pixelated]"
       />
     </button>
+    <!-- While a spell is selected, the button shows it instead of the book
+         (a placeholder until the spells have images). An old message would
+         show in the book, so opening clears it, as opening the scanner does. -->
     <button
       type="button"
       aria-label="Open spell book"
       aria-haspopup="dialog"
-      onclick={() => (bookOpen = true)}
+      onclick={() => {
+        message = null;
+        bookOpen = true;
+      }}
       class="h-16 w-16 transition-transform active:scale-90"
     >
-      <img
-        src={bookIcon}
-        alt=""
-        width="48"
-        height="48"
-        draggable="false"
-        class="h-full w-full [image-rendering:pixelated]"
-      />
+      {#if selected}
+        <span
+          class="pixel-box flex h-full w-full items-center justify-center bg-paper p-1 text-center font-pixel text-[8px] leading-[12px] text-ink uppercase"
+        >
+          Image of the spell
+        </span>
+      {:else}
+        <img
+          src={bookIcon}
+          alt=""
+          width="48"
+          height="48"
+          draggable="false"
+          class="h-full w-full [image-rendering:pixelated]"
+        />
+      {/if}
     </button>
   </div>
 </div>
@@ -505,7 +519,19 @@
   </div>
 {/if}
 
-<SpellBook bind:open={bookOpen} shapes={game.shapes} {casts} {selected} />
+<SpellBook
+  bind:open={bookOpen}
+  shapes={game.shapes}
+  {casts}
+  {selected}
+  onselect={(s) => selectShape(s)}
+  onclear={giveUp}
+  {busy}
+  {isLeader}
+  canSelect={!ts.knocked_out}
+  locked={ts.locked_shapes}
+  {message}
+/>
 
 <!-- The controls, hidden while the map takes the whole screen; they still
      run (stream, state), ready for the UI to be built on top of the map. -->

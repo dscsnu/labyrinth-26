@@ -7,17 +7,39 @@
     // Each shape is a page: its rules (points, damage range, how many
     // patterns), then the patterns the team has discovered, from the cast
     // log, so it fills in live as anyone on the team casts. The arrows at the
-    // bottom turn the pages; close is between them.
+    // bottom turn the pages; close is between them. The leader also gets a
+    // button on each page to select its spell, or clear the selection on the
+    // selected one's page; the book only raises onselect/onclear, and the
+    // page makes the request and passes back busy and its message.
     let {
         open = $bindable(false),
         shapes,
         casts,
         selected = null,
+        onselect,
+        onclear,
+        busy = false,
+        isLeader = false,
+        canSelect = true,
+        locked = [],
+        message = null,
     }: {
         open?: boolean;
         shapes: GameShape[];
         casts: Cast[];
         selected?: string | null;
+        onselect: (shape: string) => void;
+        onclear: () => void;
+        // A selection request is in flight.
+        busy?: boolean;
+        // Only the leader sees the buttons; the backend refuses anyone else.
+        isLeader?: boolean;
+        // False while the team is knocked out: it can't select.
+        canSelect?: boolean;
+        // ts.locked_shapes: shapes whose patterns are all still locked.
+        locked?: string[];
+        // The last request's result, shown under the button.
+        message?: { ok: boolean; text: string } | null;
     } = $props();
 
     // Each shape's discovered patterns, first cast first: the waypoints, the
@@ -180,6 +202,40 @@
                             </ul>
                         {:else}
                             <p class="text-[8px] leading-[24px]">None yet. Cast one to write it here.</p>
+                        {/if}
+                        <!-- The leader's button: clear on the selected spell's
+                             page (both quadrilateral pages: the backend selects
+                             the shape, not the band), select on the others,
+                             disabled while another spell is selected. -->
+                        {#if isLeader}
+                            {@const isSelected = shape.shapeId === selected}
+                            {@const isLocked = locked.includes(shape.shapeId)}
+                            <div class="mt-6 flex flex-col gap-2">
+                                {#if isSelected}
+                                    <button type="button" disabled={busy || !canSelect} onclick={onclear} class="{navButton} w-full text-[8px] leading-[16px]">
+                                        Clear selection
+                                    </button>
+                                {:else}
+                                    <button
+                                        type="button"
+                                        disabled={busy || !canSelect || selected !== null || isLocked}
+                                        onclick={() => onselect(shape.shapeId)}
+                                        class="{navButton} w-full text-[8px] leading-[16px]"
+                                    >
+                                        Select Spell
+                                    </button>
+                                {/if}
+                                {#if !canSelect}
+                                    <p class="text-[8px] leading-[16px] uppercase opacity-60">Knocked out: an organiser must revive your team.</p>
+                                {:else if isLocked && !isSelected}
+                                    <p class="text-[8px] leading-[16px] uppercase opacity-60">Locked until your team defeats more bosses.</p>
+                                {/if}
+                                {#if message}
+                                    <p aria-live="polite" class="text-[8px] leading-[16px] uppercase" class:text-pink={!message.ok} class:text-cyan={message.ok}>
+                                        {message.text}
+                                    </p>
+                                {/if}
+                            </div>
                         {/if}
                     </section>
                 {/key}
