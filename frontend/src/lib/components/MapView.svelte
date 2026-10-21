@@ -11,7 +11,31 @@
     import { tick, untrack } from "svelte";
 
     // markers: the points to mark, each drawn with its tip on its spot.
-    let { level = $bindable(0), markers = [] }: { level?: number; markers?: MapPoint[] } = $props();
+    // active: waypoint IDs whose markers wiggle (the team's scanned points).
+    // cooldowns: team_state.qr_cooldowns, the points the team can't scan
+    // yet; each is dimmed with a countdown until its until passes, by now
+    // (the page's server clock, in ms). An expired entry is ignored, as the
+    // backend drops it then (qr_cooldown_ended).
+    let {
+        level = $bindable(0),
+        markers = [],
+        active = [],
+        cooldowns = [],
+        now = Date.now(),
+    }: {
+        level?: number;
+        markers?: MapPoint[];
+        active?: string[];
+        cooldowns?: { waypoint_id: string; until: string }[];
+        now?: number;
+    } = $props();
+
+    // Seconds until a waypoint can be scanned again, or 0 if it can now.
+    const cooldownLeft = (waypoint: string) => {
+        const c = cooldowns.find((c) => c.waypoint_id === waypoint);
+        return c ? Math.max(0, Math.ceil((Date.parse(c.until) - now) / 1000)) : 0;
+    };
+    const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     let zoom = $derived(ZOOM_LEVELS[Math.max(0, Math.min(level, ZOOM_LEVELS.length - 1))]);
 
     // The map fills its parent, as tall as it (fit to height) times zoom, and
@@ -90,18 +114,33 @@
             class="block h-full w-full [image-rendering:pixelated]"
         />
         <!-- Each marker's bottom-centre (the arrow's tip) on its point. The
-             same size at every zoom; taps pass through to the map. -->
+             same size at every zoom; taps pass through to the map. A point
+             on QR cooldown is dimmed, its countdown above the arrow. -->
         {#each markers as m (m.name)}
+            {@const left = cooldownLeft(m.waypoint)}
             <img
                 src={markerUrl}
-                alt={m.name}
+                alt={left > 0 ? `${m.name}, on cooldown` : m.name}
                 width="16"
                 height="16"
                 draggable="false"
                 style:left="{(m.x / MAP_SIZE.width) * 100}%"
                 style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                class:animate-wiggle={active.includes(m.waypoint)}
+                class:opacity-50={left > 0}
+                class:grayscale={left > 0}
                 class="pointer-events-none absolute h-4 w-4 max-w-none -translate-x-1/2 -translate-y-full [image-rendering:pixelated]"
             />
+            {#if left > 0}
+                <span
+                    aria-hidden="true"
+                    style:left="{(m.x / MAP_SIZE.width) * 100}%"
+                    style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                    class="pointer-events-none absolute -translate-x-1/2 translate-y-[calc(-100%-18px)] bg-ink px-1 font-pixel text-[8px] leading-[12px] whitespace-nowrap text-paper"
+                >
+                    {mmss(left)}
+                </span>
+            {/if}
         {/each}
     </div>
 </div>

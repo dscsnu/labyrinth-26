@@ -22,6 +22,7 @@
         isLeader = false,
         canSelect = true,
         locked = [],
+        cooldownShapes = [],
         message = null,
     }: {
         open?: boolean;
@@ -38,6 +39,9 @@
         canSelect?: boolean;
         // ts.locked_shapes: shapes whose patterns are all still locked.
         locked?: string[];
+        // ts.cooldown_shapes: shapes blocked because every pattern of them
+        // is of the last cast's class (no same class twice in a row).
+        cooldownShapes?: string[];
         // The last request's result, shown under the button.
         message?: { ok: boolean; text: string } | null;
     } = $props();
@@ -174,6 +178,9 @@
                             {#if shape.shapeId === selected}
                                 <span class="bg-gold px-2 text-[8px] leading-[16px]">Selected</span>
                             {/if}
+                            {#if cooldownShapes.includes(shape.shapeId)}
+                                <span class="bg-ink px-2 text-[8px] leading-[16px] text-paper">Cooldown</span>
+                            {/if}
                         </h3>
                         <!-- Where the spell's shape will be drawn: a square half
                              the paper's width, centred. A placeholder for now. -->
@@ -210,6 +217,7 @@
                         {#if isLeader}
                             {@const isSelected = shape.shapeId === selected}
                             {@const isLocked = locked.includes(shape.shapeId)}
+                            {@const isCooling = cooldownShapes.includes(shape.shapeId)}
                             <div class="mt-6 flex flex-col gap-2">
                                 {#if isSelected}
                                     <button type="button" disabled={busy || !canSelect} onclick={onclear} class="{navButton} w-full text-[8px] leading-[16px]">
@@ -218,7 +226,7 @@
                                 {:else}
                                     <button
                                         type="button"
-                                        disabled={busy || !canSelect || selected !== null || isLocked}
+                                        disabled={busy || !canSelect || selected !== null || isLocked || isCooling}
                                         onclick={() => onselect(shape.shapeId)}
                                         class="{navButton} w-full text-[8px] leading-[16px]"
                                     >
@@ -229,6 +237,8 @@
                                     <p class="text-[8px] leading-[16px] uppercase opacity-60">Knocked out: an organiser must revive your team.</p>
                                 {:else if isLocked && !isSelected}
                                     <p class="text-[8px] leading-[16px] uppercase opacity-60">Locked until your team defeats more bosses.</p>
+                                {:else if isCooling && !isSelected}
+                                    <p class="text-[8px] leading-[16px] uppercase opacity-60">Cooldown: cast a spell of another class first.</p>
                                 {/if}
                                 {#if message}
                                     <p aria-live="polite" class="text-[8px] leading-[16px] uppercase" class:text-pink={!message.ok} class:text-cyan={message.ok}>

@@ -54,6 +54,14 @@ export const CastSchema = z.object({
     // The serial of the boss it hit, or null if none.
     boss: z.number().nullable(),
     defeated_boss: z.boolean(),
+    // Its spell class, e.g. "class_3": the class of patterns of its size.
+    class: z.string(),
+    // What powerups did to it: cast by instant_cast with no scans; dealt
+    // multiplied by damage_multiplier; its waypoints cooled for
+    // powerups.short_qr_cooldown instead of game.qr_cooldown.
+    instant: z.boolean(),
+    boosted: z.boolean(),
+    short_qr_cooldown: z.boolean(),
 });
 
 // GET /api/game/bosses: every boss, serial 1 first. Static.
@@ -103,9 +111,33 @@ export const TeamStateSchema = z.object({
     // select yet (all their patterns are bigger).
     unlocked_points: z.number(),
     locked_shapes: z.array(z.string()),
+    // The class of the team's last cast, which it can't cast again next
+    // (null before the first cast), and the types that leaves it unable to
+    // select (not in locked_shapes).
+    cooldown_class: z.string().nullable(),
+    cooldown_shapes: z.array(z.string()),
+    // Waypoints the team can't scan yet (409 waypoint_on_cooldown): those of
+    // its recent casts, each with when it opens again. Soonest first.
+    qr_cooldowns: z.array(z.object({ waypoint_id: z.string(), until: z.string() })),
     // How many casts the log holds; more than the client's copy means it
     // missed some and should re-fetch GET /api/teams/me/casts.
     cast_count: z.number(),
+    // The powerups the team holds, and the effects running (until null:
+    // used up by the next cast).
+    powerups: z.object({
+        held: z.array(z.string()),
+        active: z.array(z.object({ kind: z.string(), until: z.string().nullable() })),
+    }),
+    // The team's latest quick-time-event answer, or null if it never
+    // answered one.
+    qte: z.object({
+        qte_id: z.number(),
+        option: z.number(),
+        correct: z.boolean(),
+        granted: z.boolean(),
+        answered_by: z.string(),
+        answered_at: z.string(),
+    }).nullable(),
     version: VersionSchema,
 });
 

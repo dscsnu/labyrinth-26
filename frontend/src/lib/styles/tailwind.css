@@ -46,6 +46,19 @@
     @keyframes blink {
         50% { opacity: 0; }
     }
+
+    /* A map marker bobbing up and down. It animates transform, which adds
+       to Tailwind's translate-* (the separate translate property), so a
+       marker's tip stays on its point. */
+    --animate-wiggle: wiggle 0.8s ease-in-out infinite;
+    @keyframes wiggle {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-6px); }
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .animate-wiggle { animation: none; }
 }
 
 /* A box with a 4px outline whose corners are notched, like a sprite, and
