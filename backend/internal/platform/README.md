@@ -71,7 +71,7 @@ Both are read **once at startup**. A change needs a restart.
 | `CONFIG_FILE` | no, default `config.toml` | path to `config.toml` | via `LoadSettings` | `SettingsPath` |
 | `TEST_DATABASE_URL` | tests only | a **disposable** database | tests skip without it | `pgtest`, `server` tests |
 
-"Required" means set **and non-empty**: `.env.example` ships `JWT_PRIVATE_KEY=""`, which fails with `JWT_PRIVATE_KEY is required` until you run `go run . keygen`.
+"Required" means set **and non-empty**: `.env.example` ships `JWT_PRIVATE_KEY=` (empty), which fails with `JWT_PRIVATE_KEY is required` until you run `go run . keygen`.
 
 ### `settings.go`: `config.toml`
 - **`Settings`** has one struct per table: `Teams`, `Game` (with the nested `BossAttack`, `[game.boss_attack]`), `QR`, `Spell`, `Auth`, `Live`, `Server`, `Storage`, `Leaderboard`, `Admin`, each field with a `toml` tag.
@@ -156,8 +156,8 @@ Where each value is passed in is in `internal/server/README.md`. Use cases never
 | `oauth_state_ttl = "500ms"` | `auth.oauth_state_ttl must be at least 1s` |
 | `read_timeout = "1s"` with `read_header_timeout = "10s"` | `server.read_timeout must be at least server.read_header_timeout` |
 | Several env and file problems | All of them, one per line, in one error |
-| `PUBLIC_URL="localhost:3000"` | `PUBLIC_URL must be an absolute URL` (no host) |
-| `PUBLIC_URL="https://labyrinth.example/"` | Accepted as `https://labyrinth.example`; cookies are `Secure` |
+| `PUBLIC_URL=localhost:3000` | `PUBLIC_URL must be an absolute URL` (no host) |
+| `PUBLIC_URL=https://labyrinth.example/` | Accepted as `https://labyrinth.example`; cookies are `Secure` |
 
 ### Concurrency
 `Config` and `Settings` are built once in `main` and only read afterwards. Nothing in `config` holds state.

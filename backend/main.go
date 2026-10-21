@@ -57,7 +57,7 @@ func run(log *slog.Logger, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("# backend/.env\nJWT_PRIVATE_KEY=\"%s\"\nQR_SECRET=\"%s\"\n\n# frontend/.env\nJWT_PUBLIC_KEY=\"%s\"\n", priv, qr, pub)
+		fmt.Printf("# backend/.env\nJWT_PRIVATE_KEY=%s\nQR_SECRET=%s\n\n# frontend/.env\nJWT_PUBLIC_KEY=%s\n", priv, qr, pub)
 		return nil
 	}
 
@@ -75,7 +75,7 @@ func run(log *slog.Logger, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("JWT_PUBLIC_KEY=\"%s\"\n", pub)
+		fmt.Printf("JWT_PUBLIC_KEY=%s\n", pub)
 		return nil
 	}
 
