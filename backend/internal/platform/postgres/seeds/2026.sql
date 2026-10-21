@@ -1,9 +1,8 @@
 -- 2026 content: the 10 checkpoints on campus, and every combination of 2 to
 -- 6 of them as a pattern (837), each shaped by its size: line (2),
 -- triangle (3), quadrilateral (4), pentagon (5), hexagon (6). Coordinates
--- and names are damage_lookup.json's (internal/spells/testdata/, the 2026
--- source of truth), numbered 2001-2010 in its order. Damage comes after, from
--- seeds/2026_spells.sql (go run ./cmd/spells).
+-- and names are the 2026 content's, numbered 2001-2010 in order. Damage comes
+-- after, from seeds/2026_spells.sql (go run ./cmd/spells).
 --
 -- Pattern IDs are stable: every combination ordered by size, then by its
 -- sorted waypoint IDs, numbered from 1 (2001-2002 is 1, … 2005-…-2010 is
