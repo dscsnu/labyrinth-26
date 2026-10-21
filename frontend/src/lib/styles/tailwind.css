@@ -1,1 +1,108 @@
 @import 'tailwindcss';
+
+/* Kongtext: a pixel font drawn on an 8×8 grid, so it's crisp at multiples
+   of 8px (8, 16, 24, 32). Used with the font-pixel class. */
+@font-face {
+    font-family: 'Kongtext';
+    src: url('../assets/fonts/kongtext.ttf') format('truetype');
+    font-display: swap;
+}
+
+/* Superfly: a heavy display face for main headings, like the Scott Pilgrim
+   game's logo. Used with the font-display class. */
+@font-face {
+    font-family: 'Superfly';
+    src: url('../assets/fonts/SUPERFLY.TTF') format('truetype');
+    font-display: swap;
+}
+
+@theme {
+    --font-pixel: 'Kongtext', monospace;
+    --font-display: 'Superfly', 'Kongtext', sans-serif;
+
+    /* The game's palette: gold like /play's top bar, on a night purple. */
+    --color-ink: #1a1423;
+    --color-night: #2b2240;
+    --color-panel: #3d3159;
+    --color-gold: #b8963e;
+    --color-gold-light: #e0c068;
+    --color-gold-dark: #7a5f22;
+    --color-parchment: #f1e3b8;
+    /* /play's top bar, behind the boss. */
+    --color-brown: #5c3a21;
+    /* The spell book's page: off-white paper with faint ruled lines. */
+    --color-paper: #fbf8ef;
+    --color-paper-line: #e4ddc9;
+    /* /team, after the Scott Pilgrim game's menu: diamond tiles in two
+       blues, a cyan logo and a pink highlight. */
+    --color-tile-dark: #1b55b8;
+    --color-tile-light: #2a6fd6;
+    --color-cyan: #3cc8f4;
+    --color-pink: #ff2f86;
+    --color-go: #5fb04a;
+    --color-danger: #c0453a;
+
+    --animate-blink: blink 1s steps(1) infinite;
+    @keyframes blink {
+        50% { opacity: 0; }
+    }
+}
+
+/* A box with a 4px outline whose corners are notched, like a sprite, and
+   a light top / dark bottom edge inside. The outline sits outside the box,
+   so leave 4px of room around it. */
+@utility pixel-box {
+    box-shadow:
+        0 -4px 0 0 var(--color-ink),
+        0 4px 0 0 var(--color-ink),
+        -4px 0 0 0 var(--color-ink),
+        4px 0 0 0 var(--color-ink),
+        inset 0 4px 0 0 rgb(255 255 255 / 0.15),
+        inset 0 -4px 0 0 rgb(0 0 0 / 0.3);
+}
+
+/* The same box, pressed: the shading flips. For buttons' :active. */
+@utility pixel-box-pressed {
+    box-shadow:
+        0 -4px 0 0 var(--color-ink),
+        0 4px 0 0 var(--color-ink),
+        -4px 0 0 0 var(--color-ink),
+        4px 0 0 0 var(--color-ink),
+        inset 0 4px 0 0 rgb(0 0 0 / 0.3);
+}
+
+/* A 2px ink outline around text, for light text on busy backgrounds (the
+   game menu's white-on-blue items). */
+@utility text-outline {
+    text-shadow:
+        2px 0 0 var(--color-ink), -2px 0 0 var(--color-ink),
+        0 2px 0 var(--color-ink), 0 -2px 0 var(--color-ink),
+        2px 2px 0 var(--color-ink), -2px -2px 0 var(--color-ink),
+        2px -2px 0 var(--color-ink), -2px 2px 0 var(--color-ink);
+}
+
+/* A logo's thick ink outline plus a hard drop shadow down-right, for the
+   big display headings. */
+@utility logo-outline {
+    text-shadow:
+        4px 0 0 var(--color-ink), -4px 0 0 var(--color-ink),
+        0 4px 0 var(--color-ink), 0 -4px 0 var(--color-ink),
+        4px 4px 0 var(--color-ink), -4px -4px 0 var(--color-ink),
+        4px -4px 0 var(--color-ink), -4px 4px 0 var(--color-ink),
+        2px 4px 0 var(--color-ink), -2px 4px 0 var(--color-ink),
+        2px -4px 0 var(--color-ink), -2px -4px 0 var(--color-ink),
+        4px 2px 0 var(--color-ink), -4px 2px 0 var(--color-ink),
+        4px -2px 0 var(--color-ink), -4px -2px 0 var(--color-ink),
+        8px 8px 0 var(--color-ink);
+}
+
+/* logo-outline, lighter: for display headings below the logo's size, where
+   the logo's thick outline would fill in the letters. */
+@utility heading-outline {
+    text-shadow:
+        2px 0 0 var(--color-ink), -2px 0 0 var(--color-ink),
+        0 2px 0 var(--color-ink), 0 -2px 0 var(--color-ink),
+        2px 2px 0 var(--color-ink), -2px -2px 0 var(--color-ink),
+        2px -2px 0 var(--color-ink), -2px 2px 0 var(--color-ink),
+        4px 4px 0 var(--color-ink);
+}
