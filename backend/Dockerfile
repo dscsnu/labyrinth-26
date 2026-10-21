@@ -1,9 +1,15 @@
 FROM golang:1.26-alpine AS builder
 WORKDIR /app
+# Go's module and build caches persist between builds (BuildKit cache
+# mounts), so a code change recompiles only what changed.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /labyrinth .
+# -trimpath: no build-machine paths in the binary (stack traces show module
+# paths). -s -w: no symbol table or DWARF debug info; panics still print
+# full stack traces (the runtime keeps its own tables).
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /labyrinth .
 
 FROM alpine:3.21
 # An unprivileged user to run as, with no home or login. The binary and
