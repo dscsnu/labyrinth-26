@@ -43,8 +43,8 @@ internal/
   leaderboard/ ranks started teams (bosses, then speed, then damage); GET /api/leaderboard and the game-wide leaderboard event
   admin/       every /api/admin/… route, over teams, teamstate and user; owns no data
   spells/      offline geometry and damage formula: projection, TSP tour, convex hull; not imported by server
-  server/      wires the use cases together; /healthz and the live event stream
-  platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed)
+  server/      wires the use cases together; /health and the live event stream
+  platform/    shared plumbing: config, httpx, identity, live (SSE hub), postgres (pool, migrations, lock, seed), stats (runtime/process figures for /health)
 cmd/
   spells/      offline damage generator: writes seeds/2026_spells.sql (needs DATABASE_URL, a seeded database)
   loadtest/    load test (see below)
@@ -99,7 +99,7 @@ Where it runs isn't decided yet. Whatever sits in front of the backend (nginx, C
 - **Allow idle streams longer than `live.heartbeat` (25 s).** A quiet stream gets a `: ping` comment every 25 s, so a read/idle timeout of **60 s or more** keeps it open (nginx `proxy_read_timeout 1h;`; many cloud load balancers default to 60 s idle, so raise it to several minutes if possible). A stream that's cut reconnects after 1–6 s and gets fresh state, so a lower limit is survivable but wasteful.
 - **Hold one long-lived connection per player.** 10,000 players means 10,000 open streams through the proxy, plus the requests: raise its connection limits (nginx `worker_connections` ≥ 16384, and `worker_rlimit_nofile`) and the open-file limit of both the proxy and the backend (`ulimit -n` / systemd `LimitNOFILE=` ≥ 65536; the load-test machine had 524,288). Keep connections to the backend alive (nginx `proxy_http_version 1.1; proxy_set_header Connection "";`) and use HTTP/2 to the phones if possible, so the streams and requests share connections.
 - **Route `/api/events` on the frontend's domain to the backend.** The SvelteKit server calls the backend itself (`BACKEND_URL`), but the browser opens the event stream directly at `/api/events` on the frontend's origin, with the `labyrinth_token` cookie (EventSource can't send headers); in dev, Vite's proxy does this (`frontend/vite.config.ts`). Everything else on that domain goes to SvelteKit; the backend's `/auth/google/callback` must be reachable at `PUBLIC_URL`. One origin for the stream means no CORS.
-- **Run exactly one backend** (see above): no autoscaling to two instances. Health-check `GET /healthz`.
+- **Run exactly one backend** (see above): no autoscaling to two instances. Health-check `GET /health`.
 
 The rate limit is per signed-in user, so many players behind one campus IP are fine, and so are requests the SvelteKit server makes on a player's behalf (they all come from its one address, with the player's token). The proxy doesn't need its own per-IP limit for `/api`; one on `/auth` is harmless.
 
@@ -161,7 +161,7 @@ Full request and response shapes and every error code: **http://localhost:3000/d
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/healthz` | – | `200` if the database is reachable; payload `{"streams": n}` open event streams |
+| GET | `/health` | – | `200` if the database is reachable; payload with `uptime_ms`, `streams`, and runtime/resource stats (`goroutines`, `cpu`, `memory`, …) |
 | GET | `/docs` | – | Swagger UI for the whole API (from `/openapi.yaml`) |
 | GET | `/openapi.yaml` | – | The OpenAPI 3.1 spec (`internal/server/openapi.yaml`) |
 | GET | `/auth/google/login?next=` | – | Starts Google sign-in |

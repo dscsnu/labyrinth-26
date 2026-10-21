@@ -521,7 +521,7 @@ func TestLeaderboardAndFinish(t *testing.T) {
 // TestRateLimitOverHTTP runs the server with a tiny bucket (3 requests,
 // refilling once a minute): a user's 4th request is 429 rate_limited with
 // Retry-After, whatever the route (an admin route and the event stream
-// included); another user is unaffected; /healthz, unauthenticated, is
+// included); another user is unaffected; /health, unauthenticated, is
 // never limited.
 func TestRateLimitOverHTTP(t *testing.T) {
 	e := setup(t)
@@ -548,8 +548,8 @@ func TestRateLimitOverHTTP(t *testing.T) {
 	}
 	expect(t, "an admin past the burst", e.call("GET", "/api/admin/teams", admin, nil), http.StatusTooManyRequests, "rate_limited")
 	for range 10 {
-		if res := e.get("/healthz"); res.StatusCode != http.StatusOK {
-			t.Fatalf("healthz: %d", res.StatusCode)
+		if res := e.get("/health"); res.StatusCode != http.StatusOK {
+			t.Fatalf("health: %d", res.StatusCode)
 		}
 	}
 }

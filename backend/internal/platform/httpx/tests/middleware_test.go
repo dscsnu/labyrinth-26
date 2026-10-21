@@ -127,14 +127,14 @@ func TestAccessLog(t *testing.T) {
 		}
 		httpx.ErrorCode(w, http.StatusConflict, "nope", "no")
 	})
-	h := httpx.AccessLog(log, mux, "/healthz")
+	h := httpx.AccessLog(log, mux, "/health")
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/things/7", nil))
 	line := logs.String()
 	if !strings.Contains(line, `route="GET /api/things/{id}"`) || !strings.Contains(line, "status=409") || !strings.Contains(line, "bytes=") {
 		t.Fatalf("access log %q", line)
 	}
 	logs.Reset()
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/healthz", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/health", nil))
 	if logs.Len() != 0 {
 		t.Fatalf("a skipped path was logged: %q", logs.String())
 	}

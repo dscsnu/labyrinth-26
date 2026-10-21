@@ -46,11 +46,11 @@ security:
   - bearer: []
 
 paths:
-  /healthz:
+  /health:
     get:
       tags: [health]
-      summary: Health check
-      description: 200 if Postgres is reachable, with the number of open event streams.
+      summary: Health and runtime stats
+      description: 200 if Postgres is reachable, with the process's uptime, open event streams and runtime/resource stats.
       security: []
       responses:
         "200":
@@ -61,11 +61,7 @@ paths:
                 allOf:
                   - $ref: "#/components/schemas/Success"
                   - properties:
-                      payload:
-                        type: object
-                        required: [streams]
-                        properties:
-                          streams: { type: integer, example: 42 }
+                      payload: { $ref: "#/components/schemas/Health" }
         "503":
           description: Database unreachable (no code).
           content:
@@ -917,6 +913,44 @@ components:
         success: { type: boolean, const: false }
         code: { type: string, description: Stable snake_case error code; absent only on 500., example: team_full }
         message: { type: string, example: team is full }
+
+    Health:
+      type: object
+      description: "The GET /health payload: uptime, open event streams, and this process's runtime and resource stats."
+      required: [uptime_ms, streams, go_version, goroutines, gomaxprocs, num_cpu, cpu, memory]
+      properties:
+        uptime_ms: { type: integer, description: Milliseconds since the backend finished building. }
+        streams: { type: integer, description: Open event streams, across all users. }
+        go_version: { type: string, example: go1.26.0 }
+        goroutines: { type: integer, description: Running goroutines. }
+        gomaxprocs: { type: integer, description: runtime.GOMAXPROCS. }
+        num_cpu: { type: integer, description: The host's logical CPUs. }
+        cpu:
+          type: object
+          required: [process_seconds, load_average]
+          properties:
+            process_seconds: { type: number, description: The process's total user+system CPU time, in seconds. }
+            load_average:
+              type: object
+              description: The host's 1/5/15-minute load averages (0 where unknown, e.g. not Linux).
+              required: ["1", "5", "15"]
+              properties:
+                "1": { type: number }
+                "5": { type: number }
+                "15": { type: number }
+        memory:
+          type: object
+          description: Go heap and OS resident memory, in bytes.
+          required: [alloc, total_alloc, sys, heap_alloc, heap_objects, num_gc, gc_pause_total_ns, rss]
+          properties:
+            alloc: { type: integer, description: Bytes allocated and still in use. }
+            total_alloc: { type: integer, description: Bytes allocated over the process's life. }
+            sys: { type: integer, description: Bytes obtained from the OS. }
+            heap_alloc: { type: integer, description: Alloc within the heap. }
+            heap_objects: { type: integer, description: Live heap objects. }
+            num_gc: { type: integer, description: Completed garbage collections. }
+            gc_pause_total_ns: { type: integer, description: Total GC pause, in nanoseconds. }
+            rss: { type: integer, description: Resident set size; 0 where unknown. }
 
     TokenResponse:
       type: object
