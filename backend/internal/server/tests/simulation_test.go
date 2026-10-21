@@ -14,6 +14,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +32,12 @@ type simClient struct {
 	up, down time.Duration // request and response delays
 
 	mu       sync.Mutex
-	stack    []any          // last stack seen
-	shape    []string       // completed shapes last seen
-	poisoned bool           // last poisoned flag seen
-	state    map[string]any // the newest team_state seen, by version
-	noTeam   bool           // a no_team event arrived (removed from the team)
+	stack    []any                     // last stack seen
+	shape    []string                  // completed shapes last seen
+	poisoned bool                      // last poisoned flag seen
+	state    map[string]any            // the newest team_state seen, by version
+	noTeam   bool                      // a no_team event arrived (removed from the team)
+	qtes     map[string]map[string]any // the latest qte event of each type, by type
 }
 
 // newSimClient connects p's event stream with delay down, and returns its
@@ -54,6 +56,16 @@ func (e *env) newSimClient(p player, up, down time.Duration) *simClient {
 		defer close(arrived)
 		for ev := range s.states {
 			arrived <- stamped{ev.data, time.Now()}
+		}
+	}()
+	go func() {
+		for ev := range s.qtes {
+			c.mu.Lock()
+			if c.qtes == nil {
+				c.qtes = map[string]map[string]any{}
+			}
+			c.qtes[ev.typ] = ev.data
+			c.mu.Unlock()
 		}
 	}()
 	go func() {
@@ -353,7 +365,11 @@ var httpStrategies = []string{"steady", "solo", "sloppy", "racer", "retrier", "q
 // members racing for a point, resent scans, giving up, and an admin removing
 // a member mid-game. Every request's status and code must be the expected
 // one; at the end every phone must hold its team's state (version and cast
-// count), and every removed player must have had no_team. Each team picks
+// count), and every removed player must have had no_team. Then a quiz: an
+// admin sends one out, four teams in five answer (two members at once
+// where two are active: exactly one is recorded), the admin's stats count
+// them, the admin ends it, every phone sees it start without the answer and
+// close with it, and the fifth team's late answer is qte_closed. Each team picks
 // its next pattern of another size than its last cast's (the spell cooldown
 // refuses a spell of the last cast's class).
 func TestSim100Teams(t *testing.T) {
@@ -578,6 +594,83 @@ func TestSim100Teams(t *testing.T) {
 	wg.Wait()
 	if t.Failed() {
 		t.FailNow()
+	}
+
+	// The quiz: a heart (nobody here holds one) for option 1.
+	quiz := e.call("POST", "/api/admin/qtes", admin, map[string]any{"kind": "quiz", "powerup": "heart", "window_s": 60, "start": true,
+		"quiz": map[string]any{"question": "Which?", "options": []string{"A", "B", "C"}, "correct_option": 1}})
+	expect(t, "send out the quiz", quiz, http.StatusOK, "")
+	qid := quiz.payload["id"]
+	answerPath := fmt.Sprintf("/api/teams/me/state/qte/%v/answer", qid)
+	active := func(st *simTeam) []*simClient {
+		var out []*simClient
+		for m, c := range st.clients {
+			if m != st.removed {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	var answered, right atomic.Int64
+	for i, st := range sims {
+		if i%5 == 4 {
+			continue // answers late
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			option := 1 + i%2 // right for even teams
+			a := active(st)
+			if len(a) == 1 || i%3 == 0 {
+				status, code, payload := a[0].call("POST", answerPath, map[string]int{"option": option})
+				if status != http.StatusOK || code != "" || payload["qte"].(map[string]any)["correct"] != (option == 1) {
+					t.Errorf("team %d: answer: %d %s %v", i, status, code, payload["qte"])
+				}
+			} else {
+				results := make([]string, 2)
+				var race sync.WaitGroup
+				for r := range 2 {
+					race.Go(func() {
+						status, code, _ := a[r].call("POST", answerPath, map[string]int{"option": option})
+						results[r] = fmt.Sprintf("%d %s", status, code)
+					})
+				}
+				race.Wait()
+				if !((results[0] == "200 " && results[1] == "409 qte_already_answered") ||
+					(results[1] == "200 " && results[0] == "409 qte_already_answered")) {
+					t.Errorf("team %d: two members answering at once: %v", i, results)
+				}
+			}
+			answered.Add(1)
+			if option == 1 {
+				right.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	_, list := e.callList("GET", "/api/admin/qtes", admin)
+	stats := list[0].(map[string]any)["stats"].(map[string]any)
+	if list[0].(map[string]any)["id"] != qid || stats["answered"] != float64(answered.Load()) ||
+		stats["correct"] != float64(right.Load()) || stats["granted"] != float64(right.Load()) {
+		t.Fatalf("quiz stats %v, want %d answered, %d right", stats, answered.Load(), right.Load())
+	}
+	expect(t, "end the quiz", e.call("POST", fmt.Sprintf("/api/admin/qtes/%v/end", qid), admin, nil), http.StatusOK, "")
+	for i, st := range sims {
+		for _, c := range active(st) {
+			eventually(t, fmt.Sprintf("team %d: a phone sees the quiz start and close", i), func() bool {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				started, closed := c.qtes["started"], c.qtes["closed"]
+				return started != nil && closed != nil && started["id"] == qid && closed["id"] == qid &&
+					started["quiz"].(map[string]any)["correct_option"] == nil && closed["quiz"].(map[string]any)["correct_option"] == float64(1)
+			})
+		}
+		if i%5 == 4 {
+			status, code, _ := active(st)[0].call("POST", answerPath, map[string]int{"option": 1})
+			if status != http.StatusConflict || code != "qte_closed" {
+				t.Fatalf("team %d: a late answer: %d %s", i, status, code)
+			}
+		}
 	}
 
 	for i, st := range sims {
