@@ -1,5 +1,5 @@
-# Production images: every push to the prod branch builds the backend and
-# Caddy images and pushes them to Artifact Registry, tagged with the commit
+# Production images: every push to the prod branch builds the backend,
+# frontend and Caddy images and pushes them to Artifact Registry, tagged with the commit
 # (its first 7 characters) and "prod". Deploying them is deploy.sh's job, run
 # on the VM (backend/README.md, "Deploying"). Nothing here touches the VM.
 #
@@ -27,7 +27,7 @@ env:
 
 jobs:
   images:
-    name: build and push (backend, caddy)
+    name: build and push (backend, frontend, caddy)
     runs-on: ubuntu-latest
     # The pool's provider accepts only this repository's prod branch, so a run
     # dispatched on any other branch fails to authenticate.
@@ -56,9 +56,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      # Caddy first: deploy.sh finds the commit to run from backend:prod, so
-      # backend:prod moves only once both images of that commit exist. The
-      # revision label is how deploy.sh maps "prod" back to the commit.
+      # Caddy and the frontend first: deploy.sh finds the commit to run from
+      # backend:prod, so backend:prod moves only once all three images of
+      # that commit exist. The revision label is how deploy.sh maps "prod"
+      # back to the commit.
       - name: caddy
         uses: docker/build-push-action@v7
         with:
@@ -69,6 +70,21 @@ jobs:
             ${{ env.REPOSITORY }}/caddy:${{ steps.tag.outputs.tag }}
             ${{ env.REPOSITORY }}/caddy:prod
           labels: org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: frontend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REPOSITORY }}/frontend:${{ steps.tag.outputs.tag }}
+            ${{ env.REPOSITORY }}/frontend:prod
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          # As the backend's: a code change rebuilds from bun run build, not
+          # from bun install.
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
       - name: backend
         uses: docker/build-push-action@v7
@@ -87,5 +103,5 @@ jobs:
 
       - name: summary
         run: |
-          echo "Pushed backend and caddy \`${{ steps.tag.outputs.tag }}\` (also \`prod\`)." >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed backend, frontend and caddy \`${{ steps.tag.outputs.tag }}\` (also \`prod\`)." >> "$GITHUB_STEP_SUMMARY"
           echo "Deploy on the VM: \`/root/labyrinth/deploy.sh\` (or \`deploy.sh ${{ steps.tag.outputs.tag }}\`)." >> "$GITHUB_STEP_SUMMARY"

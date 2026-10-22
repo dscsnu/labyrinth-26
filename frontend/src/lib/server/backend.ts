@@ -1,11 +1,14 @@
+import { BACKEND_INTERNAL_URL } from "$app/env/private";
 import { BACKEND_URL } from "$app/env/public";
 import { z } from "zod";
 
 // httpOnly cookie holding the backend JWT. Only the SvelteKit server reads it.
 export const TOKEN_COOKIE = 'labyrinth_token';
 
+// The server's calls go to BACKEND_INTERNAL_URL when set (production: the
+// Docker network); the browser always uses the public BACKEND_URL.
 export const backendUrl = (path: string): string =>
-    `${BACKEND_URL.replace(/\/+$/, '')}${path}`;
+    `${(BACKEND_INTERNAL_URL ?? BACKEND_URL).replace(/\/+$/, '')}${path}`;
 
 // Every backend response uses this envelope.
 export const apiResponse = <T extends z.ZodType>(payload: T) => z.object({

@@ -16,7 +16,7 @@
 #   4. Checks the new compose.prod.yaml and .env together, then swaps them in;
 #      the previous pair stays as *.prev.
 #   5. Pulls the images, recreates what changed (docker compose up -d), and
-#      waits for the backend to report healthy.
+#      waits for the backend and the frontend to report healthy.
 #
 # Doesn't seed or migrate: the backend migrates itself on start, and seeding
 # is a one-off (backend/README.md, "Deploying").
@@ -24,12 +24,13 @@ set -euo pipefail
 
 registry=asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth
 raw=https://raw.githubusercontent.com/dscsnu/labyrinth-26
-# The backend's and Caddy's settings, one labyrinth-<NAME> secret each.
-# labyrinth-JWT_PUBLIC_KEY is the frontend's, so it isn't here.
-secrets=(JWT_PRIVATE_KEY QR_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET ALLOWED_EMAIL_DOMAINS
-	POSTGRES_PASSWORD FRONTEND_HOST BACKEND_HOST ACME_EMAIL)
-# How long the new backend may take to report healthy: its healthcheck's
-# start_period (30 s) plus a few checks.
+# The stack's settings, one labyrinth-<NAME> secret each. JWT_PUBLIC_KEY is
+# the frontend's (compose passes it only that).
+secrets=(JWT_PRIVATE_KEY JWT_PUBLIC_KEY QR_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET
+	ALLOWED_EMAIL_DOMAINS POSTGRES_PASSWORD FRONTEND_HOST BACKEND_HOST ACME_EMAIL)
+# The services whose healthcheck the deploy waits for, and how long each may
+# take: the backend's start_period (30 s) plus a few checks.
+health_services=(backend frontend)
 health_wait=90
 
 die() { echo "deploy: $*" >&2; exit 1; }
@@ -71,17 +72,22 @@ if ! dc config --quiet; then
 	die "compose rejected the new files; the previous ones are back"
 fi
 
-# 5. Deploy and wait for the backend.
+# 5. Deploy and wait for each service's health. One this commit's compose
+# file doesn't have (an older commit, before the frontend) isn't waited for.
 dc pull --quiet
 dc up -d --remove-orphans
-echo "deploy: waiting up to ${health_wait}s for the backend"
-for ((i = 0; i < health_wait; i += 3)); do
-	status=$(docker inspect -f '{{.State.Health.Status}}' "$(dc ps -q backend)" 2>/dev/null || true)
-	[[ $status == healthy ]] && break
-	sleep 3
+services=$(dc config --services)
+for svc in "${health_services[@]}"; do
+	grep -qx "$svc" <<<"$services" || continue
+	echo "deploy: waiting up to ${health_wait}s for the $svc"
+	for ((i = 0; i < health_wait; i += 3)); do
+		status=$(docker inspect -f '{{.State.Health.Status}}' "$(dc ps -q "$svc")" 2>/dev/null || true)
+		[[ $status == healthy ]] && break
+		sleep 3
+	done
+	[[ $status == healthy ]] || { dc ps; die "$svc not healthy after ${health_wait}s (status: ${status:-none}); see: docker compose -f compose.prod.yaml logs $svc"; }
 done
 dc ps
-[[ $status == healthy ]] || die "backend not healthy after ${health_wait}s (status: ${status:-none}); see: docker compose -f compose.prod.yaml logs backend"
 
 # Images more than a week old that no container uses: older builds, kept a
 # week so a rollback needn't pull.
