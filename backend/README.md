@@ -94,18 +94,47 @@ The load generator and the backend share the machine's CPUs, so results are cons
 
 ## Deploying
 
-The backend and its Postgres run with Docker Compose on one host: `compose.prod.yaml` at the repository root. Run these from the root; `--env-file backend/.env` is what fills in `${POSTGRES_PASSWORD}` in the file (without it, compose stops: `set POSTGRES_PASSWORD in backend/.env and pass --env-file backend/.env`).
+The backend, its Postgres and Caddy (HTTPS and routing) run with Docker Compose on one host, the VM `labyrinth-prod` (project `labyrinth-gdg-2026`, zone `asia-south2-c`). The VM has no checkout of this repository: it runs images from Artifact Registry (`asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth`), and holds just two files, `compose.prod.yaml` and a `.env` written from Secret Manager.
+
+**1. Build and push the images** (from a machine with this repository, until CI does it):
 
 ```bash
-# once: backend/.env with the production secrets (see .env.example), POSTGRES_PASSWORD included
-dc() { docker compose -f compose.prod.yaml --env-file backend/.env "$@"; }   # shorthand for the lines below
-dc up -d --build               # start; also how to deploy a new version
+gcloud auth configure-docker asia-south2-docker.pkg.dev        # once
+TAG=$(git rev-parse --short HEAD)
+R=asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth
+docker build --platform linux/amd64 -t $R/backend:$TAG backend   # the VM is x86: build for it from an ARM Mac too
+docker build --platform linux/amd64 -t $R/caddy:$TAG caddy
+docker push $R/backend:$TAG && docker push $R/caddy:$TAG
+gcloud compute scp compose.prod.yaml labyrinth-prod:~/labyrinth/ --zone asia-south2-c   # only when it changed
+```
+
+**2. On the VM**, deploy that tag. Once beforehand: Docker with the compose plugin, and `gcloud auth configure-docker asia-south2-docker.pkg.dev` for the user that runs it. The VM's account, `labyrinth-vm`, may read the `labyrinth-*` secrets and pull from the repository, nothing else.
+
+```bash
+cd ~/labyrinth
+for s in JWT_PRIVATE_KEY QR_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET ALLOWED_EMAIL_DOMAINS \
+         POSTGRES_PASSWORD FRONTEND_HOST BACKEND_HOST ACME_EMAIL; do
+  echo "$s=$(gcloud secrets versions access latest --secret=labyrinth-$s)"
+done > .env && echo "IMAGE_TAG=<TAG>" >> .env && chmod 600 .env
+dc() { docker compose -f compose.prod.yaml "$@"; }   # shorthand for the lines below
+dc pull && dc up -d            # start; also how to deploy a new version (a new IMAGE_TAG)
 dc stop backend                # seed (refused while serving), then start again:
 dc run --rm backend seed
 dc start backend
-dc ps                          # both should say (healthy)
+dc ps                          # backend and postgres should say (healthy); caddy Up
 dc logs -f backend             # one line per request; panics at level=ERROR
 ```
+
+Compose reads `.env` on its own; a missing value stops it, naming the value. A setting changed in Secret Manager reaches the VM when `.env` is rewritten and `dc up -d` runs again. `labyrinth-JWT_PUBLIC_KEY` isn't in the list: it's the frontend's.
+
+**Caddy** (`caddy/Caddyfile`) is the only thing published on the host (80 and 443, plus 443/udp for HTTP/3). It gets and renews HTTPS certificates from Let's Encrypt for two hosts and redirects HTTP to HTTPS:
+
+| Host | Routes to |
+|---|---|
+| `FRONTEND_HOST` (e.g. `play.<domain>`) | `/api/events` → the backend, flushed as written; everything else → the frontend |
+| `BACKEND_HOST` (e.g. `api.<domain>`) | every backend route: sign-in, the API, `/health`, `/docs` |
+
+The hosts and ACME email come from the `labyrinth-FRONTEND_HOST`, `labyrinth-BACKEND_HOST` and `labyrinth-ACME_EMAIL` secrets, and compose builds the backend's `PUBLIC_URL` and `FRONTEND_URL` from the same hosts, so each domain is set once. The Caddyfile is baked into the `caddy` image (`caddy/Dockerfile`): a routing change is a new image. Outside the repo: DNS A records for both hosts pointing at the VM's static IP; the GCP firewall open for TCP 80/443 (the `http-server` and `https-server` network tags) and UDP 443 for HTTP/3; and the Google OAuth client's redirect URI set to `https://<BACKEND_HOST>/auth/google/callback`. Certificates live in the `caddy_data` volume, which must survive deploys: Let's Encrypt issues at most 5 duplicate certificates a week, so `down -v` repeated a few times could leave the site without HTTPS for days.
 
 **Logs** are rotated per container (`x-logging` in the root `compose.prod.yaml`): 100 MB files, at most 50, so at most **5 GB** each, the oldest lines deleted past it. A new container (a deploy, or `down`) starts a fresh log; a crash and restart keeps it. Logging is non-blocking: if writing falls behind, lines are dropped rather than requests slowed.
 
@@ -115,12 +144,12 @@ What it handles on its own (each tested on 2026-10-21):
 |---|---|
 | The backend crashes | `restart: unless-stopped` brings it back with every team's state, read from Postgres (about 1 s). Phones reconnect after 1–6 s and get fresh state. |
 | Postgres goes away | The backend loses its instance lock or can't connect, exits, and keeps being restarted; once Postgres is back it recovers by itself. Docker doubles the wait between restarts (up to a minute), so after a 30 s outage it took 23 s more. |
-| A deploy (`up -d --build`) | The old container stops before the new one starts, so the single-instance lock never clashes. Never `--scale backend` above 1. |
-| The host reboots | Both containers start again with Docker. |
+| A deploy (`up -d` with a new `IMAGE_TAG`) | The old container stops before the new one starts, so the single-instance lock never clashes. Never `--scale backend` above 1. |
+| The host reboots | All three containers start again with Docker. |
 
-`DATABASE_URL` and `PORT` in `backend/.env` are ignored there (the file sets them for the container). Nothing is published on the host. The backend is on the Docker network `labyrinth` as `http://backend:3000`; the reverse proxy (or the frontend) joins that network to reach it: as a service in the same root file, or from another compose file with `networks: { labyrinth: { external: true } }`. Postgres is only on a second, internal network, `db`, shared with the backend alone (`postgres:5432`): nothing on `labyrinth` can reach it, and it has no route out. Run `psql` and `pg_dump` inside the container: `dc exec postgres psql -U labyrinth`. Postgres is tuned for the production VM, a c4-standard-4 (4 vCPU, 15 GB) shared with the frontend: 2 GB shared buffers, 50 connections (the backend's pool takes up to 16, `pool_max_conns` in `DATABASE_URL`, plus one for its instance lock), SSD costs, 256 MB `/dev/shm` and 60 s to stop (the reasoning is in `compose.prod.yaml`); expect it under about 1 GB in use, and check with `docker stats` under load. The backend has a 65,536 open-file limit (one per event stream) and 20 s to shut down. Its healthcheck marks it unhealthy when `/health` fails (Postgres unreachable included) but doesn't restart it: watch `/health` from outside and alert. `.dockerignore` keeps `.env` out of the image build. The image runs as an unprivileged user (uid 10001, `labyrinth`), which can read and run the binary and `config.toml` but not change them. Compose also runs it with a read-only filesystem, every Linux capability dropped and `no-new-privileges`. `config.toml` is baked into the image (`/config.toml`), so a change to it needs `up -d --build`, not just a restart.
+`DATABASE_URL`, `PORT`, `PUBLIC_URL` and `FRONTEND_URL` are set by `compose.prod.yaml`, not read from `.env`. Only Caddy is published on the host. The backend is on the Docker network `labyrinth` as `http://backend:3000`, where Caddy (and later the frontend) reaches it; something in another compose file can join with `networks: { labyrinth: { external: true } }`. Postgres is only on a second, internal network, `db`, shared with the backend alone (`postgres:5432`): nothing on `labyrinth` can reach it, and it has no route out. Run `psql` and `pg_dump` inside the container: `dc exec postgres psql -U labyrinth`. Postgres is tuned for the production VM, a c4-standard-4 (4 vCPU, 15 GB) shared with the frontend: 2 GB shared buffers, 50 connections (the backend's pool takes up to 16, `pool_max_conns` in `DATABASE_URL`, plus one for its instance lock), SSD costs, 256 MB `/dev/shm` and 60 s to stop (the reasoning is in `compose.prod.yaml`); expect it under about 1 GB in use, and check with `docker stats` under load. The backend has a 65,536 open-file limit (one per event stream) and 20 s to shut down. Its healthcheck marks it unhealthy when `/health` fails (Postgres unreachable included) but doesn't restart it: watch `/health` from outside and alert. `.dockerignore` keeps `.env` out of the image build. The image runs as an unprivileged user (uid 10001, `labyrinth`), which can read and run the binary and `config.toml` but not change them. Compose also runs it with a read-only filesystem, every Linux capability dropped and `no-new-privileges`. `config.toml` is baked into the image (`/config.toml`), so a change to it needs a new image and deploy, not just a restart.
 
-Whatever reverse proxy sits in front of the backend (nginx, Caddy, a tunnel) must:
+Any reverse proxy in front of the backend must do the following; Caddy as configured does each (unbuffered `/api/events`, no proxy read timeout, a 131,072 open-file limit, the route on the frontend's host):
 
 - **Not buffer `/api/events`.** It's a server-sent event stream: each event must reach the phone as it's written. nginx: `proxy_buffering off;` for that location (the backend also sends `X-Accel-Buffering: no` and `Cache-Control: no-store`); Caddy and most load balancers stream `text/event-stream` already. A proxy that buffers holds every event until its buffer fills, and the game looks frozen.
 - **Allow idle streams longer than `live.heartbeat` (25 s).** A quiet stream gets a `: ping` comment every 25 s, so a read/idle timeout of **60 s or more** keeps it open (nginx `proxy_read_timeout 1h;`; many cloud load balancers default to 60 s idle, so raise it to several minutes if possible). A stream that's cut reconnects after 1–6 s and gets fresh state, so a lower limit is survivable but wasteful.
@@ -235,5 +264,5 @@ Each use case's README has the full details: rules, error codes and event shapes
 ## Configuration
 
 Two files:
-- **`config.toml`**: every tunable rule and timing (team size, pattern size, the number of bosses `game.bosses`, every team's starting health `game.health`, how bosses attack `[game.boss_attack]` (every `interval`, 10 min, for each boss's `damage` by serial, a nested table), the big-pattern unlock `game.locked_pattern_points` and `game.unlock_after_bosses`, how long a cast's waypoints stay disabled for its team `game.qr_cooldown` (5 min), the powerups' strengths and durations `[powerups]`, the quick-time events' answer windows `[qte]` (30 s, at most 5 min), the rotating-QR window `qr.rotate` and `qr.tolerance`, token lifetimes, heartbeat, server timeouts including `server.read_timeout` (30 s for a whole request), body limit, write timeout, and `storage.instance_lock_check` (5 s between instance-lock checks), the leaderboard's `leaderboard.size` (10) and `leaderboard.publish_every` (5 s), `admin.user_search_limit` (20), and the per-user rate limit `[ratelimit]` `per_second` (10), `burst` (40), `idle` (10 min)). Each key is commented in the file. Read once at startup from `$CONFIG_FILE` (default `./config.toml`; the Docker image sets `/config.toml`); unknown, missing (`missing key <table>.<key>`, even where zero would be valid) or out-of-range values stop the backend from starting. The full key table is in `internal/platform/README.md`. Restart to apply a change; in production the file is baked into the image, so that means a rebuild (`dc up -d --build`, see "Deploying"). Code never hard-codes these: see AGENTS.md §10.
+- **`config.toml`**: every tunable rule and timing (team size, pattern size, the number of bosses `game.bosses`, every team's starting health `game.health`, how bosses attack `[game.boss_attack]` (every `interval`, 10 min, for each boss's `damage` by serial, a nested table), the big-pattern unlock `game.locked_pattern_points` and `game.unlock_after_bosses`, how long a cast's waypoints stay disabled for its team `game.qr_cooldown` (5 min), the powerups' strengths and durations `[powerups]`, the quick-time events' answer windows `[qte]` (30 s, at most 5 min), the rotating-QR window `qr.rotate` and `qr.tolerance`, token lifetimes, heartbeat, server timeouts including `server.read_timeout` (30 s for a whole request), body limit, write timeout, and `storage.instance_lock_check` (5 s between instance-lock checks), the leaderboard's `leaderboard.size` (10) and `leaderboard.publish_every` (5 s), `admin.user_search_limit` (20), and the per-user rate limit `[ratelimit]` `per_second` (10), `burst` (40), `idle` (10 min)). Each key is commented in the file. Read once at startup from `$CONFIG_FILE` (default `./config.toml`; the Docker image sets `/config.toml`); unknown, missing (`missing key <table>.<key>`, even where zero would be valid) or out-of-range values stop the backend from starting. The full key table is in `internal/platform/README.md`. Restart to apply a change; in production the file is baked into the image, so that means a new image and deploy (see "Deploying"). Code never hard-codes these: see AGENTS.md §10.
 - **`.env`**: secrets and deployment URLs only. See `.env.example`. Required: `DATABASE_URL`, `JWT_PRIVATE_KEY` (from `go run . keygen`), `QR_SECRET` (from `go run . keygen`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `PUBLIC_URL`, `FRONTEND_URL`. Optional: `PORT` (3000), `ALLOWED_EMAIL_DOMAINS` (comma-separated, e.g. `snu.edu.in`).
