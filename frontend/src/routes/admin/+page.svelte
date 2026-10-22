@@ -28,6 +28,8 @@
     };
 </script>
 
+<main>
+
 <p><a href="/">home</a> · <a href="/leaderboard">leaderboard</a> · {user?.name} · admin</p>
 
 {#if form?.code}
@@ -39,7 +41,7 @@
 <h1>Teams</h1>
 
 <p>
-    <input bind:value={filter} placeholder="filter by code, team or player" />
+    <input bind:value={filter} placeholder="filter by code, team or player" size="30" />
     <label><input type="checkbox" bind:checked={knockedOnly} /> knocked out only ({knocked})</label>
     {shown.length} of {teams.length} teams
 </p>
@@ -74,17 +76,6 @@
                          since it loaded wouldn't show; with nothing cooling, the
                          reset does nothing. -->
                     <button>reset cooldowns</button>
-                </form>
-            {/if}
-            {#if t.team.status === "IN_GAME"}
-                <form method="POST" action="?/grant" use:enhance style="display: inline">
-                    <input type="hidden" name="team_id" value={t.team.id} />
-                    <select name="kind">
-                        {#each POWERUPS as k (k)}
-                            <option value={k} disabled={t.game?.powerups.held.includes(k)}>{k}</option>
-                        {/each}
-                    </select>
-                    <button>give powerup</button>
                 </form>
             {/if}
             <form method="POST" action="?/delete" use:enhance={confirmFirst(`Delete ${t.team.name} (${t.team.id}) and all its progress? This can't be undone.`)} style="display: inline">
@@ -207,3 +198,91 @@
         </ul>
     {/if}
 {/if}
+</main>
+
+<!-- Plain, readable admin styling: Tailwind's reset strips the browser's
+     defaults (heading sizes, button and input borders), so they're put back
+     here for this page only. -->
+<style>
+    main {
+        max-width: 60rem;
+        margin: 0 auto;
+        padding: 1rem;
+        font: 15px/1.5 system-ui, sans-serif;
+        color: #1f2328;
+    }
+    :global(body:has(main)) {
+        background: #f6f7f9;
+    }
+    h1 {
+        margin: 2rem 0 0.75rem;
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+    h2 {
+        margin: 1.5rem 0 0.5rem;
+        font-size: 1.125rem;
+        font-weight: 600;
+    }
+    section h2 {
+        margin: 0 0 0.25rem;
+    }
+    small {
+        color: #656d76;
+        font-weight: 400;
+    }
+    a {
+        color: #0969da;
+        text-decoration: underline;
+    }
+    p {
+        margin: 0.5rem 0;
+    }
+    section {
+        margin: 0.75rem 0;
+        padding: 0.75rem 1rem;
+        background: white;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+    }
+    ul {
+        margin: 0.5rem 0 0;
+        padding-left: 1.25rem;
+        list-style: disc;
+    }
+    li {
+        margin: 0.25rem 0;
+    }
+    form {
+        margin: 0.25rem 0.25rem 0.25rem 0;
+    }
+    button {
+        padding: 0.25rem 0.75rem;
+        background: white;
+        border: 1px solid #8c959f;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+    button:hover:not(:disabled) {
+        background: #eaeef2;
+    }
+    button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    input:not([type="checkbox"]),
+    select,
+    textarea {
+        padding: 0.25rem 0.5rem;
+        background: white;
+        border: 1px solid #8c959f;
+        border-radius: 6px;
+        max-width: 100%;
+    }
+    input[type="checkbox"] {
+        margin-right: 0.25rem;
+    }
+    label {
+        margin-right: 0.75rem;
+    }
+</style>

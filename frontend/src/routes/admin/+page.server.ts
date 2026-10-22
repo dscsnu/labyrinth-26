@@ -71,19 +71,6 @@ export const actions: Actions = {
         return (await adminCall(locals.token, `/api/admin/teams/${encodeURIComponent(teamId)}`, 'DELETE'))
             ?? { done: `Deleted team ${teamId}. Its members can create or join a team.` };
     },
-    // Gives a started team a powerup; wasted (granted false) if it already
-    // holds that kind.
-    grant: async ({ request, locals }) => {
-        const form = await request.formData();
-        const teamId = field(form, 'team_id');
-        const kind = field(form, 'kind');
-        if (!locals.token) redirect(303, '/');
-        const response = await backendFetch(
-            `/api/admin/teams/${encodeURIComponent(teamId)}/powerups/${encodeURIComponent(kind)}`, locals.token, { method: 'POST' });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) return fail(response.status, { code: data.code ?? 'error', message: data.message ?? `request failed with ${response.status}` });
-        return { done: data.payload?.granted ? `Gave team ${teamId} ${kind}.` : `Team ${teamId} already holds ${kind}: nothing given.` };
-    },
     // Sends a draft quiz to every phone.
     startQte: async ({ request, locals }) => {
         const id = field(await request.formData(), 'qte_id');
