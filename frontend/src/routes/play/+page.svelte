@@ -3,7 +3,6 @@
   import SpellBook from "#lib/components/SpellBook.svelte";
   import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
-  import { testCasts, testTeamState } from "#lib/game/testTeamState.ts";
   import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
   import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
   import zoomOutIcon from "#lib/assets/UserInterfaceButtons/zoom-out-icon.webp";
@@ -65,21 +64,13 @@
     if (s.cast_count > casts.length) refetchCasts();
   };
 
-  // TEST MODE (ForRohitJG.MD): everything on /play reads testTeamState and
-  // testCasts, and selecting, clearing and scanning change a local copy
-  // instead of calling the backend. false = the live team state (ts) and
-  // cast log, which keep updating underneath either way.
-  const TEST_MODE = true;
-  let testView = $state(structuredClone(testTeamState));
-  let view = $derived(TEST_MODE ? testView : ts);
-  let shownCasts = $derived(TEST_MODE ? testCasts : casts);
   // The waypoints scanned in the current attempt, whose markers wiggle.
-  let markedWaypoints = $derived(view.stack.map((s) => s.waypoint_id));
+  let markedWaypoints = $derived(ts.stack.map((s) => s.waypoint_id));
 
   // The boss being fought, from the static list by the state's serial, or
   // null once every boss is defeated (or none are loaded).
   let boss = $derived(
-    view.boss ? (bosses.find((b) => b.serial === view.boss!.serial) ?? null) : null,
+    ts.boss ? (bosses.find((b) => b.serial === ts.boss!.serial) ?? null) : null,
   );
   const bossName = (serial: number | null) =>
     bosses.find((b) => b.serial === serial)?.name ?? `boss ${serial}`;
@@ -106,7 +97,7 @@
         : `${Math.floor(s / 3600)} h ago`;
   };
 
-  let selected = $derived(view.selection?.shape ?? null);
+  let selected = $derived(ts.selection?.shape ?? null);
   // Only the leader picks a type, restarts or gives up; everyone scans.
   let isLeader = $derived(!!team && team.leader_id === user?.id);
   let selectedShape = $derived(game.shapes.find((s) => s.id === selected));
@@ -141,8 +132,8 @@
       const fresh = isNewer(ts.version, next.version);
       observe(next);
       // Moments, on every phone: a teammate's cast that finished a boss,
-      // and the boss's attacks. Not in test mode: they're the real team's.
-      if (!fresh || TEST_MODE) return;
+      // and the boss's attacks.
+      if (!fresh) return;
       if (type === "boss_defeated" && next.last_cast) {
         message = {
           ok: true,
@@ -208,53 +199,7 @@
     }
   };
 
-  // TEST MODE: what the backend's select, clear and scan do to the state,
-  // applied to testView instead (ForRohitJG.MD). No pattern data here, so a
-  // scan is never wrong and never completes a spell.
-  const testChange = (change: (s: TeamState) => void) => {
-    change(testView);
-    testView.version.seq++;
-  };
-  const testSelect = (shape: string, restart: boolean) => {
-    if (view.knocked_out) return (message = refused({ code: "knocked_out", message: "your team is knocked out" }));
-    if (view.locked_shapes.includes(shape))
-      return (message = refused({ code: "shape_locked", message: "this shape's patterns are locked" }));
-    if (view.cooldown_shapes.includes(shape)) return (message = refused({ code: "shape_on_cooldown" }));
-    testChange((s) => {
-      s.selection = { shape, selected_by: user?.id ?? "", selected_at: new Date(now).toISOString() };
-      s.stack = [];
-      s.poisoned = false;
-    });
-    message = restart
-      ? { ok: true, text: "attempt restarted: every scan cleared (test)" }
-      : { ok: true, text: `selected ${shape}: stack purged (test)` };
-  };
-  const testGiveUp = () => {
-    testChange((s) => {
-      s.selection = null;
-      s.stack = [];
-      s.poisoned = false;
-    });
-    message = { ok: true, text: "selection cleared (test)" };
-  };
-  const testScan = (qr: string) => {
-    // A token is "<waypoint>:<unix seconds>.<signature>"; not verified here.
-    const id = qr.split(":")[0];
-    if (!MAP_POINTS.some((p) => p.waypoint === id)) return (message = refused({ code: "invalid_qr" }));
-    if (!view.selection) return (message = refused({ code: "no_shape_selected", message: "select a shape before scanning" }));
-    if (view.stack.some((s) => s.waypoint_id === id))
-      return (message = refused({ code: "waypoint_already_scanned", message: "this waypoint is already scanned" }));
-    if (view.qr_cooldowns.some((c) => c.waypoint_id === id && Date.parse(c.until) > now))
-      return (message = refused({ code: "waypoint_on_cooldown" }));
-    testChange((s) => {
-      s.stack.push({ waypoint_id: id, user_id: user?.id ?? "", scanned_at: new Date(now).toISOString(), wrong: false });
-      if (!s.waypoints.includes(id)) s.waypoints = [...s.waypoints, id].sort();
-    });
-    message = { ok: true, text: `scan added: ${id} (test)` };
-  };
-
   const selectShape = async (shape: string, restart = false) => {
-    if (TEST_MODE) return testSelect(shape, restart);
     busy = true;
     const { res, json } = await call("/play/selection", "PUT", { shape });
     busy = false;
@@ -270,7 +215,6 @@
   const restart = () => selected && selectShape(selected, true);
 
   const giveUp = async () => {
-    if (TEST_MODE) return testGiveUp();
     busy = true;
     const { res, json } = await call("/play/selection", "DELETE");
     busy = false;
@@ -335,7 +279,6 @@
   };
 
   const scan = async (qr: string) => {
-    if (TEST_MODE) return testScan(qr);
     busy = true;
     const { res, json } = await call("/play/scan", "POST", { qr });
     busy = false;
@@ -372,8 +315,8 @@
 <!-- Top bar: full width, the top 25% of the screen, on the Scott Pilgrim
      menu's diamond backdrop (like /team) with a black edge above the map. A
      row for the back button, then the current boss's image, name, health
-     and next attack, from view (the test data for now; ts, so it moves on
-     every teammate's team_state, once it's live). -->
+     and next attack, from ts, so it moves on every
+     teammate's team_state. -->
 <div
   class="fixed inset-x-0 top-0 isolate flex h-[25dvh] flex-col gap-2 border-b-4 border-black px-4 py-3 font-pixel text-[16px] leading-[24px] text-white"
 >
@@ -391,7 +334,7 @@
       <!-- No visible label: the face says whose health it is. -->
       <span class="sr-only">Team health</span>
       <!-- A step below the face beside it (32px), so it doesn't crowd the bar. -->
-      <span class="text-[18px] leading-[32px] text-outline">x{view.health}</span>
+      <span class="text-[18px] leading-[32px] text-outline">x{ts.health}</span>
       <img
         src={scottFace}
         alt=""
@@ -403,8 +346,8 @@
     </p>
   </div>
   <div class="flex min-h-0 flex-1 items-center gap-4">
-    {#if boss && view.boss}
-      {@const hp = Math.max(0, boss.hp - view.boss.damage)}
+    {#if boss && ts.boss}
+      {@const hp = Math.max(0, boss.hp - ts.boss.damage)}
       <!-- The boss's image (static/<asset>), as tall as its row; hidden if
            the file is missing, leaving the name and health. Keyed by serial
            so the next boss's image never inherits the last one's hiding. -->
@@ -441,8 +384,8 @@
         <!-- The countdown is on the server's clock (now); null while
              knocked out, when nothing attacks. -->
         <p class="text-[8px] leading-[16px] text-outline">
-          {hp} / {boss.hp} HP{#if view.boss.next_attack_at}
-            · Attack in {countdown(view.boss.next_attack_at)}{/if}
+          {hp} / {boss.hp} HP{#if ts.boss.next_attack_at}
+            · Attack in {countdown(ts.boss.next_attack_at)}{/if}
         </p>
       </div>
     {:else if bosses.length > 0}
@@ -459,7 +402,7 @@
     bind:level={zoomLevel}
     markers={MAP_POINTS}
     active={markedWaypoints}
-    cooldowns={view.qr_cooldowns}
+    cooldowns={ts.qr_cooldowns}
     {now}
   />
 
@@ -590,15 +533,15 @@
 <SpellBook
   bind:open={bookOpen}
   shapes={game.shapes}
-  casts={shownCasts}
+  casts={casts}
   {selected}
   onselect={(s) => selectShape(s)}
   onclear={giveUp}
   {busy}
   {isLeader}
-  canSelect={!view.knocked_out}
-  locked={view.locked_shapes}
-  cooldownShapes={view.cooldown_shapes}
+  canSelect={!ts.knocked_out}
+  locked={ts.locked_shapes}
+  cooldownShapes={ts.cooldown_shapes}
   {message}
 />
 
@@ -617,18 +560,18 @@
   <h1>Play</h1>
 
   <p>
-    Health: <progress max={game.health} value={view.health}></progress>
-    {view.health}/{game.health}
+    Health: <progress max={game.health} value={ts.health}></progress>
+    {ts.health}/{game.health}
   </p>
-  {#if view.knocked_out}
+  {#if ts.knocked_out}
     <p style="color: red">
       <b>Knocked out.</b> Your team can't select or scan until an organiser revives
       it.
     </p>
   {/if}
 
-  <h2>Boss {view.bosses_defeated + (boss ? 1 : 0)}/{bosses.length}</h2>
-  {#if boss && view.boss}
+  <h2>Boss {ts.bosses_defeated + (boss ? 1 : 0)}/{bosses.length}</h2>
+  {#if boss && ts.boss}
     <p>
       <img
         src="/{boss.asset}"
@@ -640,14 +583,14 @@
       <b>{boss.name}</b>: {boss.description}
     </p>
     <p>
-      <progress max={boss.hp} value={boss.hp - view.boss.damage}></progress>
-      {boss.hp - view.boss.damage} / {boss.hp} HP
-      {#if view.damage_multiplier !== 1}· damage ×{view.damage_multiplier}{/if}
+      <progress max={boss.hp} value={boss.hp - ts.boss.damage}></progress>
+      {boss.hp - ts.boss.damage} / {boss.hp} HP
+      {#if ts.damage_multiplier !== 1}· damage ×{ts.damage_multiplier}{/if}
     </p>
-    {#if view.boss.next_attack_at}
+    {#if ts.boss.next_attack_at}
       <p>
         Attacks every {Math.round((boss.attack_interval_s / 60) * 10) / 10} min for
-        {boss.attack_damage}: next in <b>{countdown(view.boss.next_attack_at)}</b>
+        {boss.attack_damage}: next in <b>{countdown(ts.boss.next_attack_at)}</b>
       </p>
     {/if}
   {:else if bosses.length > 0}
@@ -660,11 +603,11 @@
   {#if !isLeader}
     <p><small>Your leader picks the type; you scan.</small></p>
   {/if}
-  {#if view.unlocked_points < game.max_pattern_points}
+  {#if ts.unlocked_points < game.max_pattern_points}
     <p>
       <small>
         Patterns of {game.locked_pattern_points}+ points unlock after defeating
-        {game.unlock_after_bosses} bosses ({view.bosses_defeated}/{game.unlock_after_bosses}).
+        {game.unlock_after_bosses} bosses ({ts.bosses_defeated}/{game.unlock_after_bosses}).
       </small>
     </p>
   {/if}
@@ -672,14 +615,14 @@
     {#each game.shapes as s (s.id)}
       <button
         disabled={busy ||
-          view.knocked_out ||
+          ts.knocked_out ||
           !isLeader ||
-          view.locked_shapes.includes(s.id)}
+          ts.locked_shapes.includes(s.id)}
         onclick={() => selectShape(s.id)}
         style:font-weight={s.id === selected ? "bold" : "normal"}
       >
-        {view.locked_shapes.includes(s.id) ? "🔒 " : ""}{s.name} ({s.points.join("/")} pts · {s.damage.min}–{s.damage.max} dmg ·
-        {s.patterns} patterns){view.shapes.includes(s.id) ? " ✓" : ""}
+        {ts.locked_shapes.includes(s.id) ? "🔒 " : ""}{s.name} ({s.points.join("/")} pts · {s.damage.min}–{s.damage.max} dmg ·
+        {s.patterns} patterns){ts.shapes.includes(s.id) ? " ✓" : ""}
       </button>
     {/each}
   </p>
@@ -704,7 +647,7 @@
   {/if}
 
   <h2>2. Scan waypoints</h2>
-  {#if view.poisoned}
+  {#if ts.poisoned}
     <p style="color: red">
       A scan doesn't match any {selectedShape?.name ?? selected} pattern, so this
       attempt can't cast.
@@ -716,7 +659,7 @@
   <p>
     <button
       onclick={openScanner}
-      disabled={!selected || view.poisoned || view.knocked_out || busy}
+      disabled={!selected || ts.poisoned || ts.knocked_out || busy}
       >Scan a QR code</button
     >
   </p>
@@ -726,11 +669,11 @@
   {/if}
 
   <h3>Stack (bottom → top)</h3>
-  {#if view.stack.length === 0}
+  {#if ts.stack.length === 0}
     <p>empty</p>
   {:else}
     <ol>
-      {#each view.stack as s (s.waypoint_id)}
+      {#each ts.stack as s (s.waypoint_id)}
         <li style:color={s.wrong ? "red" : null}>
           {s.waypoint_id} by {memberName(s.user_id)}{s.user_id === user?.id
             ? " (you)"
@@ -741,11 +684,11 @@
   {/if}
 
   <h2>Casts</h2>
-  {#if shownCasts.length === 0}
+  {#if casts.length === 0}
     <p>none yet</p>
   {:else}
     <ol>
-      {#each shownCasts as c (c.cast_at)}
+      {#each casts as c (c.cast_at)}
         <li>
           <b>{c.shape}</b>
           {c.pattern.join("-")} ({c.damage} dmg{c.boss !== null
@@ -762,10 +705,10 @@
   {/if}
 
   <h2>Progress</h2>
-  <p>Types completed: {view.shapes.length ? view.shapes.join(", ") : "none"}</p>
-  <p>Patterns completed: {view.patterns.length}</p>
+  <p>Types completed: {ts.shapes.length ? ts.shapes.join(", ") : "none"}</p>
+  <p>Patterns completed: {ts.patterns.length}</p>
   <ul>
-    {#each view.patterns as p (p.join("-"))}<li>{p.join("-")}</li>{/each}
+    {#each ts.patterns as p (p.join("-"))}<li>{p.join("-")}</li>{/each}
   </ul>
-  <p>Waypoints visited: {view.waypoints.join(", ") || "none"}</p>
+  <p>Waypoints visited: {ts.waypoints.join(", ") || "none"}</p>
 </div>
