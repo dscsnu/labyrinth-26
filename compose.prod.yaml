@@ -1,9 +1,9 @@
 # Production: the backend, its Postgres and Caddy on one Docker host. The host
-# needs only this file and a .env next to it: the backend and Caddy come from
-# Artifact Registry (images built from this repository), never built here.
+# needs only this file and a .env next to it, both written by deploy.sh (at the
+# repository root): the backend and Caddy come from Artifact Registry (images
+# CI builds from the prod branch), never built here.
 #
-#   docker compose -f compose.prod.yaml pull      # fetch IMAGE_TAG's images
-#   docker compose -f compose.prod.yaml up -d     # start, or deploy a new version
+#   ./deploy.sh                                   # deploy the newest prod build
 #   docker compose -f compose.prod.yaml ps        # backend and postgres (healthy), caddy Up
 #   docker compose -f compose.prod.yaml logs -f backend   # one line per request
 #

@@ -94,30 +94,39 @@ The load generator and the backend share the machine's CPUs, so results are cons
 
 ## Deploying
 
-The backend, its Postgres and Caddy (HTTPS and routing) run with Docker Compose on one host, the VM `labyrinth-prod` (project `labyrinth-gdg-2026`, zone `asia-south2-c`). The VM has no checkout of this repository: it runs images from Artifact Registry (`asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth`), and holds just two files, `compose.prod.yaml` and a `.env` written from Secret Manager.
+The backend, its Postgres and Caddy (HTTPS and routing) run with Docker Compose on one host, the VM `labyrinth-prod` (project `labyrinth-gdg-2026`, zone `asia-south2-c`). The VM has no checkout of this repository: it runs images from Artifact Registry (`asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth`), and holds `deploy.sh` (from the repository root), plus the `compose.prod.yaml` and `.env` that script writes, all in `/root/labyrinth`.
 
-**1. Build and push the images** (from a machine with this repository, until CI does it):
+**1. CI builds the images.** Every push to the `prod` branch runs `.github/workflows/images.yml`: it builds the backend and Caddy for `linux/amd64` and pushes both, tagged with the commit's first 7 characters and `prod`, each labelled with its commit (`org.opencontainers.image.revision`). It builds; it doesn't test, so merge to `prod` only what passed CI on `main`. It signs in to GCP with Workload Identity Federation (no key file): the pool `github`, provider `labyrinth-26`, accepts only this repository's `prod` branch, as the service account `labyrinth-ci`, which may only push to the `labyrinth` repository. Created once:
 
 ```bash
-gcloud auth configure-docker asia-south2-docker.pkg.dev        # once
-TAG=$(git rev-parse --short HEAD)
-R=asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth
-docker build --platform linux/amd64 -t $R/backend:$TAG backend   # the VM is x86: build for it from an ARM Mac too
-docker build --platform linux/amd64 -t $R/caddy:$TAG caddy
-docker push $R/backend:$TAG && docker push $R/caddy:$TAG
-gcloud compute scp compose.prod.yaml labyrinth-prod:~/labyrinth/ --zone asia-south2-c   # only when it changed
+P=labyrinth-gdg-2026; SA=labyrinth-ci@$P.iam.gserviceaccount.com
+gcloud services enable iamcredentials.googleapis.com sts.googleapis.com --project $P
+gcloud iam workload-identity-pools create github --location=global --display-name="GitHub Actions" --project $P
+gcloud iam workload-identity-pools providers create-oidc labyrinth-26 --location=global --workload-identity-pool=github \
+  --issuer-uri=https://token.actions.githubusercontent.com \
+  --attribute-mapping=google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref \
+  --attribute-condition="assertion.repository=='dscsnu/labyrinth-26' && assertion.ref=='refs/heads/prod'" --project $P
+gcloud iam service-accounts create labyrinth-ci --display-name="Labyrinth CI (image pushes)" --project $P
+gcloud artifacts repositories add-iam-policy-binding labyrinth --location=asia-south2 \
+  --member=serviceAccount:$SA --role=roles/artifactregistry.writer --project $P
+gcloud iam service-accounts add-iam-policy-binding $SA --role=roles/iam.workloadIdentityUser --project $P \
+  --member=principalSet://iam.googleapis.com/projects/351348759669/locations/global/workloadIdentityPools/github/attribute.repository/dscsnu/labyrinth-26
 ```
 
-**2. On the VM**, deploy that tag. Once beforehand: Docker with the compose plugin, and `gcloud auth configure-docker asia-south2-docker.pkg.dev` for the user that runs it. The VM's account, `labyrinth-vm`, may read the `labyrinth-*` secrets and pull from the repository, nothing else.
+**2. `deploy.sh` deploys them**, as root on the VM:
 
 ```bash
-cd ~/labyrinth
-for s in JWT_PRIVATE_KEY QR_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET ALLOWED_EMAIL_DOMAINS \
-         POSTGRES_PASSWORD FRONTEND_HOST BACKEND_HOST ACME_EMAIL; do
-  echo "$s=$(gcloud secrets versions access latest --secret=labyrinth-$s)"
-done > .env && echo "IMAGE_TAG=<TAG>" >> .env && chmod 600 .env
+/root/labyrinth/deploy.sh            # the newest prod build
+/root/labyrinth/deploy.sh 3adee6a    # a given commit's build: a rollback
+```
+
+It reads which commit the image was built from, downloads that commit's `compose.prod.yaml` from GitHub (so the stack's layout always matches its images), rewrites `.env` from Secret Manager (one `labyrinth-<NAME>` secret per value, listed in the script) plus `IMAGE_TAG`, checks the pair with `docker compose config` and swaps them in (the previous pair kept as `*.prev`), then pulls, runs `docker compose up -d`, and waits up to 90 s for the backend to report healthy. Any failure before `up` leaves the running stack and its files as they were. A changed secret reaches the backend on the next deploy. Images no container uses are deleted after a week. A deploy recreates Caddy too (its image is tagged per commit), so open event streams drop and reconnect, as phones do after any backend restart.
+
+Once beforehand, as root: Docker with the compose plugin, `gcloud auth configure-docker asia-south2-docker.pkg.dev`, and `deploy.sh` copied to `/root/labyrinth/` (again only when it changes). The VM's account, `labyrinth-vm`, may read the `labyrinth-*` secrets and pull from the repository, nothing else. Seed once, after the first deploy:
+
+```bash
+cd /root/labyrinth
 dc() { docker compose -f compose.prod.yaml "$@"; }   # shorthand for the lines below
-dc pull && dc up -d            # start; also how to deploy a new version (a new IMAGE_TAG)
 dc stop backend                # seed (refused while serving), then start again:
 dc run --rm backend seed
 dc start backend
@@ -125,7 +134,7 @@ dc ps                          # backend and postgres should say (healthy); cadd
 dc logs -f backend             # one line per request; panics at level=ERROR
 ```
 
-Compose reads `.env` on its own; a missing value stops it, naming the value. A setting changed in Secret Manager reaches the VM when `.env` is rewritten and `dc up -d` runs again. `labyrinth-JWT_PUBLIC_KEY` isn't in the list: it's the frontend's.
+Compose reads `.env` on its own; a missing value stops it, naming the value. `labyrinth-JWT_PUBLIC_KEY` isn't in the script's list: it's the frontend's.
 
 **Caddy** (`caddy/Caddyfile`) is the only thing published on the host (80 and 443, plus 443/udp for HTTP/3). It gets and renews HTTPS certificates from Let's Encrypt for two hosts and redirects HTTP to HTTPS:
 
