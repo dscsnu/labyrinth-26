@@ -47,18 +47,25 @@
         50% { opacity: 0; }
     }
 
-    /* A map marker bobbing up and down. It animates transform, which adds
-       to Tailwind's translate-* (the separate translate property), so a
-       marker's tip stays on its point. */
+    /* A map marker bobbing up and down, its gold glow swelling at the top
+       of each bob. It animates transform, which adds to Tailwind's
+       translate-* (the separate translate property), so a marker's tip
+       stays on its point. drop-shadow follows the sprite's outline. */
     --animate-wiggle: wiggle 0.8s ease-in-out infinite;
     @keyframes wiggle {
-        0%, 100% { transform: translateY(0); }
-        50% { transform: translateY(-6px); }
+        0%, 100% {
+            transform: translateY(0);
+            filter: drop-shadow(0 0 2px var(--color-gold-light));
+        }
+        50% {
+            transform: translateY(-6px);
+            filter: drop-shadow(0 0 3px var(--color-gold-light)) drop-shadow(0 0 6px var(--color-gold-light));
+        }
     }
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .animate-wiggle { animation: none; }
+    .animate-wiggle { animation: none; filter: drop-shadow(0 0 3px var(--color-gold-light)); }
 }
 
 /* A box with a 4px outline whose corners are notched, like a sprite, and
