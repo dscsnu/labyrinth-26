@@ -102,10 +102,12 @@
                 <h2 class="text-center font-display text-[32px] leading-[1] text-cyan uppercase heading-outline">Join a party</h2>
                 <label class="flex flex-col gap-2">
                     <span class="text-[8px] leading-[16px] uppercase text-outline">Party code</span>
+                    <!-- The pattern is a JS string: written plainly, Svelte would
+                         read {6} as an expression and render [0-9]6. -->
                     <input
                         name="team_id"
                         inputmode="numeric"
-                        pattern="[0-9]{6}"
+                        pattern={"[0-9]{6}"}
                         maxlength="6"
                         required
                         autocomplete="off"
