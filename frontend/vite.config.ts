@@ -1,5 +1,5 @@
 import tailwindcss from '@tailwindcss/vite';
-import adapter from '@sveltejs/adapter-auto';
+import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, loadEnv } from 'vite';
 
@@ -15,17 +15,17 @@ export default defineConfig(({ mode }) => {
 						filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 				},
 
-				// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
-				// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
-				// See https://svelte.dev/docs/kit/adapters for more information about adapters.
+				// A Node server in build/ (node build), run in production by the
+				// frontend image (Dockerfile). Static assets are precompressed
+				// (gzip, brotli), and /_app/immutable is served cacheable forever.
 				adapter: adapter()
 			})
 		],
 		server: {
 			// The browser opens the event stream at /api/events on this origin,
 			// with the labyrinth_token cookie (EventSource can't send headers).
-			// In production the shared domain's reverse proxy routes it to the
-			// backend; in dev, this does.
+			// In production Caddy routes it to the backend (caddy/Caddyfile);
+			// in dev, this does.
 			proxy: {
 				'/api/events': { target: env.BACKEND_URL, changeOrigin: true }
 			}
