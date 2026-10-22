@@ -1,10 +1,11 @@
 import { apiResponse, backendFetch } from "#lib/server/backend.ts";
-import { TeamOverviewListSchema, UserListSchema } from "#lib/types/Admin.type.ts";
+import { AdminQTEListSchema, TeamOverviewListSchema, UserListSchema } from "#lib/types/Admin.type.ts";
 import { error, fail, redirect } from "@sveltejs/kit";
 import type { Actions, PageServerLoad } from "./$types";
 
 const TeamsResponseSchema = apiResponse(TeamOverviewListSchema);
 const UsersResponseSchema = apiResponse(UserListSchema);
+const QTEsResponseSchema = apiResponse(AdminQTEListSchema);
 
 // The backend decides who's an admin, from the role in the database: the
 // session's role is as of sign-in and may be stale, so it isn't trusted here.
@@ -13,16 +14,19 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     if (!locals.user || !locals.token) redirect(303, '/');
 
     const email = url.searchParams.get('email');
-    const [teamsRes, usersRes] = await Promise.all([
+    const [teamsRes, qtesRes, usersRes] = await Promise.all([
         backendFetch('/api/admin/teams', locals.token),
+        backendFetch('/api/admin/qtes', locals.token),
         email === null ? null : backendFetch(`/api/admin/users?email=${encodeURIComponent(email)}`, locals.token),
     ]);
     if (teamsRes.status === 403) error(403, 'Admins only');
     if (!teamsRes.ok) throw new Error(`GET /api/admin/teams failed with ${teamsRes.status}`);
+    if (!qtesRes.ok) throw new Error(`GET /api/admin/qtes failed with ${qtesRes.status}`);
     if (usersRes && !usersRes.ok) throw new Error(`GET /api/admin/users failed with ${usersRes.status}`);
 
     return {
         teams: TeamsResponseSchema.parse(await teamsRes.json()).payload ?? [],
+        qtes: QTEsResponseSchema.parse(await qtesRes.json()).payload ?? [],
         email,
         users: usersRes ? UsersResponseSchema.parse(await usersRes.json()).payload ?? [] : null,
     };
@@ -66,6 +70,49 @@ export const actions: Actions = {
         const teamId = field(await request.formData(), 'team_id');
         return (await adminCall(locals.token, `/api/admin/teams/${encodeURIComponent(teamId)}`, 'DELETE'))
             ?? { done: `Deleted team ${teamId}. Its members can create or join a team.` };
+    },
+    // Gives a started team a powerup; wasted (granted false) if it already
+    // holds that kind.
+    grant: async ({ request, locals }) => {
+        const form = await request.formData();
+        const teamId = field(form, 'team_id');
+        const kind = field(form, 'kind');
+        if (!locals.token) redirect(303, '/');
+        const response = await backendFetch(
+            `/api/admin/teams/${encodeURIComponent(teamId)}/powerups/${encodeURIComponent(kind)}`, locals.token, { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return fail(response.status, { code: data.code ?? 'error', message: data.message ?? `request failed with ${response.status}` });
+        return { done: data.payload?.granted ? `Gave team ${teamId} ${kind}.` : `Team ${teamId} already holds ${kind}: nothing given.` };
+    },
+    // Sends a draft quiz to every phone.
+    startQte: async ({ request, locals }) => {
+        const id = field(await request.formData(), 'qte_id');
+        return (await adminCall(locals.token, `/api/admin/qtes/${encodeURIComponent(id)}/start`, 'POST'))
+            ?? { done: `Quiz ${id} started.` };
+    },
+    // Closes the open quiz now, revealing the answer.
+    endQte: async ({ request, locals }) => {
+        const id = field(await request.formData(), 'qte_id');
+        return (await adminCall(locals.token, `/api/admin/qtes/${encodeURIComponent(id)}/end`, 'POST'))
+            ?? { done: `Quiz ${id} ended.` };
+    },
+    // A new quiz: options one per line, the right one by its number (from
+    // 1), saved as a draft or started at once. The backend checks it.
+    createQte: async ({ request, locals }) => {
+        const form = await request.formData();
+        const window = field(form, 'window_s');
+        const start = form.get('start') === 'on';
+        return (await adminCall(locals.token, '/api/admin/qtes', 'POST', {
+            kind: 'quiz',
+            powerup: field(form, 'powerup'),
+            quiz: {
+                question: field(form, 'question').trim(),
+                options: field(form, 'options').split('\n').map((o) => o.trim()).filter(Boolean),
+                correct_option: Number(field(form, 'correct')) - 1,
+            },
+            window_s: window ? Number(window) : undefined,
+            start,
+        })) ?? { done: start ? 'Quiz started.' : 'Quiz saved as a draft.' };
     },
     // Removes a member; new_leader is required (by the backend) when the
     // member leads the team.

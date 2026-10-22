@@ -4,7 +4,8 @@
     import type { PageProps } from "./$types";
 
     let { data, form }: PageProps = $props();
-    let { user, teams, email, users } = $derived(data);
+    let { user, teams, qtes, email, users } = $derived(data);
+    const POWERUPS = ["damage_multiplier", "heart", "short_qr_cooldown", "instant_cast"];
 
     let filter = $state("");
     let knockedOnly = $state(false);
@@ -57,6 +58,8 @@
                 · {t.game.cast_count} casts
                 {#if t.game.cooldown_class}· class cooldown {t.game.cooldown_class}{/if}
                 {#if t.game.qr_cooldowns.length}· QR cooling {t.game.qr_cooldowns.map((c) => c.waypoint_id).join(", ")}{/if}
+                · powerups held: {t.game.powerups.held.join(", ") || "none"}
+                {#if t.game.powerups.active.length}· running: {t.game.powerups.active.map((a) => a.kind).join(", ")}{/if}
             </p>
         {/if}
         <div>
@@ -68,6 +71,17 @@
                 <form method="POST" action="?/reset" use:enhance={confirmFirst(`Reset ${t.team.name}'s cooldowns?`)} style="display: inline">
                     <input type="hidden" name="team_id" value={t.team.id} />
                     <button disabled={!t.game?.cooldown_class && !t.game?.qr_cooldowns.length}>reset cooldowns</button>
+                </form>
+            {/if}
+            {#if t.team.status === "IN_GAME"}
+                <form method="POST" action="?/grant" use:enhance style="display: inline">
+                    <input type="hidden" name="team_id" value={t.team.id} />
+                    <select name="kind">
+                        {#each POWERUPS as k (k)}
+                            <option value={k} disabled={t.game?.powerups.held.includes(k)}>{k}</option>
+                        {/each}
+                    </select>
+                    <button>give powerup</button>
                 </form>
             {/if}
             <form method="POST" action="?/delete" use:enhance={confirmFirst(`Delete ${t.team.name} (${t.team.id}) and all its progress? This can't be undone.`)} style="display: inline">
@@ -107,6 +121,55 @@
 {:else}
     <p>No teams.</p>
 {/each}
+
+<h1>Quizzes</h1>
+
+<p>One open at a time. Every player on /play gets it; a team's right answer gives it the quiz's powerup (unless it already holds one).</p>
+
+{#each qtes as q (q.id)}
+    <section>
+        <p>
+            <b>#{q.id}</b> · {q.status} · wins {q.powerup}
+            {#if q.status !== "draft"}· {q.stats.answered} answered, {q.stats.correct} right, {q.stats.granted} given{/if}
+        </p>
+        {#if q.quiz}
+            <p>
+                {q.quiz.question}
+                <br /><small>{q.quiz.options.map((o, i) => (i === q.quiz!.correct_option ? `✓ ${o}` : o)).join(" · ")}</small>
+            </p>
+        {/if}
+        {#if q.status === "draft"}
+            <form method="POST" action="?/startQte" use:enhance={confirmFirst(`Send quiz #${q.id} to every player now?`)}>
+                <input type="hidden" name="qte_id" value={q.id} />
+                <button>start (send to everyone)</button>
+            </form>
+        {:else if q.status === "open"}
+            <form method="POST" action="?/endQte" use:enhance>
+                <input type="hidden" name="qte_id" value={q.id} />
+                <button>end now (reveal answer)</button>
+            </form>
+        {/if}
+    </section>
+{:else}
+    <p>No quizzes.</p>
+{/each}
+
+<h2>New quiz</h2>
+<form method="POST" action="?/createQte" use:enhance>
+    <p><label>question <input name="question" required size="60" /></label></p>
+    <p><label>options, one per line<br /><textarea name="options" required rows="4" cols="40"></textarea></label></p>
+    <p><label>right option's number <input name="correct" type="number" min="1" value="1" required /></label></p>
+    <p>
+        <label>wins
+            <select name="powerup">
+                {#each POWERUPS as k (k)}<option value={k}>{k}</option>{/each}
+            </select>
+        </label>
+        <label>open for (seconds, default 30, at most 300) <input name="window_s" type="number" min="1" max="300" /></label>
+    </p>
+    <p><label><input type="checkbox" name="start" /> start now (otherwise save as a draft)</label></p>
+    <button>create</button>
+</form>
 
 <h1>Users and roles</h1>
 
