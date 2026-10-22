@@ -52,6 +52,23 @@ const adminCall = async (token: string | null, path: string, method: string, bod
 // field reads one form field as a string.
 const field = (form: FormData, name: string) => String(form.get(name) ?? '');
 
+// Creates a quiz from a form's question, options (one per line), correct
+// (the right option's number, from 1), powerup and window_s.
+const createQuiz = (token: string | null, form: FormData, start: boolean) => {
+    const window = field(form, 'window_s');
+    return adminCall(token, '/api/admin/qtes', 'POST', {
+        kind: 'quiz',
+        powerup: field(form, 'powerup'),
+        quiz: {
+            question: field(form, 'question').trim(),
+            options: field(form, 'options').split('\n').map((o) => o.trim()).filter(Boolean),
+            correct_option: Number(field(form, 'correct')) - 1,
+        },
+        window_s: window ? Number(window) : undefined,
+        start,
+    });
+}
+
 export const actions: Actions = {
     // Health back to game.health and the boss's attack clock restarted.
     revive: async ({ request, locals }) => {
@@ -71,12 +88,6 @@ export const actions: Actions = {
         return (await adminCall(locals.token, `/api/admin/teams/${encodeURIComponent(teamId)}`, 'DELETE'))
             ?? { done: `Deleted team ${teamId}. Its members can create or join a team.` };
     },
-    // Sends a draft quiz to every phone.
-    startQte: async ({ request, locals }) => {
-        const id = field(await request.formData(), 'qte_id');
-        return (await adminCall(locals.token, `/api/admin/qtes/${encodeURIComponent(id)}/start`, 'POST'))
-            ?? { done: `Quiz ${id} started.` };
-    },
     // Closes the open quiz now, revealing the answer.
     endQte: async ({ request, locals }) => {
         const id = field(await request.formData(), 'qte_id');
@@ -87,19 +98,21 @@ export const actions: Actions = {
     // 1), saved as a draft or started at once. The backend checks it.
     createQte: async ({ request, locals }) => {
         const form = await request.formData();
-        const window = field(form, 'window_s');
         const start = form.get('start') === 'on';
-        return (await adminCall(locals.token, '/api/admin/qtes', 'POST', {
-            kind: 'quiz',
-            powerup: field(form, 'powerup'),
-            quiz: {
-                question: field(form, 'question').trim(),
-                options: field(form, 'options').split('\n').map((o) => o.trim()).filter(Boolean),
-                correct_option: Number(field(form, 'correct')) - 1,
-            },
-            window_s: window ? Number(window) : undefined,
-            start,
-        })) ?? { done: start ? 'Quiz started.' : 'Quiz saved as a draft.' };
+        return (await createQuiz(locals.token, form, start)) ?? { done: start ? 'Quiz started.' : 'Quiz saved as a draft.' };
+    },
+    // Sends a listed quiz out for the prize picked: a draft keeping its
+    // prize is started as it is; otherwise (a closed one, or a new prize)
+    // a copy is, since a quiz runs once and its prize can't be edited.
+    sendQte: async ({ request, locals }) => {
+        const form = await request.formData();
+        const id = field(form, 'qte_id');
+        if (field(form, 'status') === 'draft' && field(form, 'powerup') === field(form, 'original_powerup')) {
+            return (await adminCall(locals.token, `/api/admin/qtes/${encodeURIComponent(id)}/start`, 'POST'))
+                ?? { done: `Quiz ${id} started.` };
+        }
+        return (await createQuiz(locals.token, form, true))
+            ?? { done: `Quiz ${id} sent as a new quiz, for ${field(form, 'powerup')}.` };
     },
     // Removes a member; new_leader is required (by the backend) when the
     // member leads the team.

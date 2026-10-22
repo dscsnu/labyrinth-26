@@ -132,27 +132,29 @@
                 <br /><small>{q.quiz.options.map((o, i) => (i === q.quiz!.correct_option ? `✓ ${o}` : o)).join(" · ")}</small>
             </p>
         {/if}
-        {#if q.status === "draft"}
-            <form method="POST" action="?/startQte" use:enhance={confirmFirst(`Send quiz #${q.id} to every player now?`)}>
-                <input type="hidden" name="qte_id" value={q.id} />
-                <button>start (send to everyone)</button>
-            </form>
-        {:else if q.status === "open"}
+        {#if q.status === "open"}
             <form method="POST" action="?/endQte" use:enhance>
                 <input type="hidden" name="qte_id" value={q.id} />
                 <button>end now (reveal answer)</button>
             </form>
         {:else if q.quiz}
-            <!-- A quiz runs once, so sending it again makes a copy and
-                 starts that (the create action, filled in from this one). -->
-            <form method="POST" action="?/createQte" use:enhance={confirmFirst(`Send quiz #${q.id} to every player again (as a new quiz)?`)}>
+            <!-- Send it to every player, for the prize picked here. A quiz's
+                 prize can't be edited and it runs once, so a closed one, or a
+                 draft with a new prize, goes out as a copy (sendQte). -->
+            <form method="POST" action="?/sendQte" use:enhance={confirmFirst(`Send quiz #${q.id} to every player now?`)}>
+                <input type="hidden" name="qte_id" value={q.id} />
+                <input type="hidden" name="status" value={q.status} />
+                <input type="hidden" name="original_powerup" value={q.powerup} />
                 <input type="hidden" name="question" value={q.quiz.question} />
                 <input type="hidden" name="options" value={q.quiz.options.join("\n")} />
                 <input type="hidden" name="correct" value={q.quiz.correct_option + 1} />
-                <input type="hidden" name="powerup" value={q.powerup} />
                 <input type="hidden" name="window_s" value={q.window_s ?? ""} />
-                <input type="hidden" name="start" value="on" />
-                <button>send again</button>
+                <label>prize
+                    <select name="powerup">
+                        {#each POWERUPS as k (k)}<option value={k} selected={k === q.powerup}>{k}</option>{/each}
+                    </select>
+                </label>
+                <button>{q.status === "draft" ? "start (send to everyone)" : "send again"}</button>
             </form>
         {/if}
     </section>
