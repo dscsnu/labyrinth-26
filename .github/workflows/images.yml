@@ -1,0 +1,91 @@
+# Production images: every push to the prod branch builds the backend and
+# Caddy images and pushes them to Artifact Registry, tagged with the commit
+# (its first 7 characters) and "prod". Deploying them is deploy.sh's job, run
+# on the VM (backend/README.md, "Deploying"). Nothing here touches the VM.
+#
+# Merge to prod only what passed CI on main: this workflow builds, it doesn't
+# test.
+name: images
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch: # rebuild prod's head by hand (Actions → images → Run)
+
+# Pushes to prod build one at a time, in order, so "prod" ends on the newest.
+concurrency:
+  group: images-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # the GitHub OIDC token Workload Identity Federation exchanges
+
+env:
+  REGISTRY: asia-south2-docker.pkg.dev
+  REPOSITORY: asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth
+
+jobs:
+  images:
+    name: build and push (backend, caddy)
+    runs-on: ubuntu-latest
+    # The pool's provider accepts only this repository's prod branch, so a run
+    # dispatched on any other branch fails to authenticate.
+    if: github.ref == 'refs/heads/prod'
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tag
+        name: image tag (the commit's first 7 characters)
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # No key file: GitHub's OIDC token is exchanged for a short-lived token
+      # of labyrinth-ci, which may only push to the labyrinth repository.
+      - id: gcp
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/351348759669/locations/global/workloadIdentityPools/github/providers/labyrinth-26
+          service_account: labyrinth-ci@labyrinth-gdg-2026.iam.gserviceaccount.com
+          token_format: access_token
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.gcp.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Caddy first: deploy.sh finds the commit to run from backend:prod, so
+      # backend:prod moves only once both images of that commit exist. The
+      # revision label is how deploy.sh maps "prod" back to the commit.
+      - name: caddy
+        uses: docker/build-push-action@v7
+        with:
+          context: caddy
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REPOSITORY }}/caddy:${{ steps.tag.outputs.tag }}
+            ${{ env.REPOSITORY }}/caddy:prod
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: backend
+        uses: docker/build-push-action@v7
+        with:
+          context: backend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REPOSITORY }}/backend:${{ steps.tag.outputs.tag }}
+            ${{ env.REPOSITORY }}/backend:prod
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          # Layers cached in GitHub's cache between runs: a code change
+          # rebuilds from the go build step, not from go mod download.
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: summary
+        run: |
+          echo "Pushed backend and caddy \`${{ steps.tag.outputs.tag }}\` (also \`prod\`)." >> "$GITHUB_STEP_SUMMARY"
+          echo "Deploy on the VM: \`/root/labyrinth/deploy.sh\` (or \`deploy.sh ${{ steps.tag.outputs.tag }}\`)." >> "$GITHUB_STEP_SUMMARY"
