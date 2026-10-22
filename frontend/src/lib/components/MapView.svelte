@@ -38,15 +38,23 @@
         const c = cooldowns.find((c) => c.waypoint_id === waypoint);
         return c ? Math.max(0, Math.ceil((Date.parse(c.until) - now) / 1000)) : 0;
     };
-    // The attempt's path so far: each segment joins a scanned point to the
-    // next in scan order (active is the stack's order), in map pixels. One
-    // into a wrong scan is red.
+    // The attempt's outline so far, in map pixels: the scanned points in
+    // order of angle around their centre, so it never crosses itself (the
+    // backend matches the set of points, not the scan order), closed from 3
+    // points on. A segment touching a wrong scan is red.
     let segments = $derived.by(() => {
         const pts = active.flatMap((id) => {
             const m = markers.find((m) => m.waypoint === id);
             return m ? [{ ...m, wrong: wrong.includes(id) }] : [];
         });
-        return pts.slice(1).map((b, i) => ({ a: pts[i], b }));
+        const cx = pts.reduce((t, p) => t + p.x, 0) / pts.length;
+        const cy = pts.reduce((t, p) => t + p.y, 0) / pts.length;
+        pts.sort((p, q) => Math.atan2(p.y - cy, p.x - cx) - Math.atan2(q.y - cy, q.x - cx));
+        const n = pts.length < 3 ? pts.length - 1 : pts.length;
+        return Array.from({ length: Math.max(0, n) }, (_, i) => {
+            const a = pts[i], b = pts[(i + 1) % pts.length];
+            return { a, b, wrong: a.wrong || b.wrong };
+        });
     });
     const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     let zoom = $derived(ZOOM_LEVELS[Math.max(0, Math.min(level, ZOOM_LEVELS.length - 1))]);
@@ -135,9 +143,9 @@
             aria-hidden="true"
             class="pointer-events-none absolute inset-0 h-full w-full"
         >
-            {#each segments as { a, b } (`${a.waypoint}-${b.waypoint}`)}
+            {#each segments as { a, b, wrong } (`${a.waypoint}-${b.waypoint}`)}
                 <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="var(--color-ink)" stroke-width="8" stroke-linecap="round" vector-effect="non-scaling-stroke" />
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={b.wrong ? "var(--color-danger)" : "var(--color-gold-light)"} stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={wrong ? "var(--color-danger)" : "var(--color-gold-light)"} stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke" />
             {/each}
         </svg>
         <!-- Each marker's bottom-centre (the arrow's tip) on its point. The
