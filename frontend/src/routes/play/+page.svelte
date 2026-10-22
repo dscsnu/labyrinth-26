@@ -402,6 +402,7 @@
     bind:level={zoomLevel}
     markers={MAP_POINTS}
     active={markedWaypoints}
+    wrong={ts.stack.filter((s) => s.wrong).map((s) => s.waypoint_id)}
     cooldowns={ts.qr_cooldowns}
     {now}
   />

@@ -12,6 +12,7 @@
 
     // markers: the points to mark, each drawn with its tip on its spot.
     // active: waypoint IDs whose markers wiggle (the team's scanned points).
+    // wrong: those of them whose scan fit no pattern; the path into one is red.
     // cooldowns: team_state.qr_cooldowns, the points the team can't scan
     // yet; each is dimmed with a countdown until its until passes, by now
     // (the page's server clock, in ms). An expired entry is ignored, as the
@@ -20,12 +21,14 @@
         level = $bindable(0),
         markers = [],
         active = [],
+        wrong = [],
         cooldowns = [],
         now = Date.now(),
     }: {
         level?: number;
         markers?: MapPoint[];
         active?: string[];
+        wrong?: string[];
         cooldowns?: { waypoint_id: string; until: string }[];
         now?: number;
     } = $props();
@@ -35,15 +38,16 @@
         const c = cooldowns.find((c) => c.waypoint_id === waypoint);
         return c ? Math.max(0, Math.ceil((Date.parse(c.until) - now) / 1000)) : 0;
     };
-    // The scanned points in scan order (active is the stack's order), joined
-    // as the attempt's path so far: "x,y x,y …" in map pixels.
-    let path = $derived(
-        active
-            .map((id) => markers.find((m) => m.waypoint === id))
-            .filter((m) => m !== undefined)
-            .map((m) => `${m.x},${m.y}`)
-            .join(" "),
-    );
+    // The attempt's path so far: each segment joins a scanned point to the
+    // next in scan order (active is the stack's order), in map pixels. One
+    // into a wrong scan is red.
+    let segments = $derived.by(() => {
+        const pts = active.flatMap((id) => {
+            const m = markers.find((m) => m.waypoint === id);
+            return m ? [{ ...m, wrong: wrong.includes(id) }] : [];
+        });
+        return pts.slice(1).map((b, i) => ({ a: pts[i], b }));
+    });
     const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     let zoom = $derived(ZOOM_LEVELS[Math.max(0, Math.min(level, ZOOM_LEVELS.length - 1))]);
 
@@ -131,8 +135,10 @@
             aria-hidden="true"
             class="pointer-events-none absolute inset-0 h-full w-full"
         >
-            <polyline points={path} fill="none" stroke="var(--color-ink)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
-            <polyline points={path} fill="none" stroke="var(--color-gold-light)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+            {#each segments as { a, b } (`${a.waypoint}-${b.waypoint}`)}
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="var(--color-ink)" stroke-width="8" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={b.wrong ? "var(--color-danger)" : "var(--color-gold-light)"} stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+            {/each}
         </svg>
         <!-- Each marker's bottom-centre (the arrow's tip) on its point. The
              same size at every zoom; taps pass through to the map. A point
