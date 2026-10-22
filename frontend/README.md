@@ -37,7 +37,7 @@ There's no time limit on an attempt. Time is only displayed: each stack scan sho
 Tests: `bun run test` (runs `bun test src`, including `src/lib/game/serverClock.test.ts`: 4 tests of `ServerClock`).
 
 ### The event stream
-Both `/team` and `/play` open `new EventSource("/api/events")` on this app's own origin (one each; a single shared connection for the app isn't done yet); the browser sends the httpOnly `labyrinth_token` cookie, which the backend accepts on that one route. In production the shared domain's reverse proxy routes `/api/events` to the backend; in dev, Vite's dev server does (`vite.config.ts`, `server.proxy`, to `BACKEND_URL`), so restart `bun run dev` after changing `BACKEND_URL`. There's no SvelteKit route for the stream: SvelteKit never copies it. The events (`hello`, `team`, `no_team`, `team_state`), what triggers each, ordering, the `: ping` heartbeat and reconnection are documented in [`backend/internal/server/README.md`, "The event stream"](../backend/internal/server/README.md#the-event-stream). `EventSource` reconnects by itself, and the first events after each connect are full snapshots, so the pages need no catch-up logic.
+Both `/team` and `/play` open `new EventSource("/api/events")` on this app's own origin (one each; a single shared connection for the app isn't done yet); the browser sends the httpOnly `labyrinth_token` cookie, which the backend accepts on that one route. In production Caddy routes `/api/events` to the backend (`caddy/Caddyfile`); in dev, Vite's dev server does (`vite.config.ts`, `server.proxy`, to `BACKEND_URL`), so restart `bun run dev` after changing `BACKEND_URL`. There's no SvelteKit route for the stream: SvelteKit never copies it. The events (`hello`, `team`, `no_team`, `team_state`), what triggers each, ordering, the `: ping` heartbeat and reconnection are documented in [`backend/internal/server/README.md`, "The event stream"](../backend/internal/server/README.md#the-event-stream). `EventSource` reconnects by itself, and the first events after each connect are full snapshots, so the pages need no catch-up logic.
 
 **Every event's data is an envelope** `{"type", "message"}`: `type` is why it was sent (`snapshot`, `spell_cast`, `boss_defeated`, `member_joined`, …), `message` the whole resource. The pages parse it with `envelope(schema)` from `src/lib/types/Live.type.ts` and render from `message`, using `type` only for moments (the `boss_defeated`, `boss_attacked`, `knocked_out` and `revived` notices). `hello`'s clock is `message.server_time`. `team` and `team_state` carry `version` (`VersionSchema`), compared with `isNewer`.
 
@@ -97,3 +97,16 @@ For staff: a screen at a waypoint showing its rotating QR. `src/routes/qr/+page.
 ## The `/test-scan` page
 
 A dev/test harness for the QR flow. `src/routes/test-scan/+page.svelte` opens the camera (`getUserMedia`), decodes a QR every ~250 ms (`jsqr`), and posts the token to `POST /qr/verify`; the backend verifies the signature and freshness and returns the waypoint, or `invalid_qr` / `qr_expired`. It changes nothing (no team state), so it's usable by any signed-in user.
+
+## Deploying
+
+Production runs the app from an image (`Dockerfile`): Bun installs and builds with `@sveltejs/adapter-node`, and Node 24 runs `node build` as uid 1000, on port 3000, behind Caddy. CI builds it on every push to `prod`, and `deploy.sh` runs it in `compose.prod.yaml` with the rest of the stack (`backend/README.md`, "Deploying"). Every variable in `src/env.js` is read when the server starts, never built in, so the same image runs anywhere; compose sets them:
+
+| Variable | Production value | Used for |
+|---|---|---|
+| `BACKEND_URL` | `https://<BACKEND_HOST>` | the browser's sign-in link |
+| `BACKEND_INTERNAL_URL` | `http://backend:3000` | the server's own calls to the backend, on the Docker network (unset in dev: `BACKEND_URL` is used) |
+| `JWT_PUBLIC_KEY` | the `labyrinth-JWT_PUBLIC_KEY` secret | verifying sign-ins locally |
+| `ADDRESS_HEADER`, `XFF_DEPTH` | `X-Forwarded-For`, `1` | the player's address, through Caddy |
+
+There's no origin setting: adapter-node takes the origin from the `Host` header Caddy passes through, with `https`, which is what SvelteKit's CSRF check on form actions compares. `GET /healthz` answers `ok` for the container's healthcheck. Locally: `BACKEND_URL=… JWT_PUBLIC_KEY=… bun run build`, then `node build` (the build needs both set, with any value: they aren't kept).

@@ -1,0 +1,10 @@
+# Never in the image: local installs and build output (rebuilt inside), and
+# any .env (the server reads its settings at run time).
+node_modules
+.svelte-kit
+build
+.env
+.env.*
+!.env.example
+.vscode
+.DS_Store
