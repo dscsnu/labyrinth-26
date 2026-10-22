@@ -142,6 +142,18 @@
                 <input type="hidden" name="qte_id" value={q.id} />
                 <button>end now (reveal answer)</button>
             </form>
+        {:else if q.quiz}
+            <!-- A quiz runs once, so sending it again makes a copy and
+                 starts that (the create action, filled in from this one). -->
+            <form method="POST" action="?/createQte" use:enhance={confirmFirst(`Send quiz #${q.id} to every player again (as a new quiz)?`)}>
+                <input type="hidden" name="question" value={q.quiz.question} />
+                <input type="hidden" name="options" value={q.quiz.options.join("\n")} />
+                <input type="hidden" name="correct" value={q.quiz.correct_option + 1} />
+                <input type="hidden" name="powerup" value={q.powerup} />
+                <input type="hidden" name="window_s" value={q.window_s ?? ""} />
+                <input type="hidden" name="start" value="on" />
+                <button>send again</button>
+            </form>
         {/if}
     </section>
 {:else}
