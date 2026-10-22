@@ -35,6 +35,15 @@
         const c = cooldowns.find((c) => c.waypoint_id === waypoint);
         return c ? Math.max(0, Math.ceil((Date.parse(c.until) - now) / 1000)) : 0;
     };
+    // The scanned points in scan order (active is the stack's order), joined
+    // as the attempt's path so far: "x,y x,y …" in map pixels.
+    let path = $derived(
+        active
+            .map((id) => markers.find((m) => m.waypoint === id))
+            .filter((m) => m !== undefined)
+            .map((m) => `${m.x},${m.y}`)
+            .join(" "),
+    );
     const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     let zoom = $derived(ZOOM_LEVELS[Math.max(0, Math.min(level, ZOOM_LEVELS.length - 1))]);
 
@@ -113,6 +122,18 @@
             onload={centre}
             class="block h-full w-full [image-rendering:pixelated]"
         />
+        <!-- The path through the points scanned so far, under the markers.
+             In map pixels, stretched with the map; the stroke stays the
+             same width on screen at every zoom. -->
+        <svg
+            viewBox="0 0 {MAP_SIZE.width} {MAP_SIZE.height}"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+            class="pointer-events-none absolute inset-0 h-full w-full"
+        >
+            <polyline points={path} fill="none" stroke="var(--color-ink)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+            <polyline points={path} fill="none" stroke="var(--color-gold-light)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" />
+        </svg>
         <!-- Each marker's bottom-centre (the arrow's tip) on its point. The
              same size at every zoom; taps pass through to the map. A point
              on QR cooldown is dimmed, its countdown above the arrow. -->
