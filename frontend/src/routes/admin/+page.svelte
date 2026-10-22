@@ -70,7 +70,10 @@
                 </form>
                 <form method="POST" action="?/reset" use:enhance={confirmFirst(`Reset ${t.team.name}'s cooldowns?`)} style="display: inline">
                     <input type="hidden" name="team_id" value={t.team.id} />
-                    <button disabled={!t.game?.cooldown_class && !t.game?.qr_cooldowns.length}>reset cooldowns</button>
+                    <!-- Never disabled: this page doesn't update live, so a cast
+                         since it loaded wouldn't show; with nothing cooling, the
+                         reset does nothing. -->
+                    <button>reset cooldowns</button>
                 </form>
             {/if}
             {#if t.team.status === "IN_GAME"}
