@@ -1,17 +1,19 @@
-# Production: the backend, its Postgres and Caddy on one Docker host. The host
-# needs only this file and a .env next to it, both written by deploy.sh (at the
-# repository root): the backend and Caddy come from Artifact Registry (images
-# CI builds from the prod branch), never built here.
+# Production: the backend, its Postgres, the SvelteKit frontend and Caddy on
+# one Docker host. The host needs only this file and a .env next to it, both
+# written by deploy.sh (at the repository root): the backend, frontend and
+# Caddy come from Artifact Registry (images CI builds from the prod branch),
+# never built here.
 #
 #   ./deploy.sh                                   # deploy the newest prod build
-#   docker compose -f compose.prod.yaml ps        # backend and postgres (healthy), caddy Up
+#   docker compose -f compose.prod.yaml ps        # backend, frontend, postgres (healthy), caddy Up
 #   docker compose -f compose.prod.yaml logs -f backend   # one line per request
 #
 # .env holds every setting, written from Secret Manager (the labyrinth-*
 # secrets; see backend/README.md, "Deploying"), plus IMAGE_TAG: the version to
 # run. Compose reads it on its own: it fills the ${...} below (a missing value
 # stops compose, naming it) and is the backend's environment. DATABASE_URL,
-# PORT, PUBLIC_URL and FRONTEND_URL are set below, not read from it.
+# PORT, PUBLIC_URL and FRONTEND_URL are set below, not read from it. The
+# frontend gets only the values it needs, listed below, never the file.
 #
 # Every service restarts whenever they exit (a crash, a lost instance lock, the
 # host rebooting), with no retry cap: a backend that starts while the old
@@ -25,9 +27,8 @@
 # Only Caddy is published on the host (80 and 443): it serves HTTPS for
 # FRONTEND_HOST (the frontend, plus /api/events to the backend) and
 # BACKEND_HOST (every backend route); see caddy/Caddyfile in the repository. Two networks:
-# "labyrinth", where the backend is http://backend:3000 and which Caddy and
-# the frontend join (as services in this file, or from another compose file:
-# networks: { labyrinth: { external: true } }); and "db", internal, where
+# "labyrinth", where the backend is http://backend:3000 and the frontend
+# http://frontend:3000, with Caddy in front of both; and "db", internal, where
 # only the backend reaches Postgres (postgres:5432). Nothing on "labyrinth"
 # can reach Postgres, and Postgres has no route out.
 # psql and pg_dump run inside the Postgres container:
@@ -150,6 +151,39 @@ services:
       retries: 3
       start_period: 30s
 
+  frontend:
+    # The SvelteKit app (frontend/Dockerfile), a Node server behind Caddy.
+    image: asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth/frontend:${IMAGE_TAG:?set IMAGE_TAG in .env}
+    restart: unless-stopped
+    logging: *logging
+    # No env_file: only what it needs, so the backend's secrets never reach it.
+    environment:
+      # The browser's sign-in link; the server's own calls stay on the Docker
+      # network (BACKEND_INTERNAL_URL), not out through Caddy.
+      BACKEND_URL: https://${BACKEND_HOST:?set BACKEND_HOST in .env}
+      BACKEND_INTERNAL_URL: http://backend:3000
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?set JWT_PUBLIC_KEY in .env}
+      # No origin setting: adapter-node builds it from the Host header (which
+      # Caddy passes through) and https, which is what SvelteKit's CSRF check
+      # on form actions (/team, /admin) compares against. The player's
+      # address comes from Caddy's one hop.
+      ADDRESS_HEADER: X-Forwarded-For
+      XFF_DEPTH: "1"
+    # Least privilege, as the backend: it runs as uid 1000 and writes no files.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [labyrinth]
+    depends_on: [backend]
+    # SIGTERM, then adapter-node finishes open requests before Docker kills it.
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
   caddy:
     # The official Caddy with caddy/Caddyfile baked in (caddy/Dockerfile).
     image: asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth/caddy:${IMAGE_TAG:?set IMAGE_TAG in .env}
@@ -170,7 +204,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks: [labyrinth]
-    depends_on: [backend]
+    depends_on: [backend, frontend]
     # Each event stream holds two connections through Caddy (phone side and
     # backend side): 10,000 players need about 20,000 open files.
     ulimits:
