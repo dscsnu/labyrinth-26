@@ -177,8 +177,10 @@ services:
     depends_on: [backend]
     # SIGTERM, then adapter-node finishes open requests before Docker kills it.
     stop_grace_period: 20s
+    # 127.0.0.1, not localhost: that resolves to ::1 first here, and Node
+    # listens on IPv4 (0.0.0.0) only.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3
