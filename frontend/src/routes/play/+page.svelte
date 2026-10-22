@@ -11,9 +11,11 @@
   import { ServerClock } from "#lib/game/serverClock.ts";
   import {
     CastLogSchema,
+    QTESchema,
     ScanResultSchema,
     TeamStateSchema,
     type Cast,
+    type QTE,
     type TeamState,
   } from "#lib/types/Game.type.ts";
   import { envelope, isNewer } from "#lib/types/Live.type.ts";
@@ -105,13 +107,30 @@
   let busy = $state(false);
   let message = $state<{ ok: boolean; text: string } | null>(null);
   // A short notice over the map, gone after 5 s (e.g. the spell just picked).
-  let toast = $state<string | null>(null);
+  let toast = $state<{ ok: boolean; text: string } | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  const showToast = (text: string) => {
+  const showToast = (text: string, ok = true) => {
     clearTimeout(toastTimer);
-    toast = text;
+    toast = { ok, text };
     toastTimer = setTimeout(() => (toast = null), 5000);
   };
+
+  // Powerups' names, by kind (the backend's wire names).
+  const POWERUPS: Record<string, string> = {
+    damage_multiplier: "Damage boost",
+    heart: "Heart",
+    short_qr_cooldown: "Quick cooldown",
+    instant_cast: "Instant cast",
+  };
+  const powerupName = (kind: string) => POWERUPS[kind] ?? kind;
+
+  // The quick-time event: the open quiz, or the one just closed with its
+  // answer, from the game-wide qte event; null when there's none. hiddenQTE
+  // is the one the player closed, so it stays closed until the next.
+  let qte = $state<QTE | null>(null);
+  let hiddenQTE = $state<number | null>(null);
+  // The team's answer to it, if any (any member answers, once per team).
+  let qteAnswer = $derived(qte && ts.qte?.qte_id === qte.id ? ts.qte : null);
 
   onMount(() => {
     const ticker = setInterval(() => (now = clock.now()), 1000);
@@ -139,6 +158,7 @@
         JSON.parse(e.data),
       );
       const fresh = isNewer(ts.version, next.version);
+      const heldBefore = ts.powerups.held;
       observe(next);
       // Moments, on every phone: a teammate's cast that finished a boss,
       // and the boss's attacks.
@@ -160,7 +180,15 @@
         };
       } else if (type === "revived") {
         message = { ok: true, text: "Revived: full health" };
+      } else if (type === "powerup_granted") {
+        const got = next.powerups.held.find((k) => !heldBefore.includes(k));
+        if (got) showToast(`Powerup: ${powerupName(got)}!`);
+      } else if (type === "powerup_ended") {
+        showToast("Quick cooldown ended");
       }
+    });
+    events.addEventListener("qte", (e) => {
+      qte = envelope(QTESchema.nullable()).parse(JSON.parse(e.data)).message;
     });
     // /play needs a team: without one (never had one, or it's gone) the
     // player belongs on /team, where they can create or join one.
@@ -185,6 +213,15 @@
       "That point was just used in a cast. It opens again once its QR cooldown ends.",
     shape_on_cooldown: "You can't cast the same class twice in a row.",
     network_error: "No connection: check your signal and try again.",
+    knocked_out: "Knocked out: an organiser must revive your team.",
+    not_leader: "Only the team leader can do that.",
+    powerup_not_held: "Your team doesn't have that powerup.",
+    powerup_active: "That powerup is already running.",
+    full_health: "Already at full health.",
+    unknown_pattern: "Those points don't make a spell.",
+    pattern_locked: "That spell is locked until your team defeats more bosses.",
+    qte_closed: "Too late: the quiz has closed.",
+    qte_already_answered: "Your team has already answered.",
   };
   const refused = (json: { code?: string; message?: string }) => ({
     ok: false,
@@ -235,6 +272,65 @@
     if (!res.ok) return (message = refused(json));
     observe(TeamStateSchema.parse(json.payload));
     message = { ok: true, text: "selection cleared" };
+  };
+
+  // Powerups: everyone sees them; only the leader uses one, with two taps
+  // (the first arms the button for 3 s), so one isn't wasted by a stray tap.
+  let confirming = $state<string | null>(null);
+  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
+  const tapPowerup = (kind: string) => {
+    if (busy) return;
+    if (kind === "instant_cast") {
+      picked = [];
+      picking = true;
+      return;
+    }
+    if (confirming !== kind) {
+      clearTimeout(confirmTimer);
+      confirming = kind;
+      confirmTimer = setTimeout(() => (confirming = null), 3000);
+      return;
+    }
+    confirming = null;
+    void usePowerup(kind);
+  };
+  const usePowerup = async (kind: string, body?: unknown) => {
+    busy = true;
+    const { res, json } = await call(`/play/powerups/${kind}`, "POST", body ?? {});
+    busy = false;
+    if (!res.ok) return showToast(refused(json).text, false);
+    const next = TeamStateSchema.parse(json.payload);
+    observe(next);
+    const lc = next.last_cast;
+    showToast(
+      kind === "instant_cast" && lc
+        ? `Instant cast: ${lc.dealt} dmg${lc.boss !== null ? ` to ${bossName(lc.boss)}` : ""}${lc.defeated_boss ? ", defeated!" : ""}`
+        : `${powerupName(kind)} used`,
+    );
+  };
+
+  // Instant cast: the leader taps the pattern's points on the map (they
+  // wiggle and are outlined as picked), then casts. Cooldowns don't apply,
+  // so any point can be picked; at most the team's unlocked_points.
+  let picking = $state(false);
+  let picked = $state<string[]>([]);
+  const pick = (id: string) => {
+    if (picked.includes(id)) picked = picked.filter((p) => p !== id);
+    else if (picked.length < ts.unlocked_points) picked = [...picked, id];
+  };
+  const instantCast = async () => {
+    await usePowerup("instant_cast", { pattern: picked });
+    if (!ts.powerups.held.includes("instant_cast")) picking = false;
+  };
+
+  // Answering the quiz, for the team.
+  const answerQTE = async (option: number) => {
+    if (!qte) return;
+    busy = true;
+    const { res, json } = await call(`/play/qte/${qte.id}`, "POST", { option });
+    busy = false;
+    if (!res.ok) return showToast(refused(json).text, false);
+    observe(TeamStateSchema.parse(json.payload));
   };
 
   // The QR scanner: the camera, read with jsQR every 250 ms (as /test-scan
@@ -415,11 +511,72 @@
   <MapView
     bind:level={zoomLevel}
     markers={MAP_POINTS}
-    active={markedWaypoints}
-    wrong={ts.stack.filter((s) => s.wrong).map((s) => s.waypoint_id)}
+    active={picking ? picked : markedWaypoints}
+    wrong={picking ? [] : ts.stack.filter((s) => s.wrong).map((s) => s.waypoint_id)}
+    onpick={picking ? pick : undefined}
     cooldowns={ts.qr_cooldowns}
     {now}
   />
+
+  <!-- Instant cast: while the leader picks the pattern's points, a bar
+       near the top of the map counts them, with Cast and Cancel; below
+       where toasts appear, so a refusal never covers it. -->
+  {#if picking}
+    <div
+      class="pixel-box absolute inset-x-4 top-16 z-10 mx-auto flex max-w-sm flex-col gap-2 bg-ink p-3 font-pixel text-[8px] leading-[16px] text-paper uppercase"
+    >
+      <p>Instant cast: tap the spell's points ({picked.length} picked, up to {ts.unlocked_points}). Cooldowns don't apply.</p>
+      <div class="flex gap-2">
+        <button
+          type="button"
+          disabled={busy || picked.length < 2}
+          onclick={instantCast}
+          class="pixel-box flex-1 bg-gold px-2 py-1 text-ink uppercase active:pixel-box-pressed disabled:opacity-40"
+        >
+          {busy ? "Casting…" : "Cast"}
+        </button>
+        <button
+          type="button"
+          onclick={() => (picking = false)}
+          class="pixel-box flex-1 bg-panel px-2 py-1 uppercase active:pixel-box-pressed"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Powerups, bottom left above the scanner: the ones running (with time
+       left), then the ones held, which only the leader can tap (twice: the
+       first tap asks "Use?"). The open quiz, if hidden, reopens from here. -->
+  <div class="absolute bottom-28 left-4 flex max-w-[45vw] flex-col items-start gap-2 font-pixel text-[8px] leading-[16px] uppercase">
+    {#if qte && qte.status === "open" && hiddenQTE === qte.id}
+      <button
+        type="button"
+        onclick={() => (hiddenQTE = null)}
+        class="pixel-box animate-pulse bg-pink px-2 py-1 text-white active:pixel-box-pressed"
+      >
+        Quiz! {countdown(qte.ends_at)}
+      </button>
+    {/if}
+    {#each ts.powerups.active as a (a.kind)}
+      <span class="pixel-box bg-cyan px-2 py-1 text-ink">
+        {powerupName(a.kind)}: {a.until ? countdown(a.until) : "next spell"}
+      </span>
+    {/each}
+    {#each ts.powerups.held as kind (kind)}
+      <button
+        type="button"
+        disabled={!isLeader || busy || ts.knocked_out}
+        onclick={() => tapPowerup(kind)}
+        class="pixel-box px-2 py-1 active:pixel-box-pressed disabled:opacity-70 {confirming === kind
+          ? 'bg-pink text-white'
+          : 'bg-gold-light text-ink'}"
+      >
+        {confirming === kind ? `Use ${powerupName(kind)}?` : powerupName(kind)}
+      </button>
+    {/each}
+  </div>
 
   <!-- QR scanner button, bottom left: opens the camera. -->
   <button
@@ -548,11 +705,78 @@
 {#if toast}
   <p
     role="status"
-    class="pixel-box fixed inset-x-4 top-[calc(25dvh+1rem)] z-40 mx-auto max-w-sm bg-ink px-3 py-2 text-center font-pixel text-[8px] leading-[16px] text-gold-light uppercase"
+    class="pixel-box fixed inset-x-4 top-[calc(25dvh+1rem)] z-50 mx-auto max-w-sm bg-ink px-3 py-2 text-center font-pixel text-[8px] leading-[16px] uppercase {toast.ok
+      ? 'text-gold-light'
+      : 'text-pink'}"
     transition:fade={{ duration: 150 }}
   >
-    {toast}
+    {toast.text}
   </p>
+{/if}
+
+<!-- The quiz: over everything while it's open, for every player; any
+     member answers for the team, once. When it closes, the right answer is
+     shown. Hide keeps it running behind the "Quiz!" button. -->
+{#if qte?.quiz && hiddenQTE !== qte.id}
+  {@const quiz = qte.quiz}
+  {@const open = qte.status === "open"}
+  <div
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="qte-question"
+    class="fixed inset-0 z-40 flex items-center justify-center bg-ink/70 p-4 font-pixel text-[8px] leading-[16px] uppercase"
+    transition:fade={{ duration: 150 }}
+  >
+    <div class="pixel-box flex max-h-full w-full max-w-sm flex-col gap-3 overflow-y-auto bg-paper p-4 text-ink">
+      <p class="flex justify-between gap-2">
+        <span>Quiz · win: {powerupName(qte.powerup)}</span>
+        <span>{open ? countdown(qte.ends_at) : "Closed"}</span>
+      </p>
+      <h2 id="qte-question" class="text-[16px] leading-[24px] normal-case">{quiz.question}</h2>
+      <div class="flex flex-col gap-2">
+        {#each quiz.options as option, i (i)}
+          {@const chosen = qteAnswer?.option === i}
+          {@const right = quiz.correct_option === i}
+          <button
+            type="button"
+            disabled={!open || !!qteAnswer || busy || ts.knocked_out}
+            onclick={() => answerQTE(i)}
+            class="pixel-box px-3 py-2 text-left text-paper normal-case active:pixel-box-pressed {right ||
+            (chosen && qteAnswer?.correct)
+              ? 'bg-go'
+              : chosen
+                ? 'bg-danger'
+                : 'bg-panel'}"
+            class:opacity-50={(!open || qteAnswer) && !chosen && !right}
+          >
+            {option}{chosen ? " ← your team" : ""}
+          </button>
+        {/each}
+      </div>
+      <p aria-live="polite">
+        {#if qteAnswer}
+          {qteAnswer.correct
+            ? qteAnswer.granted
+              ? `Right! ${memberName(qteAnswer.answered_by)} won ${powerupName(qte.powerup)}.`
+              : `Right! But your team already holds ${powerupName(qte.powerup)}.`
+            : `Wrong answer from ${memberName(qteAnswer.answered_by)}.`}
+        {:else if !open}
+          Time's up.
+        {:else if ts.knocked_out}
+          Knocked out teams can't answer.
+        {:else}
+          Anyone on your team can answer, once.
+        {/if}
+      </p>
+      <button
+        type="button"
+        onclick={() => (hiddenQTE = qte!.id)}
+        class="pixel-box bg-ink px-3 py-2 text-paper active:pixel-box-pressed"
+      >
+        {open ? "Hide" : "Close"}
+      </button>
+    </div>
+  </div>
 {/if}
 
 <SpellBook

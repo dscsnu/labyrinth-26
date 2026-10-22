@@ -13,6 +13,8 @@
     // markers: the points to mark, each drawn with its tip on its spot.
     // active: waypoint IDs whose markers wiggle (the team's scanned points).
     // wrong: those of them whose scan fit no pattern; the path into one is red.
+    // onpick: when set, every point is a button that calls it with its
+    // waypoint (picking an instant cast's pattern).
     // cooldowns: team_state.qr_cooldowns, the points the team can't scan
     // yet; each is dimmed with a countdown until its until passes, by now
     // (the page's server clock, in ms). An expired entry is ignored, as the
@@ -22,6 +24,7 @@
         markers = [],
         active = [],
         wrong = [],
+        onpick,
         cooldowns = [],
         now = Date.now(),
     }: {
@@ -29,6 +32,7 @@
         markers?: MapPoint[];
         active?: string[];
         wrong?: string[];
+        onpick?: (waypoint: string) => void;
         cooldowns?: { waypoint_id: string; until: string }[];
         now?: number;
     } = $props();
@@ -71,6 +75,9 @@
 
     const down = (e: PointerEvent) => {
         if (e.pointerType !== "mouse" || e.button !== 0 || !viewport) return;
+        // A press on a point's button (picking) is a click, not a drag:
+        // capturing it would send the click to the map instead.
+        if ((e.target as Element).closest("button")) return;
         drag = { x: e.clientX, y: e.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
         viewport.setPointerCapture(e.pointerId);
     };
@@ -166,6 +173,18 @@
                 class:grayscale={left > 0}
                 class="pointer-events-none absolute h-4 w-4 max-w-none -translate-x-1/2 -translate-y-full [image-rendering:pixelated]"
             />
+            {#if onpick}
+                <!-- A 44px target centred on the arrow. -->
+                <button
+                    type="button"
+                    aria-label="Pick {m.name}"
+                    aria-pressed={active.includes(m.waypoint)}
+                    onclick={() => onpick(m.waypoint)}
+                    style:left="{(m.x / MAP_SIZE.width) * 100}%"
+                    style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                    class="absolute h-11 w-11 -translate-x-1/2 -translate-y-[calc(50%+8px)] rounded-full border-2 border-dashed border-gold-light"
+                ></button>
+            {/if}
             {#if left > 0}
                 <span
                     aria-hidden="true"

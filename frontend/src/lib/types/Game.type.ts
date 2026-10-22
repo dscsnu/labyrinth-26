@@ -152,6 +152,25 @@ export const ScanResultSchema = z.object({
     state: TeamStateSchema,
 });
 
+// The game-wide "qte" event and GET /api/qte: the open quick-time event, or
+// the one just closed (with its answer), or null when there's none.
+export const QTESchema = z.object({
+    id: z.number(),
+    kind: z.string(),
+    status: z.enum(['open', 'closed']),
+    // The powerup kind a right answer earns.
+    powerup: z.string(),
+    started_at: z.string(),
+    ends_at: z.string(),
+    quiz: z.object({
+        question: z.string(),
+        options: z.array(z.string()),
+        // The right option's index once closed; null while open.
+        correct_option: z.number().nullable(),
+    }).optional(),
+});
+
+export type QTE = z.infer<typeof QTESchema>;
 export type DamageRange = z.infer<typeof DamageRangeSchema>;
 export type GameShape = z.infer<typeof GameShapeSchema>;
 export type Game = z.infer<typeof GameSchema>;
