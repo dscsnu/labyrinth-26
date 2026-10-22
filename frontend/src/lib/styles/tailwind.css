@@ -54,18 +54,27 @@
     --animate-wiggle: wiggle 0.8s ease-in-out infinite;
     @keyframes wiggle {
         0%, 100% {
-            transform: translateY(0);
-            filter: drop-shadow(0 0 2px var(--color-gold-light));
+            transform: translateY(0) scale(1.25);
+            filter: drop-shadow(0 0 2px white) drop-shadow(0 0 6px var(--color-gold-light));
         }
         50% {
-            transform: translateY(-6px);
-            filter: drop-shadow(0 0 3px var(--color-gold-light)) drop-shadow(0 0 6px var(--color-gold-light));
+            transform: translateY(-10px) scale(1.5);
+            filter: drop-shadow(0 0 2px white) drop-shadow(0 0 8px var(--color-gold-light))
+                drop-shadow(0 0 16px var(--color-gold));
         }
     }
 }
 
+/* Scale from the arrow's tip, so it grows up off its point. */
+.animate-wiggle { transform-origin: bottom; }
+
 @media (prefers-reduced-motion: reduce) {
-    .animate-wiggle { animation: none; filter: drop-shadow(0 0 3px var(--color-gold-light)); }
+    .animate-wiggle {
+        animation: none;
+        transform: scale(1.5);
+        filter: drop-shadow(0 0 2px white) drop-shadow(0 0 8px var(--color-gold-light))
+            drop-shadow(0 0 16px var(--color-gold));
+    }
 }
 
 /* A box with a 4px outline whose corners are notched, like a sprite, and
