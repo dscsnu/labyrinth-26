@@ -171,7 +171,7 @@
         >
             {#if shape}
                 {#key page}
-                    <section in:fly={{ x: dir * 48, duration: 200 }}>
+                    <section class="mx-auto max-w-md" in:fly={{ x: dir * 48, duration: 200 }}>
                         <!-- The title, centred across the page. -->
                         <h3 class="flex flex-wrap items-center justify-center gap-2 text-center text-[24px] leading-[32px] uppercase">
                             {shape.name}
@@ -182,10 +182,12 @@
                                 <span class="bg-ink px-2 text-[8px] leading-[16px] text-paper">Cooldown</span>
                             {/if}
                         </h3>
-                        <!-- Where the spell's shape will be drawn: a square half
-                             the paper's width, centred. A placeholder for now. -->
+                        <!-- Where the spell's shape will be drawn: a centred square,
+                             half the page's width but at most a quarter of the
+                             screen's height, so the details below stay in view on a
+                             wide or short screen. A placeholder for now. -->
                         <div
-                            class="mx-auto mt-4 flex aspect-square w-1/2 items-center justify-center border-4 border-dashed border-ink/30 p-2 text-center text-[8px] leading-[16px] opacity-60"
+                            class="mx-auto mt-4 flex aspect-square w-[min(50%,25dvh)] items-center justify-center border-4 border-dashed border-ink/30 p-2 text-center text-[8px] leading-[16px] opacity-60"
                         >
                             After backend frontend integration, I will add the spell shapes
                         </div>
@@ -202,7 +204,7 @@
                             <ul class="text-[8px] leading-[24px]">
                                 {#each known as p (p.pattern.join("-"))}
                                     <li class="flex justify-between gap-4">
-                                        <span>{p.pattern.join(" › ")}</span>
+                                        <span class="min-w-0 break-words">{p.pattern.join(" › ")}</span>
                                         <span class="shrink-0">{p.damage} dmg{p.times > 1 ? ` ×${p.times}` : ""}</span>
                                     </li>
                                 {/each}
@@ -210,49 +212,53 @@
                         {:else}
                             <p class="text-[8px] leading-[24px]">None yet. Cast one to write it here.</p>
                         {/if}
-                        <!-- The leader's button: clear on the selected spell's
-                             page (both quadrilateral pages: the backend selects
-                             the shape, not the band), select on the others,
-                             disabled while another spell is selected. -->
-                        {#if isLeader}
-                            {@const isSelected = shape.shapeId === selected}
-                            {@const isLocked = locked.includes(shape.shapeId)}
-                            {@const isCooling = cooldownShapes.includes(shape.shapeId)}
-                            <div class="mt-6 flex flex-col gap-2">
-                                {#if isSelected}
-                                    <button type="button" disabled={busy || !canSelect} onclick={onclear} class="{navButton} w-full text-[8px] leading-[16px]">
-                                        Clear selection
-                                    </button>
-                                {:else}
-                                    <button
-                                        type="button"
-                                        disabled={busy || !canSelect || selected !== null || isLocked || isCooling}
-                                        onclick={() => onselect(shape.shapeId)}
-                                        class="{navButton} w-full text-[8px] leading-[16px]"
-                                    >
-                                        Select Spell
-                                    </button>
-                                {/if}
-                                {#if !canSelect}
-                                    <p class="text-[8px] leading-[16px] uppercase opacity-60">Knocked out: an organiser must revive your team.</p>
-                                {:else if isLocked && !isSelected}
-                                    <p class="text-[8px] leading-[16px] uppercase opacity-60">Locked until your team defeats more bosses.</p>
-                                {:else if isCooling && !isSelected}
-                                    <p class="text-[8px] leading-[16px] uppercase opacity-60">Cooldown: cast a spell of another class first.</p>
-                                {/if}
-                                {#if message}
-                                    <p aria-live="polite" class="text-[8px] leading-[16px] uppercase" class:text-pink={!message.ok} class:text-cyan={message.ok}>
-                                        {message.text}
-                                    </p>
-                                {/if}
-                            </div>
-                        {/if}
                     </section>
                 {/key}
             {:else}
                 <p class="text-[8px] leading-[16px] uppercase">No spells loaded.</p>
             {/if}
         </div>
+
+        <!-- The leader's button, pinned under the page so it's never
+             scrolled out of view: clear on the selected spell's page (both
+             quadrilateral pages: the backend selects the shape, not the
+             band), select on the others, disabled while another spell is
+             selected. -->
+        {#if isLeader && shape}
+            {@const isSelected = shape.shapeId === selected}
+            {@const isLocked = locked.includes(shape.shapeId)}
+            {@const isCooling = cooldownShapes.includes(shape.shapeId)}
+            <div class="border-t-4 border-ink px-4 py-3">
+                <div class="mx-auto flex max-w-md flex-col gap-2">
+                    {#if isSelected}
+                        <button type="button" disabled={busy || !canSelect} onclick={onclear} class="{navButton} w-full text-[8px] leading-[16px]">
+                            Clear selection
+                        </button>
+                    {:else}
+                        <button
+                            type="button"
+                            disabled={busy || !canSelect || selected !== null || isLocked || isCooling}
+                            onclick={() => onselect(shape.shapeId)}
+                            class="{navButton} w-full text-[8px] leading-[16px]"
+                        >
+                            Select Spell
+                        </button>
+                    {/if}
+                    {#if !canSelect}
+                        <p class="text-[8px] leading-[16px] uppercase opacity-60">Knocked out: an organiser must revive your team.</p>
+                    {:else if isLocked && !isSelected}
+                        <p class="text-[8px] leading-[16px] uppercase opacity-60">Locked until your team defeats more bosses.</p>
+                    {:else if isCooling && !isSelected}
+                        <p class="text-[8px] leading-[16px] uppercase opacity-60">Cooldown: cast a spell of another class first.</p>
+                    {/if}
+                    {#if message}
+                        <p aria-live="polite" class="text-[8px] leading-[16px] uppercase" class:text-pink={!message.ok} class:text-cyan={message.ok}>
+                            {message.text}
+                        </p>
+                    {/if}
+                </div>
+            </div>
+        {/if}
 
         <!-- Previous page (left), close (middle), next page (right). -->
         <footer class="grid grid-cols-3 items-center border-t-4 border-ink px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">

@@ -22,6 +22,7 @@
   import { goto } from "$app/navigation";
   import jsQR from "jsqr";
   import { onMount, tick, untrack } from "svelte";
+  import { fade } from "svelte/transition";
   import type { PageProps } from "./$types";
 
   let { data }: PageProps = $props();
@@ -103,6 +104,14 @@
   let selectedShape = $derived(game.shapes.find((s) => s.id === selected));
   let busy = $state(false);
   let message = $state<{ ok: boolean; text: string } | null>(null);
+  // A short notice over the map, gone after 5 s (e.g. the spell just picked).
+  let toast = $state<string | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  const showToast = (text: string) => {
+    clearTimeout(toastTimer);
+    toast = text;
+    toastTimer = setTimeout(() => (toast = null), 5000);
+  };
 
   onMount(() => {
     const ticker = setInterval(() => (now = clock.now()), 1000);
@@ -161,6 +170,7 @@
     });
     return () => {
       clearInterval(ticker);
+      clearTimeout(toastTimer);
       events.close();
       closeScanner();
     };
@@ -205,9 +215,13 @@
     busy = false;
     if (!res.ok) return (message = refused(json));
     observe(TeamStateSchema.parse(json.payload));
-    message = restart
-      ? { ok: true, text: "attempt restarted: every scan cleared" }
-      : { ok: true, text: `selected ${shape}: stack purged` };
+    if (restart) {
+      message = { ok: true, text: "attempt restarted: every scan cleared" };
+      return;
+    }
+    // Picked from the book: close it and say what was picked.
+    bookOpen = false;
+    showToast(`${game.shapes.find((s) => s.id === shape)?.name ?? shape} selected`);
   };
 
   // Restarting is reselecting the same type: the backend purges every scan,
@@ -529,6 +543,16 @@
       {busy ? "Checking…" : (message?.text ?? "Point the camera at the point's QR code.")}
     </p>
   </div>
+{/if}
+
+{#if toast}
+  <p
+    role="status"
+    class="pixel-box fixed inset-x-4 top-[calc(25dvh+1rem)] z-40 mx-auto max-w-sm bg-ink px-3 py-2 text-center font-pixel text-[8px] leading-[16px] text-gold-light uppercase"
+    transition:fade={{ duration: 150 }}
+  >
+    {toast}
+  </p>
 {/if}
 
 <SpellBook
