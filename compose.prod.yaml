@@ -20,12 +20,14 @@
 # Exactly one backend: never scale this service. A deploy (up -d --build)
 # stops the old container before starting the new one, as it must.
 #
-# Nothing is published on the host. Two networks: "labyrinth", where the
-# backend is http://backend:3000 and which a reverse proxy or the frontend
-# joins to reach it (as a service in this file, or from another compose
-# file: networks: { labyrinth: { external: true } }); and "db", internal,
-# where only the backend reaches Postgres (postgres:5432). Nothing on
-# "labyrinth" can reach Postgres, and Postgres has no route out.
+# Only Caddy is published on the host (80 and 443): it serves HTTPS for
+# FRONTEND_HOST (the frontend, plus /api/events to the backend) and
+# BACKEND_HOST (every backend route); see caddy/Caddyfile. Two networks:
+# "labyrinth", where the backend is http://backend:3000 and which Caddy and
+# the frontend join (as services in this file, or from another compose file:
+# networks: { labyrinth: { external: true } }); and "db", internal, where
+# only the backend reaches Postgres (postgres:5432). Nothing on "labyrinth"
+# can reach Postgres, and Postgres has no route out.
 # psql and pg_dump run inside the Postgres container:
 #   docker compose -f compose.prod.yaml --env-file backend/.env exec postgres psql -U labyrinth
 name: labyrinth-26-prod
@@ -142,5 +144,45 @@ services:
       retries: 3
       start_period: 30s
 
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      FRONTEND_HOST: ${FRONTEND_HOST:?set FRONTEND_HOST in backend/.env and pass --env-file backend/.env}
+      BACKEND_HOST: ${BACKEND_HOST:?set BACKEND_HOST in backend/.env and pass --env-file backend/.env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in backend/.env and pass --env-file backend/.env}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The certificates. Must persist: Let's Encrypt allows only 5 duplicate
+      # certificates a week, so losing them on every recreate could leave the
+      # site without HTTPS for days.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [labyrinth]
+    depends_on: [backend]
+    # Each event stream holds two connections through Caddy (phone side and
+    # backend side): 10,000 players need about 20,000 open files.
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+    # Least privilege: only what binding 80/443 needs, and a read-only root
+    # (state lives in the volumes above).
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    # Longer than the Caddyfile's grace_period (10 s), so Caddy closes its
+    # connections itself before Docker kills it.
+    stop_grace_period: 20s
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

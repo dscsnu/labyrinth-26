@@ -1,0 +1,29 @@
+# Labyrinth's reverse proxy (the caddy service in compose.prod.yaml). Caddy
+# obtains and renews the HTTPS certificates for both hosts itself (Let's
+# Encrypt) and redirects HTTP to HTTPS. The hosts and contact email come from
+# the environment: FRONTEND_HOST, BACKEND_HOST and ACME_EMAIL.
+{
+	email {$ACME_EMAIL}
+	# Event streams never end on their own: on shutdown, give connections 10 s,
+	# then close them (phones reconnect by themselves).
+	grace_period 10s
+}
+
+# The SvelteKit app. The browser opens the live event stream on this origin
+# (with its login cookie), so /api/events goes straight to the backend,
+# flushed as written: no buffering, no compression.
+{$FRONTEND_HOST} {
+	handle /api/events* {
+		reverse_proxy backend:3000 {
+			flush_interval -1
+		}
+	}
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
+
+# The backend: every route, public (sign-in, the API, /health, /docs).
+{$BACKEND_HOST} {
+	reverse_proxy backend:3000
+}
