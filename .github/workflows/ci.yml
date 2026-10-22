@@ -98,15 +98,16 @@ jobs:
           POSTGRES_USER: t
           POSTGRES_PASSWORD: t
           POSTGRES_DB: t
+        # Any free host port, not a fixed one: a fixed port fails to bind
+        # when the runner already has it in use. The test step reads the
+        # one Docker picked.
         ports:
-          - 55432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U t"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 20
-    env:
-      TEST_DATABASE_URL: postgres://t:t@localhost:55432/t?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -119,6 +120,8 @@ jobs:
       # next step can check nothing was skipped (a skip here usually means
       # TEST_DATABASE_URL didn't reach the tests).
       - name: race tests ×3 (${{ matrix.dir }})
+        env:
+          TEST_DATABASE_URL: postgres://t:t@localhost:${{ job.services.postgres.ports['5432'] }}/t?sslmode=disable
         run: go test -race -count=3 -timeout 20m -v ./${{ matrix.dir }}/... 2>&1 | tee test.log; exit "${PIPESTATUS[0]}"
         shell: bash
 
