@@ -41,12 +41,10 @@
         return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     };
 
-    const ensureKey = async (hex: string): Promise<CryptoKey> => {
-        if (!hmacKey) {
-            hmacKey = await crypto.subtle.importKey('raw', hexToBytes(hex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-        }
-        return hmacKey;
-    };
+    // Each waypoint has its own key, so it's imported on every show: a key
+    // kept from the last waypoint would sign tokens the backend rejects.
+    const importKey = (hex: string): Promise<CryptoKey> =>
+        crypto.subtle.importKey('raw', hexToBytes(hex), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
 
     const sign = async (key: CryptoKey, payload: string): Promise<string> => {
         const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
@@ -78,7 +76,7 @@
         }
         message = null;
         offset = info.server_time - Math.floor(Date.now() / 1000);
-        await ensureKey(info.key);
+        hmacKey = await importKey(info.key);
 
         if (rotator) clearInterval(rotator);
         await renderNext();
