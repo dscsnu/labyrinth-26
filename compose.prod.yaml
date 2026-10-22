@@ -1,35 +1,37 @@
-# Production: the backend and its Postgres on one Docker host. Run from the
-# repository root:
+# Production: the backend, its Postgres and Caddy on one Docker host. The host
+# needs only this file and a .env next to it: the backend and Caddy come from
+# Artifact Registry (images built from this repository), never built here.
 #
-#   docker compose -f compose.prod.yaml --env-file backend/.env up -d --build   # start, or deploy a new version
-#   docker compose -f compose.prod.yaml --env-file backend/.env logs -f backend # one line per request
-#   docker compose -f compose.prod.yaml --env-file backend/.env ps              # health of both
+#   docker compose -f compose.prod.yaml pull      # fetch IMAGE_TAG's images
+#   docker compose -f compose.prod.yaml up -d     # start, or deploy a new version
+#   docker compose -f compose.prod.yaml ps        # backend and postgres (healthy), caddy Up
+#   docker compose -f compose.prod.yaml logs -f backend   # one line per request
 #
-# Secrets come from backend/.env (see backend/.env.example), plus
-# POSTGRES_PASSWORD (URL-safe: openssl rand -hex 24). --env-file is what fills
-# in ${POSTGRES_PASSWORD} below; without it compose stops with "set
-# POSTGRES_PASSWORD". DATABASE_URL and PORT in backend/.env are ignored:
-# they're set below for the container.
+# .env holds every setting, written from Secret Manager (the labyrinth-*
+# secrets; see backend/README.md, "Deploying"), plus IMAGE_TAG: the version to
+# run. Compose reads it on its own: it fills the ${...} below (a missing value
+# stops compose, naming it) and is the backend's environment. DATABASE_URL,
+# PORT, PUBLIC_URL and FRONTEND_URL are set below, not read from it.
 #
-# Both services restart whenever they exit (a crash, a lost instance lock, the
+# Every service restarts whenever they exit (a crash, a lost instance lock, the
 # host rebooting), with no retry cap: a backend that starts while the old
 # one's lock is still held refuses, exits, and succeeds a retry later. Docker
 # waits longer between each retry (doubling, up to a minute), so after a long
 # Postgres outage the backend may take up to a minute to come back.
 #
-# Exactly one backend: never scale this service. A deploy (up -d --build)
-# stops the old container before starting the new one, as it must.
+# Exactly one backend: never scale this service. A deploy (up -d with a new
+# IMAGE_TAG) stops the old container before starting the new one, as it must.
 #
 # Only Caddy is published on the host (80 and 443): it serves HTTPS for
 # FRONTEND_HOST (the frontend, plus /api/events to the backend) and
-# BACKEND_HOST (every backend route); see caddy/Caddyfile. Two networks:
+# BACKEND_HOST (every backend route); see caddy/Caddyfile in the repository. Two networks:
 # "labyrinth", where the backend is http://backend:3000 and which Caddy and
 # the frontend join (as services in this file, or from another compose file:
 # networks: { labyrinth: { external: true } }); and "db", internal, where
 # only the backend reaches Postgres (postgres:5432). Nothing on "labyrinth"
 # can reach Postgres, and Postgres has no route out.
 # psql and pg_dump run inside the Postgres container:
-#   docker compose -f compose.prod.yaml --env-file backend/.env exec postgres psql -U labyrinth
+#   docker compose -f compose.prod.yaml exec postgres psql -U labyrinth
 name: labyrinth-26-prod
 
 # Every container's logs, rotated: 100 MB files, the oldest deleted once there
@@ -60,7 +62,7 @@ services:
     logging: *logging
     environment:
       POSTGRES_USER: labyrinth
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in backend/.env and pass --env-file backend/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: labyrinth
     networks: [db]
     volumes:
@@ -104,11 +106,15 @@ services:
       retries: 15
 
   backend:
-    build: ./backend
+    image: asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth/backend:${IMAGE_TAG:?set IMAGE_TAG in .env}
     restart: unless-stopped
     logging: *logging
-    env_file: backend/.env
+    env_file: .env
     environment:
+      # The public URLs, from the same hosts Caddy serves: each domain is set
+      # once, in .env.
+      PUBLIC_URL: https://${BACKEND_HOST:?set BACKEND_HOST in .env}
+      FRONTEND_URL: https://${FRONTEND_HOST:?set FRONTEND_HOST in .env}
       # pool_max_conns: pgx's default is the CPU count (min 4), so 4 on the
       # c4-standard-4. 16 leaves room for write bursts, well under
       # Postgres's max_connections (50).
@@ -145,7 +151,8 @@ services:
       start_period: 30s
 
   caddy:
-    image: caddy:2.11.7-alpine
+    # The official Caddy with caddy/Caddyfile baked in (caddy/Dockerfile).
+    image: asia-south2-docker.pkg.dev/labyrinth-gdg-2026/labyrinth/caddy:${IMAGE_TAG:?set IMAGE_TAG in .env}
     restart: unless-stopped
     logging: *logging
     ports:
@@ -153,11 +160,10 @@ services:
       - "443:443"
       - "443:443/udp" # HTTP/3
     environment:
-      FRONTEND_HOST: ${FRONTEND_HOST:?set FRONTEND_HOST in backend/.env and pass --env-file backend/.env}
-      BACKEND_HOST: ${BACKEND_HOST:?set BACKEND_HOST in backend/.env and pass --env-file backend/.env}
-      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in backend/.env and pass --env-file backend/.env}
+      FRONTEND_HOST: ${FRONTEND_HOST:?set FRONTEND_HOST in .env}
+      BACKEND_HOST: ${BACKEND_HOST:?set BACKEND_HOST in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # The certificates. Must persist: Let's Encrypt allows only 5 duplicate
       # certificates a week, so losing them on every recreate could leave the
       # site without HTTPS for days.
