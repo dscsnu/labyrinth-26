@@ -1,14 +1,15 @@
 <script lang="ts">
+    import SpellFigure from "#lib/components/SpellFigure.svelte";
     import type { Cast, GameShape } from "#lib/types/Game.type.ts";
     import { untrack } from "svelte";
     import { fade, fly } from "svelte/transition";
 
     // The spell book: a sheet of paper that slides up over 90% of the screen.
-    // Each shape is a page, fewest points first: its rules (points, damage
-    // range, how many patterns), then the patterns the team has discovered,
-    // from the cast log, so it fills in live as anyone on the team casts. A
+    // Each shape is a page, fewest points first: its shape and rules (points,
+    // damage range, and how many of its patterns the team has found, from
+    // the cast log, so it counts up live as anyone on the team casts). A
     // shape split into damage bands (VARIANTS) gets a tab per band on its
-    // page, each with its own rules and discoveries. The arrows at the
+    // page, each with its own rules and count. The arrows at the
     // bottom turn the pages; close is between them. The leader also gets a
     // button on each page to select its spell, or clear the selection on the
     // selected one's page; the book only raises onselect/onclear, and the
@@ -48,17 +49,14 @@
         message?: { ok: boolean; text: string } | null;
     } = $props();
 
-    // Each shape's discovered patterns, first cast first: the waypoints, the
-    // spell's damage and how many times the team has cast it.
+    // Each shape's discovered patterns, once each: the spell's damage, which
+    // says its band.
     let discovered = $derived.by(() => {
-        const byShape = new Map<string, Map<string, { pattern: string[]; damage: number; times: number }>>();
-        for (const c of [...casts].reverse()) {
+        const byShape = new Map<string, Map<string, { damage: number }>>();
+        for (const c of casts) {
             const patterns = byShape.get(c.shape) ?? new Map();
             byShape.set(c.shape, patterns);
-            const key = c.pattern.join("-");
-            const known = patterns.get(key);
-            if (known) known.times++;
-            else patterns.set(key, { pattern: c.pattern, damage: c.damage, times: 1 });
+            patterns.set(c.pattern.join("-"), { damage: c.damage });
         }
         return new Map([...byShape].map(([shape, patterns]) => [shape, [...patterns.values()]]));
     });
@@ -105,6 +103,22 @@
                 return { shapeId: s.id, name: s.name, points: s.points, tabs };
             }),
     );
+
+    // Where a spell's vertices are drawn, on SpellFigure's 32×32 grid: a
+    // regular polygon of its fewest points, round the centre, pointing up
+    // when odd and sitting flat when even (a level line, a square, a
+    // flat-topped hexagon). A concave quadrilateral is a dart instead, its
+    // third vertex pushed in towards the first.
+    const figure = (p: Page, t: Tab | undefined): [number, number][] => {
+        if (p.shapeId === "quadrilateral" && t?.name === "Concave")
+            return [[16, 5], [27, 27], [16, 19], [5, 27]];
+        const n = Math.min(...p.points);
+        const start = -Math.PI / 2 + (n % 2 === 0 ? Math.PI / n : 0);
+        return Array.from({ length: n }, (_, i): [number, number] => {
+            const a = start + (i * 2 * Math.PI) / n;
+            return [Math.round(16 + 11 * Math.cos(a)), Math.round(16 + 11 * Math.sin(a))];
+        });
+    };
 
     // The page shown (an index into pages), and which way the last turn
     // went, so the new page slides in from that side; and its tab, the
@@ -196,7 +210,7 @@
                             {/if}
                         </h3>
                         <!-- A shape's bands as tabs: same spell, same select
-                             button, each its own damage and discoveries. -->
+                             button, each its own damage and found count. -->
                         {#if shape.tabs.length > 1}
                             <div role="tablist" aria-label="{shape.name} types" class="mt-4 flex justify-center gap-2">
                                 {#each shape.tabs as t, i (t.name)}
@@ -214,14 +228,17 @@
                                 {/each}
                             </div>
                         {/if}
-                        <!-- Where the spell's shape will be drawn: a centred square,
+                        <!-- The spell's shape (the open tab's): a centred square,
                              half the page's width but at most a quarter of the
                              screen's height, so the details below stay in view on a
-                             wide or short screen. A placeholder for now. -->
-                        <div
-                            class="mx-auto mt-4 flex aspect-square w-[min(50%,25dvh)] items-center justify-center border-4 border-dashed border-ink/30 p-2 text-center text-[8px] leading-[16px] opacity-60"
-                        >
-                            After backend frontend integration, I will add the spell shapes
+                             wide or short screen. Dark, as yellow barely shows on
+                             the paper. -->
+                        <div class="pixel-box mx-auto mt-4 aspect-square w-[min(50%,25dvh)] bg-night p-1">
+                            <SpellFigure
+                                vertices={figure(shape, current)}
+                                label="{shape.tabs.length > 1 && current ? `${current.name} ` : ''}{shape.name} shape"
+                                class="block h-full w-full"
+                            />
                         </div>
                         <dl class="mt-4 grid grid-cols-[auto_1fr] gap-x-4 text-[8px] leading-[24px] uppercase">
                             <dt class="opacity-60">Points</dt>
@@ -233,19 +250,6 @@
                                 <dd>{known.length} / {current.patterns} patterns</dd>
                             {/if}
                         </dl>
-                        <h4 class="mt-6 text-[8px] leading-[24px] uppercase opacity-60">Discovered</h4>
-                        {#if known.length > 0}
-                            <ul class="text-[8px] leading-[24px]">
-                                {#each known as p (p.pattern.join("-"))}
-                                    <li class="flex justify-between gap-4">
-                                        <span class="min-w-0 break-words">{p.pattern.join(" › ")}</span>
-                                        <span class="shrink-0">{p.damage} dmg{p.times > 1 ? ` ×${p.times}` : ""}</span>
-                                    </li>
-                                {/each}
-                            </ul>
-                        {:else}
-                            <p class="text-[8px] leading-[24px]">None yet. Cast one to write it here.</p>
-                        {/if}
                     </section>
                 {/key}
             {:else}
