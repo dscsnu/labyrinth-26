@@ -162,6 +162,14 @@
     instant_cast: "Instant cast",
   };
   const powerupName = (kind: string) => POWERUPS[kind] ?? kind;
+  // What each does, under 15 words, for its card. The numbers are
+  // config.toml's [powerups] (×2, +1, 2 min for 5 min): update them with it.
+  const POWERUP_DESCRIPTIONS: Record<string, string> = {
+    damage_multiplier: "Your team's next spell deals double damage.",
+    heart: "Restores one health to your team.",
+    short_qr_cooldown: "For 5 minutes, cast points reopen after 2 minutes, not 5.",
+    instant_cast: "Tap any points on the map to cast them at once, ignoring cooldowns.",
+  };
   // Their icons, by kind, for the map.
   const POWERUP_ICONS: Record<string, string> = {
     damage_multiplier: damageMultiplierIcon,
@@ -320,24 +328,20 @@
     message = { ok: true, text: "selection cleared" };
   };
 
-  // Powerups: everyone sees them; only the leader uses one, with two taps
-  // (the first arms the button for 3 s), so one isn't wasted by a stray tap.
-  let confirming = $state<string | null>(null);
-  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
-  const tapPowerup = (kind: string) => {
-    if (busy) return;
+  // Powerups: everyone sees them, and tapping one opens a card saying what
+  // it does (powerupCard, its kind); only the leader can use it from there,
+  // so one isn't wasted by a stray tap. Instant cast then goes on to
+  // picking its points on the map.
+  let powerupCard = $state<string | null>(null);
+  const useFromCard = () => {
+    const kind = powerupCard;
+    if (!kind || busy) return;
+    powerupCard = null;
     if (kind === "instant_cast") {
       picked = [];
       picking = true;
       return;
     }
-    if (confirming !== kind) {
-      clearTimeout(confirmTimer);
-      confirming = kind;
-      confirmTimer = setTimeout(() => (confirming = null), 3000);
-      return;
-    }
-    confirming = null;
     void usePowerup(kind);
   };
   const usePowerup = async (kind: string, body?: unknown) => {
@@ -557,6 +561,23 @@
   </div>
 </div>
 
+<!-- A powerup's icon (48px unless size says), or its name for a kind
+     without one. -->
+{#snippet powerupIcon(kind: string, size = "h-12 w-12")}
+  {#if POWERUP_ICONS[kind]}
+    <img
+      src={POWERUP_ICONS[kind]}
+      alt=""
+      width="64"
+      height="64"
+      draggable="false"
+      class="{size} [image-rendering:pixelated]"
+    />
+  {:else}
+    <span class="pixel-box bg-gold-light px-2 py-1 text-ink">{powerupName(kind)}</span>
+  {/if}
+{/snippet}
+
 <!-- The map: the rest of the screen, below the bar. -->
 <div class="fixed inset-x-0 top-[25dvh] bottom-0">
   <MapView
@@ -569,45 +590,28 @@
     {now}
   />
 
-  <!-- A powerup's icon, or its name for a kind without one. -->
-  {#snippet powerupIcon(kind: string)}
-    {#if POWERUP_ICONS[kind]}
-      <img
-        src={POWERUP_ICONS[kind]}
-        alt=""
-        width="64"
-        height="64"
-        draggable="false"
-        class="h-12 w-12 [image-rendering:pixelated]"
-      />
-    {:else}
-      <span class="pixel-box bg-gold-light px-2 py-1 text-ink">{powerupName(kind)}</span>
-    {/if}
-  {/snippet}
-
-  <!-- The top of the map, in a column that only its contents catch taps
-       in, so the map still pans around them: powerups in the top left,
-       then the instant-cast bar below them, so neither covers the other. -->
+  <!-- The top of the map, where only its contents catch taps, so the map
+       still pans around them: the powerups in the top left. -->
   <div class="pointer-events-none absolute inset-x-4 top-4 z-10 flex flex-col gap-2 font-pixel text-[8px] leading-[16px] uppercase">
-    <!-- Powerups, top left, as their icons (named for screen readers): the
-         ones running, each with its time left beside it, then the ones
-         held, which only the leader can tap (twice: the first tap asks
-         "Use?" beside the icon). The open quiz, if hidden, reopens from
-         here. -->
-    <div class="flex max-w-[45vw] flex-col items-start gap-2 *:pointer-events-auto">
+    <!-- Powerups, top left, in a row of icons (named for screen readers),
+         wrapping if it runs out of room: the ones running, each with its
+         time left right below it, then the ones held, each opening its
+         card. The open quiz, if hidden, reopens from the "?" first. -->
+    <div class="flex flex-wrap items-start gap-3 *:pointer-events-auto">
       {#if qte && qte.status === "open" && hiddenQTE === qte.id}
         <button
           type="button"
+          aria-label="Open quiz, {countdown(qte.ends_at)} left"
           onclick={() => (hiddenQTE = null)}
-          class="pixel-box animate-pulse bg-pink px-2 py-1 text-white active:pixel-box-pressed"
+          class="pixel-box flex h-12 w-12 animate-pulse items-center justify-center bg-pink text-[24px] leading-[24px] text-white active:pixel-box-pressed"
         >
-          Quiz! {countdown(qte.ends_at)}
+          ?
         </button>
       {/if}
       {#each ts.powerups.active as a (a.kind)}
-        <span class="flex items-center gap-2">
+        <span class="flex flex-col items-center gap-2">
           {@render powerupIcon(a.kind)}
-          <span class="pixel-box bg-cyan px-2 py-1 text-ink">
+          <span class="pixel-box bg-cyan px-1 text-ink">
             <span class="sr-only">{powerupName(a.kind)}:</span>
             {a.until ? countdown(a.until) : "next spell"}
           </span>
@@ -616,46 +620,41 @@
       {#each ts.powerups.held as kind (kind)}
         <button
           type="button"
-          aria-label={confirming === kind ? `Use ${powerupName(kind)}?` : powerupName(kind)}
-          disabled={!isLeader || busy || ts.knocked_out}
-          onclick={() => tapPowerup(kind)}
-          class="flex items-center gap-2 transition-transform active:scale-90 disabled:opacity-70"
+          aria-label={powerupName(kind)}
+          aria-haspopup="dialog"
+          onclick={() => (powerupCard = kind)}
+          class="transition-transform active:scale-90"
         >
           {@render powerupIcon(kind)}
-          {#if confirming === kind}
-            <span class="pixel-box bg-pink px-2 py-1 text-white">Use?</span>
-          {/if}
         </button>
       {/each}
     </div>
-
-    <!-- Instant cast: while the leader picks the pattern's points, a bar
-         counts them, with Cast and Cancel. -->
-    {#if picking}
-      <div
-        class="pixel-box pointer-events-auto mx-auto flex w-full max-w-sm flex-col gap-2 bg-ink p-3 text-paper"
-      >
-        <p>Instant cast: tap the spell's points ({picked.length} picked, up to {ts.unlocked_points}). Cooldowns don't apply.</p>
-        <div class="flex gap-2">
-          <button
-            type="button"
-            disabled={busy || picked.length < 2}
-            onclick={instantCast}
-            class="pixel-box flex-1 bg-gold px-2 py-1 text-ink uppercase active:pixel-box-pressed disabled:opacity-40"
-          >
-            {busy ? "Casting…" : "Cast"}
-          </button>
-          <button
-            type="button"
-            onclick={() => (picking = false)}
-            class="pixel-box flex-1 bg-panel px-2 py-1 uppercase active:pixel-box-pressed"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    {/if}
   </div>
+
+  <!-- Instant cast: while the leader taps the spell's points on the map,
+       Cast (once at least 2 are picked) and X (stop, keeping the powerup)
+       at the bottom middle, between the scanner and the map controls. -->
+  {#if picking}
+    <div class="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 font-pixel text-[16px] leading-[24px] uppercase">
+      <button
+        type="button"
+        aria-label="Cast the {picked.length} picked points"
+        disabled={busy || picked.length < 2}
+        onclick={instantCast}
+        class="pixel-box h-12 bg-gold px-4 text-ink active:pixel-box-pressed disabled:opacity-40"
+      >
+        {busy ? "…" : "Cast"}
+      </button>
+      <button
+        type="button"
+        aria-label="Cancel instant cast"
+        onclick={() => (picking = false)}
+        class="pixel-box h-12 w-12 bg-panel text-paper active:pixel-box-pressed"
+      >
+        X
+      </button>
+    </div>
+  {/if}
 
   <!-- QR scanner button, bottom left: opens the camera. -->
   <button
@@ -791,6 +790,58 @@
   >
     {toast.text}
   </p>
+{/if}
+
+<!-- A powerup's card, from tapping its icon: the icon, its name and what
+     it does, then Use Now, for the leader only (others are told why). A
+     tap outside or Close dismisses it; it also goes if the team stops
+     holding the powerup (a teammate's leader used it). -->
+{#if powerupCard && ts.powerups.held.includes(powerupCard)}
+  {@const kind = powerupCard}
+  <div
+    class="fixed inset-0 z-40 flex items-center justify-center bg-ink/70 p-4 font-pixel text-[8px] leading-[16px] uppercase"
+    transition:fade={{ duration: 150 }}
+  >
+    <button
+      type="button"
+      aria-label="Close"
+      tabindex="-1"
+      class="absolute inset-0"
+      onclick={() => (powerupCard = null)}
+    ></button>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="powerup-title"
+      class="pixel-box relative flex w-full max-w-xs flex-col items-center gap-3 bg-paper p-4 text-center text-ink"
+    >
+      {@render powerupIcon(kind, "h-20 w-20")}
+      <h2 id="powerup-title" class="text-[16px] leading-[24px]">{powerupName(kind)}</h2>
+      {#if POWERUP_DESCRIPTIONS[kind]}
+        <p class="normal-case">{POWERUP_DESCRIPTIONS[kind]}</p>
+      {/if}
+      <button
+        type="button"
+        disabled={!isLeader || busy || ts.knocked_out}
+        onclick={useFromCard}
+        class="pixel-box w-full bg-gold px-3 py-2 text-ink uppercase active:pixel-box-pressed disabled:opacity-40"
+      >
+        Use Now
+      </button>
+      {#if !isLeader}
+        <p class="opacity-60">Only your team's leader can use it.</p>
+      {:else if ts.knocked_out}
+        <p class="opacity-60">Knocked out: an organiser must revive your team.</p>
+      {/if}
+      <button
+        type="button"
+        onclick={() => (powerupCard = null)}
+        class="pixel-box w-full bg-panel px-3 py-2 text-paper uppercase active:pixel-box-pressed"
+      >
+        Close
+      </button>
+    </div>
+  </div>
 {/if}
 
 <!-- The quiz: over everything while it's open, for every player; any
