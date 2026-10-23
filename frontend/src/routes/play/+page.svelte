@@ -230,7 +230,7 @@
     damage_multiplier: "Your team's next spell deals double damage.",
     heart: "Restores one health to your team.",
     short_qr_cooldown: "For 5 minutes, cast points reopen after 2 minutes, not 5.",
-    instant_cast: "Tap any points on the map to cast them at once, ignoring cooldowns.",
+    instant_cast: "Tap points off cooldown on the map to cast them at once.",
   };
   // Their icons, by kind, for the map.
   const POWERUP_ICONS: Record<string, string> = {
@@ -412,11 +412,15 @@
     }
     void usePowerup(kind);
   };
+  // null if it was used, else the refusal's code (shown as a toast).
   const usePowerup = async (kind: string, body?: unknown) => {
     busy = true;
     const { res, json } = await call(`/play/powerups/${kind}`, "POST", body ?? {});
     busy = false;
-    if (!res.ok) return showToast(refused(json).text, false);
+    if (!res.ok) {
+      showToast(refused(json).text, false);
+      return json.code;
+    }
     const next = TeamStateSchema.parse(json.payload);
     observe(next);
     const lc = next.last_cast;
@@ -425,20 +429,31 @@
         ? `Instant cast: ${lc.dealt} dmg${lc.boss !== null ? ` to ${bossName(lc.boss)}` : ""}${lc.defeated_boss ? ", defeated!" : ""}`
         : `${powerupName(kind)} used`,
     );
+    return null;
   };
 
   // Instant cast: the leader taps the pattern's points on the map (they
-  // wiggle and are outlined as picked), then casts. Cooldowns don't apply,
-  // so any point can be picked; at most the team's unlocked_points.
+  // glow and are outlined as picked), then casts.
   let picking = $state(false);
   let picked = $state<string[]>([]);
+  // Points on QR cooldown can't be picked (the backend would allow them),
+  // nor more than INSTANT_CAST_MAX, or the team's unlocked size if less.
+  const INSTANT_CAST_MAX = 4;
   const pick = (id: string) => {
+    if (ts.qr_cooldowns.some((c) => c.waypoint_id === id && Date.parse(c.until) > now)) return;
     if (picked.includes(id)) picked = picked.filter((p) => p !== id);
-    else if (picked.length < ts.unlocked_points) picked = [...picked, id];
+    else if (picked.length < Math.min(INSTANT_CAST_MAX, ts.unlocked_points)) picked = [...picked, id];
   };
+  // Cast, or refused because the powerup's gone (used from another phone),
+  // picking ends: the cast plays from its own points, not the picks (the
+  // state with it is held until it has). Any other refusal (points that
+  // make no spell) leaves the picks to fix.
   const instantCast = async () => {
-    await usePowerup("instant_cast", { pattern: picked });
-    if (!ts.powerups.held.includes("instant_cast")) picking = false;
+    const refusal = await usePowerup("instant_cast", { pattern: picked });
+    if (refusal === null || refusal === "powerup_not_held") {
+      picking = false;
+      picked = [];
+    }
   };
 
   // Answering the quiz, for the team.

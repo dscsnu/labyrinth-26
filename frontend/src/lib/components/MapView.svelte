@@ -246,15 +246,17 @@
                 {/if}
             </span>
             {#if onpick}
-                <!-- A 44px target centred on the marker. -->
+                <!-- A 44px target centred on the marker; none on a point on
+                     QR cooldown, which can't be picked. -->
                 <button
                     type="button"
                     aria-label="Pick {m.name}"
                     aria-pressed={active.includes(m.waypoint)}
+                    disabled={left > 0}
                     onclick={() => onpick(m.waypoint)}
                     style:left="{(m.x / MAP_SIZE.width) * 100}%"
                     style:top="{(m.y / MAP_SIZE.height) * 100}%"
-                    class="absolute h-11 w-11 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-gold-light"
+                    class="absolute h-11 w-11 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-gold-light disabled:invisible"
                 ></button>
             {:else}
                 <!-- Otherwise a tap on the marker names it (again: hides). -->
