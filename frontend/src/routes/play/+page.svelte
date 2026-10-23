@@ -28,7 +28,7 @@
   import { envelope, isNewer } from "#lib/types/Live.type.ts";
   import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
   import { z } from "zod";
-  import { goto } from "$app/navigation";
+  import { afterNavigate, goto } from "$app/navigation";
   import jsQR from "jsqr";
   import { onMount, tick, untrack } from "svelte";
   import { fade } from "svelte/transition";
@@ -117,12 +117,20 @@
   let shown = $derived(dying ?? boss);
 
   // Counts the team's health drops since the page loaded; each one
-  // restarts the health's blink on the top bar (keyed on it).
+  // restarts the health's blink on the top bar (keyed on it) and shows the
+  // attack over the map until the player closes it: the boss (only an
+  // attack lowers health), what it took, and the health left.
   let healthDrops = $state(0);
   let lastHealth = untrack(() => ts.health);
+  let attack = $state<{ boss: Boss; dealt: number; health: number } | null>(null);
   $effect(() => {
     const health = ts.health;
-    if (health < lastHealth) untrack(() => healthDrops++);
+    if (health < lastHealth)
+      untrack(() => {
+        healthDrops++;
+        if (!boss) return;
+        attack = { boss, dealt: lastHealth - health, health };
+      });
     lastHealth = health;
   });
   const bossName = (serial: number | null) =>
@@ -164,6 +172,15 @@
     toast = { ok, text };
     toastTimer = setTimeout(() => (toast = null), 5000);
   };
+
+  // A hint over the map for 2 s, when the player comes in from /team (not
+  // on a reload or a direct link).
+  let dragHint = $state(false);
+  afterNavigate(({ from }) => {
+    if (from?.url.pathname !== "/team") return;
+    dragHint = true;
+    setTimeout(() => (dragHint = false), 2000);
+  });
 
   // Powerups' names, by kind (the backend's wire names).
   const POWERUPS: Record<string, string> = {
@@ -264,6 +281,7 @@
     return () => {
       clearInterval(ticker);
       clearTimeout(toastTimer);
+      clearTimeout(scanPopupTimer);
       events.close();
       closeScanner();
     };
@@ -276,6 +294,10 @@
     qr_expired: "The code rotated: scan it again.",
     waypoint_on_cooldown:
       "That point was just used in a cast. It opens again once its QR cooldown ends.",
+    waypoint_already_scanned: "That point is already scanned in this attempt.",
+    no_shape_selected: "Your leader hasn't picked a spell yet.",
+    selection_poisoned: "A wrong point was scanned: restart the attempt.",
+    not_in_game: "Your team isn't in the game.",
     shape_on_cooldown: "You can't cast the same class twice in a row.",
     network_error: "No connection: check your signal and try again.",
     knocked_out: "Knocked out: an organiser must revive your team.",
@@ -449,13 +471,27 @@
     }
   };
 
+  // Every scan's result, popped up over the camera, so it's seen without
+  // looking down at the line under it: a refusal for 2 s, a scan that
+  // counted until it's tapped.
+  let scanPopup = $state<{ ok: boolean; title: string; text: string } | null>(null);
+  let scanPopupTimer: ReturnType<typeof setTimeout> | undefined;
+  const popScan = (ok: boolean, title: string, text: string) => {
+    clearTimeout(scanPopupTimer);
+    scanPopup = { ok, title, text };
+    if (!ok) scanPopupTimer = setTimeout(() => (scanPopup = null), 2000);
+  };
+
   const scan = async (qr: string) => {
     busy = true;
     const { res, json } = await call("/play/scan", "POST", { qr });
     busy = false;
     // A scan lost to the network can be retried with the same code.
     if (json.code === "network_error") lastToken = "";
-    if (!res.ok) return (message = refused(json));
+    if (!res.ok) {
+      message = refused(json);
+      return popScan(false, "Scan failed", message.text);
+    }
     const result = ScanResultSchema.parse(json.payload);
     observe(result.state);
     const name = selectedShape?.name ?? selected;
@@ -476,6 +512,15 @@
               text: `${result.state.stack.at(-1)?.waypoint_id ?? "That point"} doesn't match any ${name} pattern with the points already scanned. Restart the attempt.`,
             }
           : { ok: true, text: "scan added" };
+    if (result.outcome === "wrong_scan") popScan(false, "Wrong point", message.text);
+    else
+      popScan(
+        true,
+        "QR scanned",
+        result.outcome === "pattern_completed"
+          ? `Spell cast: ${message.text}. You can close the scanner.`
+          : "You can close the scanner.",
+      );
   };
 
   const memberName = (id: string) =>
@@ -619,6 +664,30 @@
     cooldowns={ts.qr_cooldowns}
     {now}
   />
+
+  <!-- The drag hint: a see-through box in the middle of the map, a pixel
+       arrow off each side. Untouchable, so the drag it asks for works. -->
+  {#if dragHint}
+    <div
+      out:fade={{ duration: 200 }}
+      class="pointer-events-none absolute top-1/2 left-1/2 z-20 -translate-x-1/2 -translate-y-1/2"
+    >
+      <p class="pixel-box w-40 bg-black/60 px-3 py-2 text-center font-pixel text-[8px] leading-[16px] text-white uppercase">
+        Drag to move the map around
+      </p>
+      {#each [["bottom-full left-1/2 mb-2 -translate-x-1/2", 0], ["top-1/2 left-full ml-2 -translate-y-1/2", 90], ["top-full left-1/2 mt-2 -translate-x-1/2", 180], ["top-1/2 right-full mr-2 -translate-y-1/2", 270]] as const as [place, turn] (turn)}
+        <svg
+          viewBox="0 0 8 8"
+          shape-rendering="crispEdges"
+          aria-hidden="true"
+          class="absolute h-4 w-4 {place}"
+          style:rotate="{turn}deg"
+        >
+          <path d="M3 0h2v1h1v1h1v1h-2v4h-2v-4h-2v-1h1v-1h1z" fill="white" stroke="var(--color-ink)" stroke-width="0.5" paint-order="stroke" />
+        </svg>
+      {/each}
+    </div>
+  {/if}
 
   <!-- The top of the map, where only its contents catch taps, so the map
        still pans around them: the powerups in the top left. -->
@@ -816,6 +885,88 @@
     >
       {busy ? "Checking…" : (message?.text ?? "Point the camera at the point's QR code.")}
     </p>
+  </div>
+{/if}
+
+<!-- A scan's result over the scanner. Green for a scan that counted, until
+     it's tapped: its text dismisses it (to scan on), its button closes the
+     scanner too. Pink for a refused or wrong one, for 2 s, untouchable so
+     the scanner's own Close stays reachable. -->
+{#if scanPopup}
+  <div
+    role="status"
+    out:fade={{ duration: 200 }}
+    class:pointer-events-none={!scanPopup.ok}
+    class="pixel-box fixed top-1/2 left-1/2 z-[35] flex w-56 -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-2 bg-white px-3 py-4 text-center font-pixel text-[8px] leading-[16px] text-ink uppercase"
+  >
+    {#snippet result()}
+      <p class="text-[16px] leading-[24px] text-outline {scanPopup?.ok ? 'text-go' : 'text-pink'}">
+        {scanPopup?.title}
+      </p>
+      <p>{scanPopup?.text}</p>
+    {/snippet}
+    {#if scanPopup.ok}
+      <button
+        class="flex flex-col items-center gap-2 uppercase"
+        onclick={() => (scanPopup = null)}
+      >
+        {@render result()}
+      </button>
+      <button
+        class="pixel-box mt-1 w-full bg-gold px-3 py-2 text-white text-outline uppercase active:translate-y-[2px] active:pixel-box-pressed"
+        onclick={() => {
+          clearTimeout(scanPopupTimer);
+          scanPopup = null;
+          closeScanner();
+        }}
+      >
+        Close the Scanner
+      </button>
+    {:else}
+      {@render result()}
+    {/if}
+  </div>
+{/if}
+
+<!-- The boss's attack: its attack animation (looping, keyed on the drop
+     so another restarts it), what it took and the health left, like the
+     top bar's, until the player closes it. Over everything but the toast,
+     the scanner included, so it's seen wherever the player is. -->
+{#if attack}
+  <div
+    out:fade={{ duration: 200 }}
+    class="pixel-box fixed top-1/2 left-1/2 z-[45] flex w-56 -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 bg-white px-3 py-4 font-pixel text-[8px] leading-[16px] uppercase"
+  >
+    {#key healthDrops}
+      <BossSprite
+        serial={attack.boss.serial}
+        fallback={attack.boss.asset}
+        animation="attack"
+        loop
+        class="h-24 w-auto"
+      />
+    {/key}
+    <p class="text-center text-ink">
+      {attack.boss.name} dealt {attack.dealt}
+      {attack.dealt === 1 ? "heart" : "hearts"}
+    </p>
+    <p class="flex items-center gap-2 text-white">
+      <span class="text-[18px] leading-[32px] text-outline">x{attack.health}</span>
+      <img
+        src={scottFace}
+        alt=""
+        width="64"
+        height="64"
+        draggable="false"
+        class="h-8 w-8 [image-rendering:pixelated]"
+      />
+    </p>
+    <button
+      class="pixel-box w-full bg-gold px-3 py-2 text-white text-outline uppercase active:translate-y-[2px] active:pixel-box-pressed"
+      onclick={() => (attack = null)}
+    >
+      Okay, I will lock in now
+    </button>
   </div>
 {/if}
 

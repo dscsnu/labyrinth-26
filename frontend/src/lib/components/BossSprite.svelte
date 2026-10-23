@@ -1,7 +1,7 @@
 <script lang="ts">
     // A boss, animated from static/bosses_animation/<serial>.png, the
     // spritesheet its <serial>.json lays out: animation loops if the sheet
-    // says so, else plays once, holds its last frame and calls onend; a
+    // says so (or loop does), else plays once, holds its last frame and calls onend; a
     // change to replay plays it again from the start.
     // Without a sheet (missing or malformed JSON) it falls back to the still
     // static/<fallback>, hidden if that's missing too; then, as without the
@@ -14,6 +14,7 @@
         fallback,
         animation = "idle",
         replay = 0,
+        loop,
         onend,
         class: className = "",
     }: {
@@ -21,6 +22,8 @@
         fallback: string;
         animation?: string;
         replay?: number;
+        // Overrides the sheet's loop for this animation.
+        loop?: boolean;
         onend?: () => void;
         class?: string;
     } = $props();
@@ -102,8 +105,9 @@
             return;
         }
         const count = anim.frames.length;
+        const loops = loop ?? anim.loop;
         const id = setInterval(() => {
-            if (anim.loop) frame = (frame + 1) % count;
+            if (loops) frame = (frame + 1) % count;
             else if (frame < count - 1) frame++;
             else {
                 clearInterval(id);
