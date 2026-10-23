@@ -3,6 +3,7 @@
   import SpellBook from "#lib/components/SpellBook.svelte";
   import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
   import BossSprite from "#lib/components/BossSprite.svelte";
+  import fitText from "#lib/utils/fitText.ts";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
   import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
   import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
@@ -114,6 +115,16 @@
     lastDamage = damage;
   });
   let shown = $derived(dying ?? boss);
+
+  // Counts the team's health drops since the page loaded; each one
+  // restarts the health's blink on the top bar (keyed on it).
+  let healthDrops = $state(0);
+  let lastHealth = untrack(() => ts.health);
+  $effect(() => {
+    const health = ts.health;
+    if (health < lastHealth) untrack(() => healthDrops++);
+    lastHealth = health;
+  });
   const bossName = (serial: number | null) =>
     bosses.find((b) => b.serial === serial)?.name ?? `boss ${serial}`;
 
@@ -490,20 +501,26 @@
     >
       &lt;
     </a>
-    <p class="flex items-center gap-2 text-[8px] leading-[16px] uppercase">
-      <!-- No visible label: the face says whose health it is. -->
-      <span class="sr-only">Team health</span>
-      <!-- A step below the face beside it (32px), so it doesn't crowd the bar. -->
-      <span class="text-[18px] leading-[32px] text-outline">x{ts.health}</span>
-      <img
-        src={scottFace}
-        alt=""
-        width="64"
-        height="64"
-        draggable="false"
-        class="h-8 w-8 [image-rendering:pixelated]"
-      />
-    </p>
+    <!-- Blinks hard three times when the health drops. -->
+    {#key healthDrops}
+      <p
+        class="flex items-center gap-2 text-[8px] leading-[16px] uppercase"
+        class:animate-blink-thrice={healthDrops > 0}
+      >
+        <!-- No visible label: the face says whose health it is. -->
+        <span class="sr-only">Team health</span>
+        <!-- A step below the face beside it (32px), so it doesn't crowd the bar. -->
+        <span class="text-[18px] leading-[32px] text-outline">x{ts.health}</span>
+        <img
+          src={scottFace}
+          alt=""
+          width="64"
+          height="64"
+          draggable="false"
+          class="h-8 w-8 [image-rendering:pixelated]"
+        />
+      </p>
+    {/key}
   </div>
   <div class="flex min-h-0 flex-1 items-center gap-4">
     {#if shown}
@@ -526,10 +543,14 @@
           class="h-full w-auto shrink-0"
         />
       {/key}
-      <!-- The name in the menu's logo style (cyan, outlined), the health
-           bar filled with its highlight pink. -->
+      <!-- The name in the menu's logo style (cyan, outlined), shrunk from
+           32px until all of it fits the bar; the health bar filled with
+           its highlight pink. -->
       <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
-        <p class="truncate py-1 font-display text-[32px] leading-[1] text-cyan uppercase heading-outline">
+        <p
+          {@attach fitText({ max: 32, min: 12 })}
+          class="truncate py-1 font-display text-[32px] leading-[1] text-cyan uppercase heading-outline"
+        >
           {shown.name}
         </p>
         <div
@@ -545,14 +566,23 @@
             style:width="{(hp / shown.hp) * 100}%"
           ></div>
         </div>
-        <!-- The countdown is on the server's clock (now); null while
-             knocked out, when nothing attacks, and not shown while dying
-             (ts.boss is already the next one). -->
-        <p class="text-[8px] leading-[16px] text-outline">
-          {hp} / {shown.hp} HP{#if !dying && ts.boss?.next_attack_at}
-            · Attack in {countdown(ts.boss.next_attack_at)}{/if}
-        </p>
+        <p class="text-[8px] leading-[16px] text-outline">{hp} / {shown.hp} HP</p>
       </div>
+      <!-- The next attack, in the bar's bottom right corner, on the
+           server's clock (now): green with a whole interval to go,
+           shading through to red as it runs out. Null while knocked out,
+           when nothing attacks, and not shown while dying (ts.boss is
+           already the next one). -->
+      {#if !dying && ts.boss?.next_attack_at}
+        {@const left = (Date.parse(ts.boss.next_attack_at) - now) / 1000}
+        {@const share = Math.min(1, Math.max(0, left / shown.attack_interval_s))}
+        <p
+          class="pixel-box absolute right-0 bottom-0 px-2 text-[8px] leading-[16px] text-white text-outline"
+          style:background-color="color-mix(in oklch, var(--color-go) {Math.round(share * 100)}%, var(--color-danger))"
+        >
+          Next Attack in {countdown(ts.boss.next_attack_at)}
+        </p>
+      {/if}
     {:else if bosses.length > 0}
       <p class="uppercase text-outline">Every boss defeated!</p>
     {:else}

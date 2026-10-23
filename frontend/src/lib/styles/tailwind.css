@@ -49,6 +49,9 @@
         50% { opacity: 0; }
     }
 
+    /* blink, three times quickly then done: for a one-off alert. */
+    --animate-blink-thrice: blink 0.4s steps(1) 3;
+
     /* A hard blink, switching between invisible and --flash-max (default
        fully opaque) with no fade: half the beat each. */
     --animate-flash: flash 1s steps(1) infinite;
