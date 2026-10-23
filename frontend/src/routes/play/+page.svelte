@@ -596,18 +596,8 @@
     <!-- Powerups, top left, in a row of icons (named for screen readers),
          wrapping if it runs out of room: the ones running, each with its
          time left right below it, then the ones held, each opening its
-         card. The open quiz, if hidden, reopens from the "?" first. -->
+         card. -->
     <div class="flex flex-wrap items-start gap-3 *:pointer-events-auto">
-      {#if qte && qte.status === "open" && hiddenQTE === qte.id}
-        <button
-          type="button"
-          aria-label="Open quiz, {countdown(qte.ends_at)} left"
-          onclick={() => (hiddenQTE = null)}
-          class="pixel-box flex h-12 w-12 animate-pulse items-center justify-center bg-pink text-[24px] leading-[24px] text-white active:pixel-box-pressed"
-        >
-          ?
-        </button>
-      {/if}
       {#each ts.powerups.active as a (a.kind)}
         <span class="flex flex-col items-center gap-2">
           {@render powerupIcon(a.kind)}
@@ -631,17 +621,36 @@
     </div>
   </div>
 
+  <!-- The live quiz, if hidden, reopens from a small "?" in the top right,
+       half a powerup icon's width. Until the team answers, its outline
+       blinks hard, black to white; once answered, the whole button blinks
+       between invisible and 75%, calling less with nothing left to do. -->
+  {#if qte && qte.status === "open" && hiddenQTE === qte.id}
+    <button
+      type="button"
+      aria-label="Open quiz{qteAnswer ? ' (answered)' : ''}, {countdown(qte.ends_at)} left"
+      onclick={() => (hiddenQTE = null)}
+      style:--flash-max={qteAnswer ? 0.75 : undefined}
+      class="pixel-box absolute top-4 right-4 z-10 flex h-6 w-6 items-center justify-center bg-pink font-pixel text-[16px] leading-[16px] text-white active:pixel-box-pressed {qteAnswer
+        ? 'animate-flash'
+        : 'animate-edge-blink'}"
+    >
+      ?
+    </button>
+  {/if}
+
   <!-- Instant cast: while the leader taps the spell's points on the map,
-       Cast (once at least 2 are picked) and X (stop, keeping the powerup)
-       at the bottom middle, between the scanner and the map controls. -->
+       Cast (once at least 2 are picked) centred at the bottom of the map,
+       between the scanner and the map controls, with X (stop, keeping the
+       powerup) hung off its right side, so X never pushes Cast off centre. -->
   {#if picking}
-    <div class="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 font-pixel text-[16px] leading-[24px] uppercase">
+    <div class="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 font-pixel text-[8px] leading-[16px] uppercase">
       <button
         type="button"
         aria-label="Cast the {picked.length} picked points"
         disabled={busy || picked.length < 2}
         onclick={instantCast}
-        class="pixel-box h-12 bg-gold px-4 text-ink active:pixel-box-pressed disabled:opacity-40"
+        class="pixel-box h-8 bg-gold px-3 text-ink active:pixel-box-pressed disabled:opacity-40"
       >
         {busy ? "…" : "Cast"}
       </button>
@@ -649,7 +658,7 @@
         type="button"
         aria-label="Cancel instant cast"
         onclick={() => (picking = false)}
-        class="pixel-box h-12 w-12 bg-panel text-paper active:pixel-box-pressed"
+        class="pixel-box absolute top-0 left-full ml-3 h-8 w-8 bg-panel text-paper active:pixel-box-pressed"
       >
         X
       </button>

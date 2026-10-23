@@ -49,6 +49,38 @@
         50% { opacity: 0; }
     }
 
+    /* A hard blink, switching between invisible and --flash-max (default
+       fully opaque) with no fade: half the beat each. */
+    --animate-flash: flash 1s steps(1) infinite;
+    @keyframes flash {
+        0%, 100% { opacity: 0; }
+        50% { opacity: var(--flash-max, 1); }
+    }
+
+    /* A pixel-box whose outline alone blinks hard, ink to white and back:
+       pixel-box's shadows, with the outline's colour switched. */
+    --animate-edge-blink: edge-blink 1s steps(1) infinite;
+    @keyframes edge-blink {
+        0%, 100% {
+            box-shadow:
+                0 -4px 0 0 var(--color-ink),
+                0 4px 0 0 var(--color-ink),
+                -4px 0 0 0 var(--color-ink),
+                4px 0 0 0 var(--color-ink),
+                inset 0 4px 0 0 rgb(255 255 255 / 0.15),
+                inset 0 -4px 0 0 rgb(0 0 0 / 0.3);
+        }
+        50% {
+            box-shadow:
+                0 -4px 0 0 white,
+                0 4px 0 0 white,
+                -4px 0 0 0 white,
+                4px 0 0 0 white,
+                inset 0 4px 0 0 rgb(255 255 255 / 0.15),
+                inset 0 -4px 0 0 rgb(0 0 0 / 0.3);
+        }
+    }
+
     /* A map marker bobbing up and down, its gold glow swelling at the top
        of each bob. It animates transform, which adds to Tailwind's
        translate-* (the separate translate property), so a marker's tip
