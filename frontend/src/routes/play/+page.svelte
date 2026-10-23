@@ -4,6 +4,7 @@
   import { spellFigure } from "#lib/game/spellFigure.ts";
   import SpellBook from "#lib/components/SpellBook.svelte";
   import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
+  import { BANNERS } from "#lib/game/banners.ts";
   import BossSprite from "#lib/components/BossSprite.svelte";
   import fitText from "#lib/utils/fitText.ts";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
@@ -592,7 +593,8 @@
 <div
   class="fixed inset-x-0 top-0 isolate flex h-[25dvh] flex-col gap-2 overflow-hidden border-b-4 border-black px-4 py-3 font-pixel text-[16px] leading-[24px] text-white"
 >
-  <DiamondBackdrop class="absolute inset-0 -z-10" />
+  <!-- In the shown boss's colours; the menu's blues once all are beaten. -->
+  <DiamondBackdrop colors={shown ? BANNERS[shown.serial] : undefined} class="absolute inset-0 -z-10" />
   <!-- The top row: back to the team page (left), the team's health (right). -->
   <div class="flex shrink-0 items-center justify-between gap-4">
     <a
@@ -646,7 +648,7 @@
       {/key}
       <!-- The name in the menu's logo style (cyan, outlined), shrunk from
            32px until all of it fits the bar; the health bar filled with
-           its highlight pink. -->
+           its highlight pink, the HP left written across it. -->
       <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
         <p
           {@attach fitText({ max: 32, min: 12 })}
@@ -654,20 +656,34 @@
         >
           {shown.name}
         </p>
-        <div
-          role="progressbar"
-          aria-label="{shown.name}'s health"
-          aria-valuemin={0}
-          aria-valuemax={shown.hp}
-          aria-valuenow={hp}
-          class="pixel-box mx-1 h-4 bg-ink"
-        >
+        <!-- A hit slides the pink down smoothly, and a white trail behind it
+             follows a moment later, showing what the hit took. Keyed by
+             boss, so the next one's full bar appears at once, not slid up
+             from the last one's empty one. -->
+        {#key shown.serial}
           <div
-            class="h-full bg-pink transition-[width] duration-300"
-            style:width="{(hp / shown.hp) * 100}%"
-          ></div>
-        </div>
-        <p class="text-[8px] leading-[16px] text-outline">{hp} / {shown.hp} HP</p>
+            role="progressbar"
+            aria-label="{shown.name}'s health"
+            aria-valuemin={0}
+            aria-valuemax={shown.hp}
+            aria-valuenow={hp}
+            class="pixel-box relative mx-1 h-4 bg-ink"
+          >
+            <div
+              class="absolute inset-y-0 left-0 bg-white transition-[width] delay-300 duration-700 ease-in-out"
+              style:width="{(hp / shown.hp) * 100}%"
+            ></div>
+            <div
+              class="absolute inset-y-0 left-0 bg-pink transition-[width] duration-500 ease-out"
+              style:width="{(hp / shown.hp) * 100}%"
+            ></div>
+            <span
+              class="absolute inset-0 flex items-center justify-center text-[8px] leading-[16px] text-outline"
+            >
+              {hp} HP
+            </span>
+          </div>
+        {/key}
       </div>
       <!-- The next attack, in the bar's bottom right corner, on the
            server's clock (now): green with a whole interval to go,

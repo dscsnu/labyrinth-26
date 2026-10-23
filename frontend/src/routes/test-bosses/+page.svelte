@@ -5,6 +5,7 @@
     // every boss idling side by side to compare crops. Dev only.
     import BossSprite from "#lib/components/BossSprite.svelte";
     import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
+    import { BANNERS } from "#lib/game/banners.ts";
     import scottFace from "#lib/assets/icons/scott-face.png";
 
     const BOSSES = [
@@ -73,7 +74,7 @@
 <main class="min-h-dvh bg-night pb-8 font-pixel text-[8px] leading-[16px] text-white uppercase">
     <!-- The top bar, as on /play. -->
     <div class="relative isolate flex h-[25dvh] min-h-40 flex-col gap-2 overflow-hidden border-b-4 border-black px-4 py-3">
-        <DiamondBackdrop class="absolute inset-0 -z-10" />
+        <DiamondBackdrop colors={BANNERS[shown]} class="absolute inset-0 -z-10" />
         <div class="flex shrink-0 items-center justify-end gap-2">
             {#key healthDrops}
                 <p class="flex items-center gap-2" class:animate-blink-thrice={healthDrops > 0}>
