@@ -2,6 +2,7 @@
   import MapView, { ZOOM_LEVELS } from "#lib/components/MapView.svelte";
   import SpellBook from "#lib/components/SpellBook.svelte";
   import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
+  import BossSprite from "#lib/components/BossSprite.svelte";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
   import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
   import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
@@ -14,6 +15,7 @@
     QTESchema,
     ScanResultSchema,
     TeamStateSchema,
+    type Boss,
     type Cast,
     type QTE,
     type TeamState,
@@ -75,6 +77,18 @@
   let boss = $derived(
     ts.boss ? (bosses.find((b) => b.serial === ts.boss!.serial) ?? null) : null,
   );
+  // A boss just defeated, kept on the top bar while its death plays (its
+  // sprite clears it when done), then the next boss shows. Only a rise in
+  // bosses_defeated after the page loads starts one.
+  let dying = $state<Boss | null>(null);
+  let lastDefeated = untrack(() => ts.bosses_defeated);
+  let lastBoss = untrack(() => boss);
+  $effect(() => {
+    if (ts.bosses_defeated > lastDefeated && lastBoss) dying = lastBoss;
+    lastDefeated = ts.bosses_defeated;
+    lastBoss = boss;
+  });
+  let shown = $derived(dying ?? boss);
   const bossName = (serial: number | null) =>
     bosses.find((b) => b.serial === serial)?.name ?? `boss ${serial}`;
 
@@ -428,7 +442,7 @@
      and next attack, from ts, so it moves on every
      teammate's team_state. -->
 <div
-  class="fixed inset-x-0 top-0 isolate flex h-[25dvh] flex-col gap-2 border-b-4 border-black px-4 py-3 font-pixel text-[16px] leading-[24px] text-white"
+  class="fixed inset-x-0 top-0 isolate flex h-[25dvh] flex-col gap-2 overflow-hidden border-b-4 border-black px-4 py-3 font-pixel text-[16px] leading-[24px] text-white"
 >
   <DiamondBackdrop class="absolute inset-0 -z-10" />
   <!-- The top row: back to the team page (left), the team's health (right). -->
@@ -456,45 +470,46 @@
     </p>
   </div>
   <div class="flex min-h-0 flex-1 items-center gap-4">
-    {#if boss && ts.boss}
-      {@const hp = Math.max(0, boss.hp - ts.boss.damage)}
-      <!-- The boss's image (static/<asset>), as tall as its row; hidden if
-           the file is missing, leaving the name and health. Keyed by serial
-           so the next boss's image never inherits the last one's hiding. -->
-      {#key boss.serial}
-        <img
-          src="/{boss.asset}"
-          alt=""
-          width="628"
-          height="802"
-          draggable="false"
-          onerror={(e) => ((e.currentTarget as HTMLImageElement).hidden = true)}
-          class="h-full w-auto shrink-0 object-contain"
+    {#if shown}
+      {@const hp = dying ? 0 : Math.max(0, shown.hp - (ts.boss?.damage ?? 0))}
+      <!-- The boss, as tall as its row: animated if it has a spritesheet,
+           else its image (static/<asset>), else nothing, leaving the name
+           and health. A defeated boss plays its death before the next
+           shows. Keyed by serial so the next boss never inherits the last
+           one's sheet or hiding. -->
+      {#key shown.serial}
+        <BossSprite
+          serial={shown.serial}
+          fallback={shown.asset}
+          animation={dying ? "death" : "idle"}
+          onend={() => (dying = null)}
+          class="h-full w-auto shrink-0"
         />
       {/key}
       <!-- The name in the menu's logo style (cyan, outlined), the health
            bar filled with its highlight pink. -->
       <div class="flex min-w-0 flex-1 flex-col justify-center gap-2">
         <p class="truncate py-1 font-display text-[32px] leading-[1] text-cyan uppercase heading-outline">
-          {boss.name}
+          {shown.name}
         </p>
         <div
           role="progressbar"
-          aria-label="{boss.name}'s health"
+          aria-label="{shown.name}'s health"
           aria-valuemin={0}
-          aria-valuemax={boss.hp}
+          aria-valuemax={shown.hp}
           aria-valuenow={hp}
           class="pixel-box mx-1 h-4 bg-ink"
         >
           <div
             class="h-full bg-pink transition-[width] duration-300"
-            style:width="{(hp / boss.hp) * 100}%"
+            style:width="{(hp / shown.hp) * 100}%"
           ></div>
         </div>
         <!-- The countdown is on the server's clock (now); null while
-             knocked out, when nothing attacks. -->
+             knocked out, when nothing attacks, and not shown while dying
+             (ts.boss is already the next one). -->
         <p class="text-[8px] leading-[16px] text-outline">
-          {hp} / {boss.hp} HP{#if ts.boss.next_attack_at}
+          {hp} / {shown.hp} HP{#if !dying && ts.boss?.next_attack_at}
             · Attack in {countdown(ts.boss.next_attack_at)}{/if}
         </p>
       </div>
