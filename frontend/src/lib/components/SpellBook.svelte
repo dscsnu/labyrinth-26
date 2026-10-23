@@ -1,5 +1,6 @@
 <script lang="ts">
     import SpellFigure from "#lib/components/SpellFigure.svelte";
+    import { spellFigure } from "#lib/game/spellFigure.ts";
     import type { Cast, GameShape } from "#lib/types/Game.type.ts";
     import { untrack } from "svelte";
     import { fade, fly } from "svelte/transition";
@@ -103,22 +104,6 @@
                 return { shapeId: s.id, name: s.name, points: s.points, tabs };
             }),
     );
-
-    // Where a spell's vertices are drawn, on SpellFigure's 32×32 grid: a
-    // regular polygon of its fewest points, round the centre, pointing up
-    // when odd and sitting flat when even (a level line, a square, a
-    // flat-topped hexagon). A concave quadrilateral is a dart instead, its
-    // third vertex pushed in towards the first.
-    const figure = (p: Page, t: Tab | undefined): [number, number][] => {
-        if (p.shapeId === "quadrilateral" && t?.name === "Concave")
-            return [[16, 5], [27, 27], [16, 19], [5, 27]];
-        const n = Math.min(...p.points);
-        const start = -Math.PI / 2 + (n % 2 === 0 ? Math.PI / n : 0);
-        return Array.from({ length: n }, (_, i): [number, number] => {
-            const a = start + (i * 2 * Math.PI) / n;
-            return [Math.round(16 + 11 * Math.cos(a)), Math.round(16 + 11 * Math.sin(a))];
-        });
-    };
 
     // The page shown (an index into pages), and which way the last turn
     // went, so the new page slides in from that side; and its tab, the
@@ -269,7 +254,7 @@
                              the paper. -->
                         <div class="pixel-box mx-auto mt-4 aspect-square w-[min(50%,25dvh)] bg-night p-1">
                             <SpellFigure
-                                vertices={figure(shape, current)}
+                                vertices={spellFigure(shape.shapeId, shape.points, current?.name)}
                                 label="{shape.tabs.length > 1 && current ? `${current.name} ` : ''}{shape.name} shape"
                                 class="block h-full w-full"
                             />

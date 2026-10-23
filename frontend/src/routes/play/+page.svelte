@@ -1,14 +1,13 @@
 <script lang="ts">
   import MapView, { ZOOM_LEVELS } from "#lib/components/MapView.svelte";
+  import SpellFigure from "#lib/components/SpellFigure.svelte";
+  import { spellFigure } from "#lib/game/spellFigure.ts";
   import SpellBook from "#lib/components/SpellBook.svelte";
   import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
   import BossSprite from "#lib/components/BossSprite.svelte";
   import fitText from "#lib/utils/fitText.ts";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
-  import qrSprite from "#lib/assets/UserInterfaceButtons/qr-sprite.webp";
-  import zoomInIcon from "#lib/assets/UserInterfaceButtons/zoom-in-icon.webp";
-  import zoomOutIcon from "#lib/assets/UserInterfaceButtons/zoom-out-icon.webp";
-  import bookIcon from "#lib/assets/UserInterfaceButtons/book-icon.webp";
+  import bookIcon from "#lib/assets/UserInterfaceButtons/spellbook_64.png";
   import scottFace from "#lib/assets/icons/scott-face.png";
   import damageMultiplierIcon from "#lib/assets/powerups/damage_multiplier_64.png";
   import heartIcon from "#lib/assets/powerups/gain_a_life_64.png";
@@ -416,6 +415,28 @@
     observe(TeamStateSchema.parse(json.payload));
   };
 
+  // The scanner button's QR code, drawn on a 13×13 grid (# is ink): three
+  // finder squares and some data. One path of a rect per run of #s.
+  const QR_GLYPH = [
+    "#####...#####",
+    "#...#.#.#...#",
+    "#.#.#...#.#.#",
+    "#...#.#.#...#",
+    "#####...#####",
+    ".............",
+    ".#.#..#.#.#..",
+    ".............",
+    "#####...#.#.#",
+    "#...#.#..#.#.",
+    "#.#.#...#.#..",
+    "#...#.#.....#",
+    "#####....#.##",
+  ]
+    .flatMap((row, y) =>
+      [...row.matchAll(/#+/g)].map((m) => `M${m.index} ${y}h${m[0].length}v1h-${m[0].length}z`),
+    )
+    .join("");
+
   // The QR scanner: the camera, read with jsQR every 250 ms (as /test-scan
   // does). A code is the waypoint's signed, rotating token; it's posted as
   // is, and the backend verifies it and resolves the waypoint.
@@ -764,61 +785,48 @@
     </div>
   {/if}
 
-  <!-- QR scanner button, bottom left: opens the camera. -->
+  <!-- QR scanner button, bottom left: opens the camera. A pixel box with
+       a drawn QR code. -->
   <button
     type="button"
     aria-label="Scan QR code"
     aria-haspopup="dialog"
     onclick={openScanner}
-    class="absolute bottom-4 left-4 h-20 w-20 rounded-full transition-transform active:scale-90"
+    class="pixel-box absolute bottom-4 left-4 flex h-16 w-16 items-center justify-center bg-paper active:translate-y-[2px] active:pixel-box-pressed"
   >
-    <img
-      src={qrSprite}
-      alt=""
-      width="128"
-      height="128"
-      draggable="false"
-      class="h-full w-full [image-rendering:pixelated]"
-    />
+    <svg viewBox="0 0 13 13" shape-rendering="crispEdges" aria-hidden="true" class="h-10 w-10">
+      <path d={QR_GLYPH} fill="var(--color-ink)" />
+    </svg>
   </button>
 
   <!-- Map controls, bottom right, in a column. Zoom steps through
-         ZOOM_LEVELS, disabled at either end; the book isn't built yet. -->
+         ZOOM_LEVELS, disabled at either end: small pixel boxes with a
+         + or − drawn on an 8×8 grid. -->
   <div class="absolute right-4 bottom-4 flex flex-col items-center gap-3">
     <button
       type="button"
       aria-label="Zoom in"
       disabled={zoomLevel >= ZOOM_LEVELS.length - 1}
       onclick={() => zoomLevel++}
-      class="h-12 w-12 transition-transform active:scale-90 disabled:opacity-40"
+      class="pixel-box flex h-8 w-8 items-center justify-center bg-paper active:translate-y-[2px] active:pixel-box-pressed disabled:opacity-40"
     >
-      <img
-        src={zoomInIcon}
-        alt=""
-        width="48"
-        height="48"
-        draggable="false"
-        class="h-full w-full [image-rendering:pixelated]"
-      />
+      <svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true" class="h-4 w-4">
+        <path d="M3 1h2v2h2v2h-2v2h-2v-2h-2v-2h2z" fill="var(--color-ink)" />
+      </svg>
     </button>
     <button
       type="button"
       aria-label="Zoom out"
       disabled={zoomLevel <= 0}
       onclick={() => zoomLevel--}
-      class="h-12 w-12 transition-transform active:scale-90 disabled:opacity-40"
+      class="pixel-box flex h-8 w-8 items-center justify-center bg-paper active:translate-y-[2px] active:pixel-box-pressed disabled:opacity-40"
     >
-      <img
-        src={zoomOutIcon}
-        alt=""
-        width="48"
-        height="48"
-        draggable="false"
-        class="h-full w-full [image-rendering:pixelated]"
-      />
+      <svg viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true" class="h-4 w-4">
+        <path d="M1 3h6v2h-6z" fill="var(--color-ink)" />
+      </svg>
     </button>
-    <!-- While a spell is selected, the button shows it instead of the book
-         (a placeholder until the spells have images). An old message would
+    <!-- While a spell is selected, the button shows its shape on cyan
+         instead of the book. An old message would
          show in the book, so opening clears it, as opening the scanner does. -->
     <button
       type="button"
@@ -830,18 +838,20 @@
       }}
       class="h-16 w-16 transition-transform active:scale-90"
     >
-      {#if selected}
-        <span
-          class="pixel-box flex h-full w-full items-center justify-center bg-paper p-1 text-center font-pixel text-[8px] leading-[12px] text-ink uppercase"
-        >
-          Image of the spell
+      {#if selectedShape}
+        <span class="pixel-box flex h-full w-full bg-cyan p-1">
+          <SpellFigure
+            vertices={spellFigure(selectedShape.id, selectedShape.points)}
+            label="{selectedShape.name} selected"
+            class="h-full w-full"
+          />
         </span>
       {:else}
         <img
           src={bookIcon}
           alt=""
-          width="48"
-          height="48"
+          width="64"
+          height="64"
           draggable="false"
           class="h-full w-full [image-rendering:pixelated]"
         />
