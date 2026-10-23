@@ -1,5 +1,5 @@
 <script lang="ts">
-  import MapView, { ZOOM_LEVELS } from "#lib/components/MapView.svelte";
+  import MapView, { BURST_MS, ZOOM_LEVELS } from "#lib/components/MapView.svelte";
   import SpellFigure from "#lib/components/SpellFigure.svelte";
   import { spellFigure } from "#lib/game/spellFigure.ts";
   import SpellBook from "#lib/components/SpellBook.svelte";
@@ -35,8 +35,9 @@
 
   let { data }: PageProps = $props();
 
-  // The map's zoom step (an index into ZOOM_LEVELS), moved by the zoom buttons.
-  let zoomLevel = $state(0);
+  // The map's zoom step (an index into ZOOM_LEVELS), moved by the zoom
+  // buttons. It opens at 1.25×.
+  let zoomLevel = $state(ZOOM_LEVELS.indexOf(1.25));
   // Whether the spell book (the book button) is open.
   let bookOpen = $state(false);
   let { user, game, bosses } = $derived(data);
@@ -61,19 +62,52 @@
     if (res?.ok) casts = CastLogSchema.parse((await res.json()).payload);
   };
 
+  // A spell just cast, played on the map before the state shows it: its
+  // points held, glowing and joined, for CAST_HOLD_MS; then each bursts
+  // once (BURST_MS). Only then is the state with the cast shown (held
+  // meanwhile, with any newer one), so the boss takes the damage and the
+  // points turn to cooled-down coins after the burst.
+  const CAST_HOLD_MS = 1000;
+  let castFx = $state<{ points: string[]; burst: boolean } | null>(null);
+  let held: TeamState | null = null;
+  let castTimer: ReturnType<typeof setTimeout> | undefined;
+  const playCast = (points: string[]) => {
+    castFx = { points, burst: false };
+    castTimer = setTimeout(() => {
+      castFx = { points, burst: true };
+      castTimer = setTimeout(() => {
+        castFx = null;
+        if (held && isNewer(ts.version, held.version)) live = held;
+        held = null;
+      }, BURST_MS);
+    }, CAST_HOLD_MS);
+  };
+  // The newest state seen, shown or held.
+  const latest = () => held ?? ts;
+
   // Every copy of the state, from the stream or a response, goes through
-  // here: it's kept only if newer than the one shown (by version; they can
-  // arrive in either order).
+  // here: it's kept only if newer than the newest seen (by version; they
+  // can arrive in either order). One carrying a new cast, made in the last
+  // 10 s (not one missed while away), is held while the cast plays.
   const observe = (s: TeamState) => {
-    if (!isNewer(ts.version, s.version)) return;
-    live = s;
+    if (!isNewer(latest().version, s.version)) return;
     const lc = s.last_cast;
     if (lc && !casts.some((c) => c.cast_at === lc.cast_at))
       casts = [lc, ...casts];
     if (s.cast_count > casts.length) refetchCasts();
+    const newCast =
+      lc &&
+      lc.cast_at !== latest().last_cast?.cast_at &&
+      Date.parse(lc.cast_at) > clock.now() - 10_000;
+    if (castFx || newCast) {
+      held = s;
+      if (!castFx && lc) playCast(lc.pattern);
+      return;
+    }
+    live = s;
   };
 
-  // The waypoints scanned in the current attempt, whose markers wiggle.
+  // The waypoints scanned in the current attempt, whose markers glow.
   let markedWaypoints = $derived(ts.stack.map((s) => s.waypoint_id));
 
   // The boss being fought, from the static list by the state's serial, or
@@ -238,7 +272,7 @@
       const { type, message: next } = envelope(TeamStateSchema).parse(
         JSON.parse(e.data),
       );
-      const fresh = isNewer(ts.version, next.version);
+      const fresh = isNewer(latest().version, next.version);
       const heldBefore = ts.powerups.held;
       observe(next);
       // Moments, on every phone: a teammate's cast that finished a boss,
@@ -281,6 +315,7 @@
       clearInterval(ticker);
       clearTimeout(toastTimer);
       clearTimeout(scanPopupTimer);
+      clearTimeout(castTimer);
       events.close();
       closeScanner();
     };
@@ -679,8 +714,9 @@
   <MapView
     bind:level={zoomLevel}
     markers={MAP_POINTS}
-    active={picking ? picked : markedWaypoints}
-    wrong={picking ? [] : ts.stack.filter((s) => s.wrong).map((s) => s.waypoint_id)}
+    active={castFx ? castFx.points : picking ? picked : markedWaypoints}
+    burst={castFx?.burst ? castFx.points : []}
+    wrong={castFx || picking ? [] : ts.stack.filter((s) => s.wrong).map((s) => s.waypoint_id)}
     onpick={picking ? pick : undefined}
     cooldowns={ts.qr_cooldowns}
     {now}
