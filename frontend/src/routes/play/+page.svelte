@@ -77,16 +77,37 @@
   let boss = $derived(
     ts.boss ? (bosses.find((b) => b.serial === ts.boss!.serial) ?? null) : null,
   );
-  // A boss just defeated, kept on the top bar while its death plays (its
-  // sprite clears it when done), then the next boss shows. Only a rise in
-  // bosses_defeated after the page loads starts one.
+  // The boss's reactions on the top bar, each played once by its sprite,
+  // which clears it when done. A hit (its damage rising) plays the damage
+  // animation; hits counts them, so another hit mid-way restarts it. A
+  // killing hit keeps the defeated boss (dying) for its damage, then its
+  // death, then the next boss shows; that one's hits meanwhile play
+  // nothing. Only changes after the page loads start any.
   let dying = $state<Boss | null>(null);
+  let hurt = $state(false);
+  let hits = $state(0);
   let lastDefeated = untrack(() => ts.bosses_defeated);
   let lastBoss = untrack(() => boss);
+  let lastDamage = untrack(() => ts.boss?.damage ?? 0);
   $effect(() => {
-    if (ts.bosses_defeated > lastDefeated && lastBoss) dying = lastBoss;
-    lastDefeated = ts.bosses_defeated;
-    lastBoss = boss;
+    const defeated = ts.bosses_defeated;
+    const current = boss;
+    const damage = ts.boss?.damage ?? 0;
+    // Only the state above reruns this, not the reactions it sets.
+    untrack(() => {
+      const killed = defeated > lastDefeated && lastBoss;
+      if (killed) dying = lastBoss;
+      if (
+        killed ||
+        (!dying && current && current.serial === lastBoss?.serial && damage > lastDamage)
+      ) {
+        hurt = true;
+        hits++;
+      }
+    });
+    lastDefeated = defeated;
+    lastBoss = current;
+    lastDamage = damage;
   });
   let shown = $derived(dying ?? boss);
   const bossName = (serial: number | null) =>
@@ -474,15 +495,19 @@
       {@const hp = dying ? 0 : Math.max(0, shown.hp - (ts.boss?.damage ?? 0))}
       <!-- The boss, as tall as its row: animated if it has a spritesheet,
            else its image (static/<asset>), else nothing, leaving the name
-           and health. A defeated boss plays its death before the next
-           shows. Keyed by serial so the next boss never inherits the last
-           one's sheet or hiding. -->
+           and health. A hit plays its damage; a defeated boss its damage
+           then its death before the next shows. Keyed by serial so the next
+           boss never inherits the last one's sheet or hiding. -->
       {#key shown.serial}
         <BossSprite
           serial={shown.serial}
           fallback={shown.asset}
-          animation={dying ? "death" : "idle"}
-          onend={() => (dying = null)}
+          animation={hurt ? "damage" : dying ? "death" : "idle"}
+          replay={hits}
+          onend={() => {
+            if (hurt) hurt = false;
+            else dying = null;
+          }}
           class="h-full w-auto shrink-0"
         />
       {/key}

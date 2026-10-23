@@ -1,7 +1,8 @@
 <script lang="ts">
     // A boss, animated from static/bosses_animation/<serial>.png, the
     // spritesheet its <serial>.json lays out: animation loops if the sheet
-    // says so, else plays once, holds its last frame and calls onend.
+    // says so, else plays once, holds its last frame and calls onend; a
+    // change to replay plays it again from the start.
     // Without a sheet (missing or malformed JSON) it falls back to the still
     // static/<fallback>, hidden if that's missing too; then, as without the
     // animation or with reduced motion, onend is called at once.
@@ -12,12 +13,14 @@
         serial,
         fallback,
         animation = "idle",
+        replay = 0,
         onend,
         class: className = "",
     }: {
         serial: number;
         fallback: string;
         animation?: string;
+        replay?: number;
         onend?: () => void;
         class?: string;
     } = $props();
@@ -85,11 +88,12 @@
 
     let current = $derived(sheet?.animations[animation] ?? null);
 
-    // Plays the animation from its first frame whenever it (or the sheet)
-    // changes. Nothing to play ends it at once, so a caller waiting on
-    // onend is never stuck.
+    // Plays the animation from its first frame whenever it (or the sheet, or
+    // replay) changes. Nothing to play ends it at once, so a caller waiting
+    // on onend is never stuck.
     $effect(() => {
         const anim = current;
+        replay;
         frame = 0;
         if (!sheet && !failed) return;
         const end = () => untrack(() => onend?.());
