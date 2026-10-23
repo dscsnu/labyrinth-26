@@ -142,6 +142,13 @@
     };
     const up = () => (drag = null);
 
+    // The point whose name shows (its marker tapped), if any; a tap on the
+    // page anywhere but on a button hides it.
+    let named = $state<string | null>(null);
+    const clickMap = (e: MouseEvent) => {
+        if (!(e.target as Element).closest("button")) named = null;
+    };
+
     // Start centred, like the map was before it moved.
     const centre = () => {
         if (!viewport) return;
@@ -166,6 +173,8 @@
         });
     });
 </script>
+
+<svelte:window onclick={clickMap} />
 
 <div
     bind:this={viewport}
@@ -247,6 +256,28 @@
                     style:top="{(m.y / MAP_SIZE.height) * 100}%"
                     class="absolute h-11 w-11 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-gold-light"
                 ></button>
+            {:else}
+                <!-- Otherwise a tap on the marker names it (again: hides). -->
+                <button
+                    type="button"
+                    aria-label={m.name}
+                    aria-expanded={named === m.name}
+                    onclick={() => (named = named === m.name ? null : m.name)}
+                    style:left="{(m.x / MAP_SIZE.width) * 100}%"
+                    style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                    class="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2"
+                ></button>
+            {/if}
+            {#if named === m.name}
+                <!-- The place's name, below the coin (a countdown is above). -->
+                <span
+                    aria-hidden="true"
+                    style:left="{(m.x / MAP_SIZE.width) * 100}%"
+                    style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                    class="pixel-box pointer-events-none absolute z-10 -translate-x-1/2 translate-y-[18px] bg-ink px-2 py-1 font-pixel text-[8px] leading-[12px] whitespace-nowrap text-paper uppercase"
+                >
+                    {m.name}
+                </span>
             {/if}
             {#if left > 0}
                 <span
