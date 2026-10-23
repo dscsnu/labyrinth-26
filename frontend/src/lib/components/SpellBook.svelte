@@ -153,6 +153,35 @@
     };
     const close = () => (open = false);
 
+    // One-finger swipes on the book: left turns to the next page, right to
+    // the previous, down closes it, if the page was already scrolled to its
+    // top (or the swipe began outside it, on the header or buttons), so
+    // scrolling back up never closes it by accident. A swipe must travel
+    // at least SWIPE_PX, mostly in its direction. Touch events, not pointer
+    // ones: those are cancelled once the browser starts scrolling.
+    const SWIPE_PX = 48;
+    let scroller = $state<HTMLElement | null>(null);
+    let swipeStart: { x: number; y: number; atTop: boolean } | null = null;
+    const touchStart = (e: TouchEvent) => {
+        if (e.touches.length !== 1) {
+            swipeStart = null;
+            return;
+        }
+        const t = e.touches[0];
+        const onPage = scroller?.contains(e.target as Node) ?? false;
+        swipeStart = { x: t.clientX, y: t.clientY, atTop: !onPage || (scroller?.scrollTop ?? 0) <= 0 };
+    };
+    const touchEnd = (e: TouchEvent) => {
+        if (!swipeStart) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - swipeStart.x;
+        const dy = t.clientY - swipeStart.y;
+        const { atTop } = swipeStart;
+        swipeStart = null;
+        if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > 1.5 * Math.abs(dy)) turn(dx < 0 ? 1 : -1);
+        else if (atTop && dy >= SWIPE_PX && dy > 1.5 * Math.abs(dx)) close();
+    };
+
     const keydown = (e: KeyboardEvent) => {
         if (!open) return;
         if (e.key === "Escape") close();
@@ -181,6 +210,10 @@
         role="dialog"
         aria-modal="true"
         aria-labelledby="spellbook-title"
+        tabindex="-1"
+        ontouchstart={touchStart}
+        ontouchend={touchEnd}
+        ontouchcancel={() => (swipeStart = null)}
         class="fixed inset-x-0 bottom-0 z-30 flex h-[90dvh] flex-col overflow-hidden bg-paper font-pixel text-[16px] leading-[24px] text-ink shadow-[0_-4px_0_0_var(--color-ink)]"
         transition:fly={{ y: "100%", duration: 250, opacity: 1 }}
     >
@@ -194,6 +227,7 @@
         <!-- The page, ruled like notebook paper, one rule per 24px line.
              Keyed by page so each turn slides the new one in. -->
         <div
+            bind:this={scroller}
             class="relative flex-1 overflow-y-auto overscroll-contain bg-[repeating-linear-gradient(transparent_0_23px,var(--color-paper-line)_23px_24px)] px-4 pt-4 pb-8"
         >
             {#if shape}
