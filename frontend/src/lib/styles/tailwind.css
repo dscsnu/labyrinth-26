@@ -1,19 +1,21 @@
 @import 'tailwindcss';
 
 /* Kongtext: a pixel font drawn on an 8×8 grid, so it's crisp at multiples
-   of 8px (8, 16, 24, 32). Used with the font-pixel class. */
+   of 8px (8, 16, 24, 32). Used with the font-pixel class. Blocking, not
+   swapping: text waits (briefly; it's preloaded) rather than flashing in
+   the fallback first. */
 @font-face {
     font-family: 'Kongtext';
     src: url('../assets/fonts/kongtext.ttf') format('truetype');
-    font-display: swap;
+    font-display: block;
 }
 
 /* Superfly: a heavy display face for main headings, like the Scott Pilgrim
-   game's logo. Used with the font-display class. */
+   game's logo. Used with the font-display class. Blocking, as above. */
 @font-face {
     font-family: 'Superfly';
-    src: url('../assets/fonts/SUPERFLY.TTF') format('truetype');
-    font-display: swap;
+    src: url('../assets/fonts/superfly.ttf') format('truetype');
+    font-display: block;
 }
 
 @theme {
