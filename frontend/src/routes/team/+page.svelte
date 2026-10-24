@@ -135,7 +135,13 @@
             </section>
 
             {#if team.status === "IN_GAME"}
-                <a href="/play" class={menuMain}>Enter the labyrinth <span class="motion-safe:animate-blink">&gt;</span></a>
+                <!-- Only once live (the footer's dot): until then a link can't
+                     be disabled, so a dead button stands in. -->
+                {#if connected}
+                    <a href="/play" class={menuMain}>Enter the labyrinth <span class="motion-safe:animate-blink">&gt;</span></a>
+                {:else}
+                    <button disabled class={menuMain}>Reconnecting</button>
+                {/if}
             {/if}
 
             <!-- The roster: one slot per member, then the empty ones -->

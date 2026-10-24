@@ -74,7 +74,7 @@
     // Without a sheet (missing or malformed JSON) it falls back to the still
     // static/<fallback>, hidden if that's missing too; then, as without the
     // animation or with reduced motion, onend is called at once.
-    import { BOSS_STILLS, bossStillUrl } from "#lib/game/bossStills.ts";
+    import { BOSS_FALLBACKS, BOSS_STILLS, bossStillUrl } from "#lib/game/bossStills.ts";
     import { untrack } from "svelte";
 
     let {
@@ -197,11 +197,11 @@
     <img
         src="/{fallback}"
         alt=""
-        width="628"
-        height="802"
+        width={BOSS_FALLBACKS[serial]?.w}
+        height={BOSS_FALLBACKS[serial]?.h}
         draggable="false"
         {hidden}
         onerror={() => (hidden = true)}
-        class="object-contain {className}"
+        class="object-contain [image-rendering:pixelated] {className}"
     />
 {/if}
