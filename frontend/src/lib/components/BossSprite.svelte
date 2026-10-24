@@ -46,7 +46,7 @@
         width: number;
         height: number;
         animations: Record<string, { loop: boolean; frames: z.infer<typeof FrameSchema>[] }>;
-        // One box, relative to a frame's left edge, round every idle frame's
+        // One box, relative to a frame's top-left corner, round every idle frame's
         // sprite: frames are mostly empty above the boss, and sharing a box
         // keeps its baseline still. Every animation is drawn at its scale;
         // bigger ones (death's beam) spill out of it, clipped to their frame.
@@ -71,9 +71,9 @@
                 const { imageWidth, imageHeight, animations } = SheetSchema.parse(json);
                 const idle = animations.idle.frames;
                 const left = Math.min(...idle.map((f) => f.sprite.x - f.x));
-                const top = Math.min(...idle.map((f) => f.sprite.y));
+                const top = Math.min(...idle.map((f) => f.sprite.y - f.y));
                 const right = Math.max(...idle.map((f) => f.sprite.x - f.x + f.sprite.w));
-                const bottom = Math.max(...idle.map((f) => f.sprite.y + f.sprite.h));
+                const bottom = Math.max(...idle.map((f) => f.sprite.y - f.y + f.sprite.h));
                 sheet = {
                     width: imageWidth,
                     height: imageHeight,
@@ -123,7 +123,7 @@
     <!-- Untouchable: the frame overflows the box, mostly transparent but
          still hit-tested, over whatever is above it (the back button). -->
     <svg
-        viewBox="{f.x + sheet.crop.x} {sheet.crop.y} {sheet.crop.w} {sheet.crop.h}"
+        viewBox="{f.x + sheet.crop.x} {f.y + sheet.crop.y} {sheet.crop.w} {sheet.crop.h}"
         width={sheet.crop.w}
         height={sheet.crop.h}
         overflow="visible"
