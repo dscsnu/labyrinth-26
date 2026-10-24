@@ -1,12 +1,16 @@
 <script lang="ts">
+    import SpellFigure from "#lib/components/SpellFigure.svelte";
+    import { spellFigure } from "#lib/game/spellFigure.ts";
     import type { Cast, GameShape } from "#lib/types/Game.type.ts";
     import { untrack } from "svelte";
     import { fade, fly } from "svelte/transition";
 
     // The spell book: a sheet of paper that slides up over 90% of the screen.
-    // Each shape is a page: its rules (points, damage range, how many
-    // patterns), then the patterns the team has discovered, from the cast
-    // log, so it fills in live as anyone on the team casts. The arrows at the
+    // Each shape is a page, fewest points first: its shape and rules (points,
+    // damage range, and how many of its patterns the team has found, from
+    // the cast log, so it counts up live as anyone on the team casts). A
+    // shape split into damage bands (VARIANTS) gets a tab per band on its
+    // page, each with its own rules and count. The arrows at the
     // bottom turn the pages; close is between them. The leader also gets a
     // button on each page to select its spell, or clear the selection on the
     // selected one's page; the book only raises onselect/onclear, and the
@@ -46,23 +50,20 @@
         message?: { ok: boolean; text: string } | null;
     } = $props();
 
-    // Each shape's discovered patterns, first cast first: the waypoints, the
-    // spell's damage and how many times the team has cast it.
+    // Each shape's discovered patterns, once each: the spell's damage, which
+    // says its band.
     let discovered = $derived.by(() => {
-        const byShape = new Map<string, Map<string, { pattern: string[]; damage: number; times: number }>>();
-        for (const c of [...casts].reverse()) {
+        const byShape = new Map<string, Map<string, { damage: number }>>();
+        for (const c of casts) {
             const patterns = byShape.get(c.shape) ?? new Map();
             byShape.set(c.shape, patterns);
-            const key = c.pattern.join("-");
-            const known = patterns.get(key);
-            if (known) known.times++;
-            else patterns.set(key, { pattern: c.pattern, damage: c.damage, times: 1 });
+            patterns.set(c.pattern.join("-"), { damage: c.damage });
         }
         return new Map([...byShape].map(([shape, patterns]) => [shape, [...patterns.values()]]));
     });
 
     // Shapes whose patterns fall into separate damage bands, each its own
-    // page. The backend sends one range per shape, so these mirror
+    // tab. The backend sends one range per shape, so these mirror
     // backend/internal/spells/README.md §5: concave quadrilaterals get
     // spell.bonus.concave_quad on top. Update them if [spell] in
     // config.toml changes. The bands don't overlap, so a cast's damage
@@ -74,48 +75,58 @@
         ],
     };
 
-    type Page = {
-        key: string;
-        shapeId: string;
+    type Tab = {
         name: string;
-        points: number[];
         damage: { min: number; max: number };
         patterns: number;
         matches: (damage: number) => boolean;
     };
+    type Page = { shapeId: string; name: string; points: number[]; tabs: Tab[] };
 
-    // One page per shape, or per band of a shape in VARIANTS. A band holds
-    // the casts whose damage reaches its min and not the next band's.
+    // One page per shape, by its fewest points (the backend sends them by
+    // id), with a tab per band of a shape in VARIANTS, else one holding the
+    // whole shape. A band holds the casts whose damage reaches its min and
+    // not the next band's.
     let pages = $derived(
-        shapes.flatMap((s): Page[] => {
-            const variants = VARIANTS[s.id];
-            if (!variants) return [{ key: s.id, shapeId: s.id, name: s.name, points: s.points, damage: s.damage, patterns: s.patterns, matches: () => true }];
-            return variants.map((v, i) => ({
-                key: `${s.id}-${v.name}`,
-                shapeId: s.id,
-                name: `${v.name} ${s.name}`,
-                points: s.points,
-                damage: v.damage,
-                patterns: v.patterns,
-                matches: (d) => (i === 0 || d >= v.damage.min) && (i === variants.length - 1 || d < variants[i + 1].damage.min),
-            }));
-        }),
+        [...shapes]
+            .sort((a, b) => Math.min(...a.points) - Math.min(...b.points) || a.name.localeCompare(b.name))
+            .map((s): Page => {
+                const variants = VARIANTS[s.id];
+                const tabs: Tab[] = variants
+                    ? variants.map((v, i) => ({
+                          name: v.name,
+                          damage: v.damage,
+                          patterns: v.patterns,
+                          matches: (d) =>
+                              (i === 0 || d >= v.damage.min) && (i === variants.length - 1 || d < variants[i + 1].damage.min),
+                      }))
+                    : [{ name: s.name, damage: s.damage, patterns: s.patterns, matches: () => true }];
+                return { shapeId: s.id, name: s.name, points: s.points, tabs };
+            }),
     );
 
     // The page shown (an index into pages), and which way the last turn
-    // went, so the new page slides in from that side.
+    // went, so the new page slides in from that side; and its tab, the
+    // first again on every turn.
     let page = $state(0);
     let dir = $state(1);
+    let tab = $state(0);
     let shape = $derived(pages[Math.min(page, pages.length - 1)]);
-    let known = $derived(shape ? (discovered.get(shape.shapeId) ?? []).filter((p) => shape.matches(p.damage)) : []);
+    let current = $derived(shape?.tabs[Math.min(tab, shape.tabs.length - 1)]);
+    let known = $derived(
+        shape && current ? (discovered.get(shape.shapeId) ?? []).filter((p) => current.matches(p.damage)) : [],
+    );
 
-    // Opening the book turns to the team's selected shape (its first page),
-    // if it has one; otherwise to the page it was left on. Only on opening:
-    // a teammate selecting while it's open doesn't turn the reader's page.
+    // Opening the book turns to the team's selected shape, if it has one;
+    // otherwise to the page it was left on. Only on opening: a teammate
+    // selecting while it's open doesn't turn the reader's page.
     $effect(() => {
         if (!open) return;
         const i = untrack(() => pages.findIndex((p) => p.shapeId === selected));
-        if (i >= 0) page = i;
+        if (i >= 0 && i !== untrack(() => page)) {
+            page = i;
+            tab = 0;
+        }
     });
 
     const turn = (by: number) => {
@@ -123,8 +134,38 @@
         if (next < 0 || next >= pages.length) return;
         dir = by;
         page = next;
+        tab = 0;
     };
     const close = () => (open = false);
+
+    // One-finger swipes on the book: left turns to the next page, right to
+    // the previous, down closes it, if the page was already scrolled to its
+    // top (or the swipe began outside it, on the header or buttons), so
+    // scrolling back up never closes it by accident. A swipe must travel
+    // at least SWIPE_PX, mostly in its direction. Touch events, not pointer
+    // ones: those are cancelled once the browser starts scrolling.
+    const SWIPE_PX = 48;
+    let scroller = $state<HTMLElement | null>(null);
+    let swipeStart: { x: number; y: number; atTop: boolean } | null = null;
+    const touchStart = (e: TouchEvent) => {
+        if (e.touches.length !== 1) {
+            swipeStart = null;
+            return;
+        }
+        const t = e.touches[0];
+        const onPage = scroller?.contains(e.target as Node) ?? false;
+        swipeStart = { x: t.clientX, y: t.clientY, atTop: !onPage || (scroller?.scrollTop ?? 0) <= 0 };
+    };
+    const touchEnd = (e: TouchEvent) => {
+        if (!swipeStart) return;
+        const t = e.changedTouches[0];
+        const dx = t.clientX - swipeStart.x;
+        const dy = t.clientY - swipeStart.y;
+        const { atTop } = swipeStart;
+        swipeStart = null;
+        if (Math.abs(dx) >= SWIPE_PX && Math.abs(dx) > 1.5 * Math.abs(dy)) turn(dx < 0 ? 1 : -1);
+        else if (atTop && dy >= SWIPE_PX && dy > 1.5 * Math.abs(dx)) close();
+    };
 
     const keydown = (e: KeyboardEvent) => {
         if (!open) return;
@@ -154,6 +195,10 @@
         role="dialog"
         aria-modal="true"
         aria-labelledby="spellbook-title"
+        tabindex="-1"
+        ontouchstart={touchStart}
+        ontouchend={touchEnd}
+        ontouchcancel={() => (swipeStart = null)}
         class="fixed inset-x-0 bottom-0 z-30 flex h-[90dvh] flex-col overflow-hidden bg-paper font-pixel text-[16px] leading-[24px] text-ink shadow-[0_-4px_0_0_var(--color-ink)]"
         transition:fly={{ y: "100%", duration: 250, opacity: 1 }}
     >
@@ -167,6 +212,7 @@
         <!-- The page, ruled like notebook paper, one rule per 24px line.
              Keyed by page so each turn slides the new one in. -->
         <div
+            bind:this={scroller}
             class="relative flex-1 overflow-y-auto overscroll-contain bg-[repeating-linear-gradient(transparent_0_23px,var(--color-paper-line)_23px_24px)] px-4 pt-4 pb-8"
         >
             {#if shape}
@@ -182,36 +228,47 @@
                                 <span class="bg-ink px-2 text-[8px] leading-[16px] text-paper">Cooldown</span>
                             {/if}
                         </h3>
-                        <!-- Where the spell's shape will be drawn: a centred square,
+                        <!-- A shape's bands as tabs: same spell, same select
+                             button, each its own damage and found count. -->
+                        {#if shape.tabs.length > 1}
+                            <div role="tablist" aria-label="{shape.name} types" class="mt-4 flex justify-center gap-2">
+                                {#each shape.tabs as t, i (t.name)}
+                                    <button
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={t === current}
+                                        onclick={() => (tab = i)}
+                                        class="pixel-box px-3 py-1 text-[8px] leading-[16px] uppercase active:pixel-box-pressed {t === current
+                                            ? 'bg-ink text-paper'
+                                            : 'bg-paper text-ink'}"
+                                    >
+                                        {t.name}
+                                    </button>
+                                {/each}
+                            </div>
+                        {/if}
+                        <!-- The spell's shape (the open tab's): a centred square,
                              half the page's width but at most a quarter of the
                              screen's height, so the details below stay in view on a
-                             wide or short screen. A placeholder for now. -->
-                        <div
-                            class="mx-auto mt-4 flex aspect-square w-[min(50%,25dvh)] items-center justify-center border-4 border-dashed border-ink/30 p-2 text-center text-[8px] leading-[16px] opacity-60"
-                        >
-                            After backend frontend integration, I will add the spell shapes
+                             wide or short screen. Dark, as yellow barely shows on
+                             the paper. -->
+                        <div class="pixel-box mx-auto mt-4 aspect-square w-[min(50%,25dvh)] bg-night p-1">
+                            <SpellFigure
+                                vertices={spellFigure(shape.shapeId, shape.points, current?.name)}
+                                label="{shape.tabs.length > 1 && current ? `${current.name} ` : ''}{shape.name} shape"
+                                class="block h-full w-full"
+                            />
                         </div>
                         <dl class="mt-4 grid grid-cols-[auto_1fr] gap-x-4 text-[8px] leading-[24px] uppercase">
                             <dt class="opacity-60">Points</dt>
                             <dd>{shape.points.join(" or ")}</dd>
-                            <dt class="opacity-60">Damage range</dt>
-                            <dd>{shape.damage.min === shape.damage.max ? shape.damage.min : `${shape.damage.min} to ${shape.damage.max}`}</dd>
-                            <dt class="opacity-60">Found</dt>
-                            <dd>{known.length} / {shape.patterns} patterns</dd>
+                            {#if current}
+                                <dt class="opacity-60">Damage range</dt>
+                                <dd>{current.damage.min === current.damage.max ? current.damage.min : `${current.damage.min} to ${current.damage.max}`}</dd>
+                                <dt class="opacity-60">Found</dt>
+                                <dd>{known.length} / {current.patterns} patterns</dd>
+                            {/if}
                         </dl>
-                        <h4 class="mt-6 text-[8px] leading-[24px] uppercase opacity-60">Discovered</h4>
-                        {#if known.length > 0}
-                            <ul class="text-[8px] leading-[24px]">
-                                {#each known as p (p.pattern.join("-"))}
-                                    <li class="flex justify-between gap-4">
-                                        <span class="min-w-0 break-words">{p.pattern.join(" › ")}</span>
-                                        <span class="shrink-0">{p.damage} dmg{p.times > 1 ? ` ×${p.times}` : ""}</span>
-                                    </li>
-                                {/each}
-                            </ul>
-                        {:else}
-                            <p class="text-[8px] leading-[24px]">None yet. Cast one to write it here.</p>
-                        {/if}
                     </section>
                 {/key}
             {:else}
@@ -220,9 +277,9 @@
         </div>
 
         <!-- The leader's button, pinned under the page so it's never
-             scrolled out of view: clear on the selected spell's page (both
-             quadrilateral pages: the backend selects the shape, not the
-             band), select on the others, disabled while another spell is
+             scrolled out of view: clear on the selected spell's page (on
+             every tab: the backend selects the shape, not the band),
+             select on the others, disabled while another spell is
              selected. -->
         {#if isLeader && shape}
             {@const isSelected = shape.shapeId === selected}

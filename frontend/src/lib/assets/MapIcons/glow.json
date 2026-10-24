@@ -1,0 +1,112 @@
+{
+  "image": "spritesheet.png",
+  "imageWidth": 3996,
+  "imageHeight": 767,
+  "frameHeight": 767,
+  "note": "Use each frame's own x, y, w, h. Within one line, frame i is at x = startX + i*stride. Each sprite is centred on its own vertical axis in its frame, and keeps its original vertical position.",
+  "spacing": {
+    "gapBetweenFramesInSet": 20,
+    "gapBetweenSets": 170
+  },
+  "animations": {
+    "glow": {
+      "event": "GLOW",
+      "loop": false,
+      "frameCount": 6,
+      "startX": 40,
+      "startY": 0,
+      "stride": 656,
+      "frameWidth": 636,
+      "frameHeight": 767,
+      "rows": [
+        {
+          "firstFrame": 0,
+          "frameCount": 6,
+          "startX": 40,
+          "startY": 0,
+          "frameHeight": 767
+        }
+      ],
+      "frames": [
+        {
+          "index": 0,
+          "x": 40,
+          "y": 0,
+          "w": 636,
+          "h": 767,
+          "sprite": {
+            "x": 299,
+            "y": 326,
+            "w": 121,
+            "h": 122
+          }
+        },
+        {
+          "index": 1,
+          "x": 696,
+          "y": 0,
+          "w": 636,
+          "h": 767,
+          "sprite": {
+            "x": 917,
+            "y": 285,
+            "w": 204,
+            "h": 218
+          }
+        },
+        {
+          "index": 2,
+          "x": 1352,
+          "y": 0,
+          "w": 636,
+          "h": 767,
+          "sprite": {
+            "x": 1540,
+            "y": 257,
+            "w": 263,
+            "h": 268
+          }
+        },
+        {
+          "index": 3,
+          "x": 2008,
+          "y": 0,
+          "w": 636,
+          "h": 767,
+          "sprite": {
+            "x": 2104,
+            "y": 179,
+            "w": 421,
+            "h": 397
+          }
+        },
+        {
+          "index": 4,
+          "x": 2664,
+          "y": 0,
+          "w": 636,
+          "h": 767,
+          "sprite": {
+            "x": 2707,
+            "y": 56,
+            "w": 576,
+            "h": 654
+          }
+        },
+        {
+          "index": 5,
+          "x": 3320,
+          "y": 0,
+          "w": 636,
+          "h": 767,
+          "sprite": {
+            "x": 3321,
+            "y": 20,
+            "w": 602,
+            "h": 727
+          }
+        }
+      ]
+    }
+  }
+}

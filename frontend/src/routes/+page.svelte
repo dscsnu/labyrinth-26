@@ -16,7 +16,6 @@
             ? [
                   { label: "Team", href: "/team" },
                   { label: "Leaderboard", href: "/leaderboard" },
-                  { label: "Test scan", href: "/test-scan" },
                   ...(user.role === "HELPER" || user.role === "ADMIN" ? [{ label: "QR display", href: "/qr" }] : []),
                   ...(user.role === "ADMIN" ? [{ label: "Admin", href: "/admin" }] : []),
               ]
@@ -71,6 +70,7 @@
                             onmouseenter={() => (selected = i)}
                             onfocus={() => (selected = i)}
                             onkeydown={keydown}
+                            aria-describedby={user ? undefined : "login-hint"}
                             class="shrink-0 px-1 outline-none {on ? 'bg-pink' : 'text-outline'}"
                         >
                             {item.label}
@@ -83,13 +83,22 @@
                     </li>
                 {/each}
             </ul>
+            <!-- Signed out: which account to sign in with, under the button. -->
+            {#if !user}
+                <p
+                    id="login-hint"
+                    class="pixel-box mx-auto mt-4 flex w-fit max-w-[calc(100%-2.5rem)] items-center gap-3 bg-ink/80 px-3 py-2 text-[8px] leading-[16px] uppercase"
+                >
+                    <span aria-hidden="true" class="flex h-5 w-5 shrink-0 items-center justify-center bg-cyan text-ink">i</span>
+                    Please log in with your SNU ID
+                </p>
+            {/if}
         </nav>
     </main>
 
-    <!-- The bottom bar: sign out on the left (like /team's back), and under
-         it, centred, a note that this look is borrowed for now. -->
-    <footer class="fixed inset-x-0 bottom-0 flex flex-col gap-3 bg-black/60 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        {#if user}
+    <!-- The bottom bar, signed in: sign out on the left (like /team's back). -->
+    {#if user}
+        <footer class="fixed inset-x-0 bottom-0 flex flex-col gap-3 bg-black/60 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
             <form method="POST" action="/auth/logout" class="self-start">
                 <button type="submit" class="flex items-center gap-2 uppercase text-outline hover:text-pink">
                     <span aria-hidden="true" class="flex h-6 w-6 items-center justify-center rounded-full border-2 border-ink bg-[#c7ccd8]">
@@ -98,10 +107,6 @@
                     Log out
                 </button>
             </form>
-        {/if}
-        <p class="mx-auto max-w-md text-center text-[8px] leading-[16px] text-white/80">
-            Don't mind me copying the game ui shamelessly, i will change this up with our assets later once the complete
-            integration is done
-        </p>
-    </footer>
+        </footer>
+    {/if}
 </div>

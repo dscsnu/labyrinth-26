@@ -1,19 +1,21 @@
 @import 'tailwindcss';
 
 /* Kongtext: a pixel font drawn on an 8×8 grid, so it's crisp at multiples
-   of 8px (8, 16, 24, 32). Used with the font-pixel class. */
+   of 8px (8, 16, 24, 32). Used with the font-pixel class. Blocking, not
+   swapping: text waits (briefly; it's preloaded) rather than flashing in
+   the fallback first. */
 @font-face {
     font-family: 'Kongtext';
     src: url('../assets/fonts/kongtext.ttf') format('truetype');
-    font-display: swap;
+    font-display: block;
 }
 
 /* Superfly: a heavy display face for main headings, like the Scott Pilgrim
-   game's logo. Used with the font-display class. */
+   game's logo. Used with the font-display class. Blocking, as above. */
 @font-face {
     font-family: 'Superfly';
-    src: url('../assets/fonts/SUPERFLY.TTF') format('truetype');
-    font-display: swap;
+    src: url('../assets/fonts/superfly.ttf') format('truetype');
+    font-display: block;
 }
 
 @theme {
@@ -47,33 +49,39 @@
         50% { opacity: 0; }
     }
 
-    /* A map marker bobbing up and down, its gold glow swelling at the top
-       of each bob. It animates transform, which adds to Tailwind's
-       translate-* (the separate translate property), so a marker's tip
-       stays on its point. drop-shadow follows the sprite's outline. */
-    --animate-wiggle: wiggle 0.8s ease-in-out infinite;
-    @keyframes wiggle {
+    /* blink, three times quickly then done: for a one-off alert. */
+    --animate-blink-thrice: blink 0.4s steps(1) 3;
+
+    /* A hard blink, switching between invisible and --flash-max (default
+       fully opaque) with no fade: half the beat each. */
+    --animate-flash: flash 1s steps(1) infinite;
+    @keyframes flash {
+        0%, 100% { opacity: 0; }
+        50% { opacity: var(--flash-max, 1); }
+    }
+
+    /* A pixel-box whose outline alone blinks hard, ink to white and back:
+       pixel-box's shadows, with the outline's colour switched. */
+    --animate-edge-blink: edge-blink 1s steps(1) infinite;
+    @keyframes edge-blink {
         0%, 100% {
-            transform: translateY(0) scale(1.25);
-            filter: drop-shadow(0 0 2px white) drop-shadow(0 0 6px var(--color-gold-light));
+            box-shadow:
+                0 -4px 0 0 var(--color-ink),
+                0 4px 0 0 var(--color-ink),
+                -4px 0 0 0 var(--color-ink),
+                4px 0 0 0 var(--color-ink),
+                inset 0 4px 0 0 rgb(255 255 255 / 0.15),
+                inset 0 -4px 0 0 rgb(0 0 0 / 0.3);
         }
         50% {
-            transform: translateY(-10px) scale(1.5);
-            filter: drop-shadow(0 0 2px white) drop-shadow(0 0 8px var(--color-gold-light))
-                drop-shadow(0 0 16px var(--color-gold));
+            box-shadow:
+                0 -4px 0 0 white,
+                0 4px 0 0 white,
+                -4px 0 0 0 white,
+                4px 0 0 0 white,
+                inset 0 4px 0 0 rgb(255 255 255 / 0.15),
+                inset 0 -4px 0 0 rgb(0 0 0 / 0.3);
         }
-    }
-}
-
-/* Scale from the arrow's tip, so it grows up off its point. */
-.animate-wiggle { transform-origin: bottom; }
-
-@media (prefers-reduced-motion: reduce) {
-    .animate-wiggle {
-        animation: none;
-        transform: scale(1.5);
-        filter: drop-shadow(0 0 2px white) drop-shadow(0 0 8px var(--color-gold-light))
-            drop-shadow(0 0 16px var(--color-gold));
     }
 }
 

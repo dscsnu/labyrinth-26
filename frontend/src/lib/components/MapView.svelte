@@ -1,17 +1,28 @@
 <script lang="ts" module>
     // The zoom steps, as multiples of the fitted size (1 = the map's height
     // is its parent's). level indexes into these.
-    export const ZOOM_LEVELS = [1, 1.5, 2, 3, 4];
+    export const ZOOM_LEVELS = [1, 1.25, 1.5, 2, 3, 4];
+
+    import glow from "#lib/assets/MapIcons/glow.json";
+    // How long a point's burst (glow.png's animation, played once) takes:
+    // 100 ms a frame, as every marker's.
+    export const BURST_MS = glow.animations.glow.frameCount * 100;
 </script>
 
 <script lang="ts">
     import mapUrl from "#lib/assets/map.webp";
-    import markerUrl from "#lib/assets/MapIcons/down-arrow.png";
+    import coinsUrl from "#lib/assets/MapIcons/coins.png";
+    import coins from "#lib/assets/MapIcons/coins.json";
+    import glowPulseUrl from "#lib/assets/MapIcons/glow_pulse.png";
+    import glowPulse from "#lib/assets/MapIcons/glow_pulse.json";
+    import glowUrl from "#lib/assets/MapIcons/glow.png";
     import { MAP_SIZE, type MapPoint } from "#lib/game/mapPoints.ts";
     import { tick, untrack } from "svelte";
 
-    // markers: the points to mark, each drawn with its tip on its spot.
-    // active: waypoint IDs whose markers wiggle (the team's scanned points).
+    // markers: the points to mark, each a spinning coin centred on its spot.
+    // active: waypoint IDs whose markers glow instead (the team's scanned
+    // points).
+    // burst: waypoint IDs that burst instead, once (a spell just cast).
     // wrong: those of them whose scan fit no pattern; the path into one is red.
     // onpick: when set, every point is a button that calls it with its
     // waypoint (picking an instant cast's pattern).
@@ -23,6 +34,7 @@
         level = $bindable(0),
         markers = [],
         active = [],
+        burst = [],
         wrong = [],
         onpick,
         cooldowns = [],
@@ -31,6 +43,7 @@
         level?: number;
         markers?: MapPoint[];
         active?: string[];
+        burst?: string[];
         wrong?: string[];
         onpick?: (waypoint: string) => void;
         cooldowns?: { waypoint_id: string; until: string }[];
@@ -60,6 +73,47 @@
             return { a, b, wrong: a.wrong || b.wrong };
         });
     });
+    // A marker's look, from a spritesheet laid out by its JSON: the
+    // animation's frames sit in a row at startX + i × stride, each sprite
+    // centred in its frame, so a box round every frame's sprite, as wide as
+    // a frame, is centred on it. Shown px wide and stepped through the
+    // frames by CSS (a background sliding a whole stride each step), one
+    // 100 ms frame each; see .sprite.
+    type Sheet = {
+        imageWidth: number;
+        imageHeight: number;
+        animations: Record<string, {
+            frameCount: number;
+            startX: number;
+            stride: number;
+            frameWidth: number;
+            frames: { sprite: { y: number; h: number } }[];
+        }>;
+    };
+    const sheetStyle = (sheet: Sheet, url: string, name: string, px: number) => {
+        const anim = sheet.animations[name];
+        const top = Math.min(...anim.frames.map((f) => f.sprite.y));
+        const bottom = Math.max(...anim.frames.map((f) => f.sprite.y + f.sprite.h));
+        const k = px / anim.frameWidth;
+        return [
+            `--sprite-w: ${px}px`,
+            `--sprite-h: ${(bottom - top) * k}px`,
+            `--sprite-sheet: url(${url})`,
+            `--sprite-size: ${sheet.imageWidth * k}px ${sheet.imageHeight * k}px`,
+            `--sprite-x0: ${-anim.startX * k}px`,
+            `--sprite-x1: ${-(anim.startX + anim.frameCount * anim.stride) * k}px`,
+            `--sprite-y: ${-top * k}px`,
+            `--sprite-steps: ${anim.frameCount}`,
+            `--sprite-ms: ${anim.frameCount * 100}ms`,
+        ].join(";");
+    };
+    // A point: a spinning coin, 24px across. A scanned one: a pulsing glow
+    // instead, at its biggest a little wider than the coin.
+    const coinStyle = sheetStyle(coins, coinsUrl, "spin", 24);
+    const glowStyle = sheetStyle(glowPulse, glowPulseUrl, "pulse", 36);
+    // A cast's burst, at its biggest about three coins across.
+    const burstStyle = sheetStyle(glow, glowUrl, "glow", 72);
+
     const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     let zoom = $derived(ZOOM_LEVELS[Math.max(0, Math.min(level, ZOOM_LEVELS.length - 1))]);
 
@@ -88,6 +142,13 @@
     };
     const up = () => (drag = null);
 
+    // The point whose name shows (its marker tapped), if any; a tap on the
+    // page anywhere but on a button hides it.
+    let named = $state<string | null>(null);
+    const clickMap = (e: MouseEvent) => {
+        if (!(e.target as Element).closest("button")) named = null;
+    };
+
     // Start centred, like the map was before it moved.
     const centre = () => {
         if (!viewport) return;
@@ -112,6 +173,8 @@
         });
     });
 </script>
+
+<svelte:window onclick={clickMap} />
 
 <div
     bind:this={viewport}
@@ -142,8 +205,10 @@
             class="block h-full w-full [image-rendering:pixelated]"
         />
         <!-- The path through the points scanned so far, under the markers.
-             In map pixels, stretched with the map; the stroke stays the
-             same width on screen at every zoom. -->
+             In map pixels, stretched with the map; the strokes stay the
+             same width on screen at every zoom. No outline: the glow
+             pulse's white core, haloed by two wider, fainter strokes of
+             its pale yellow rim (red for a wrong scan's path). -->
         <svg
             viewBox="0 0 {MAP_SIZE.width} {MAP_SIZE.height}"
             preserveAspectRatio="none"
@@ -151,46 +216,77 @@
             class="pointer-events-none absolute inset-0 h-full w-full"
         >
             {#each segments as { a, b, wrong } (`${a.waypoint}-${b.waypoint}`)}
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="var(--color-ink)" stroke-width="8" stroke-linecap="round" vector-effect="non-scaling-stroke" />
-                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={wrong ? "var(--color-danger)" : "var(--color-gold-light)"} stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                {@const glow = wrong ? "var(--color-danger)" : "#f9f3a3"}
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={glow} stroke-opacity="0.15" stroke-width="14" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={glow} stroke-opacity="0.35" stroke-width="8" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={wrong ? "var(--color-danger)" : "#f7f8f8"} stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke" />
             {/each}
         </svg>
-        <!-- Each marker's bottom-centre (the arrow's tip) on its point. The
-             same size at every zoom; taps pass through to the map. A point
-             on QR cooldown is dimmed, its countdown above the arrow. -->
+        <!-- Each marker a coin, a scanned point's glow or a cast's burst,
+             its centre on its point. The same size at every zoom; taps pass through to the
+             map. A point on QR cooldown is dimmed, its countdown above it. -->
         {#each markers as m (m.name)}
             {@const left = cooldownLeft(m.waypoint)}
-            <img
-                src={markerUrl}
-                alt={left > 0 ? `${m.name}, on cooldown` : m.name}
-                width="16"
-                height="16"
-                draggable="false"
+            <span
+                role="img"
+                aria-label={left > 0 ? `${m.name}, on cooldown` : m.name}
                 style:left="{(m.x / MAP_SIZE.width) * 100}%"
                 style:top="{(m.y / MAP_SIZE.height) * 100}%"
-                class:animate-wiggle={active.includes(m.waypoint)}
                 class:opacity-50={left > 0}
                 class:grayscale={left > 0}
-                class="pointer-events-none absolute h-4 w-4 max-w-none -translate-x-1/2 -translate-y-full [image-rendering:pixelated]"
-            />
+                class="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2"
+            >
+                {#if burst.includes(m.waypoint)}
+                    <span class="sprite once block" style={burstStyle}></span>
+                {:else}
+                    <span
+                        class="sprite block"
+                        style={active.includes(m.waypoint) ? glowStyle : coinStyle}
+                    ></span>
+                {/if}
+            </span>
             {#if onpick}
-                <!-- A 44px target centred on the arrow. -->
+                <!-- A 44px target centred on the marker; none on a point on
+                     QR cooldown, which can't be picked. -->
                 <button
                     type="button"
                     aria-label="Pick {m.name}"
                     aria-pressed={active.includes(m.waypoint)}
+                    disabled={left > 0}
                     onclick={() => onpick(m.waypoint)}
                     style:left="{(m.x / MAP_SIZE.width) * 100}%"
                     style:top="{(m.y / MAP_SIZE.height) * 100}%"
-                    class="absolute h-11 w-11 -translate-x-1/2 -translate-y-[calc(50%+8px)] rounded-full border-2 border-dashed border-gold-light"
+                    class="absolute h-11 w-11 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-gold-light disabled:invisible"
                 ></button>
+            {:else}
+                <!-- Otherwise a tap on the marker names it (again: hides). -->
+                <button
+                    type="button"
+                    aria-label={m.name}
+                    aria-expanded={named === m.name}
+                    onclick={() => (named = named === m.name ? null : m.name)}
+                    style:left="{(m.x / MAP_SIZE.width) * 100}%"
+                    style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                    class="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2"
+                ></button>
+            {/if}
+            {#if named === m.name}
+                <!-- The place's name, below the coin (a countdown is above). -->
+                <span
+                    aria-hidden="true"
+                    style:left="{(m.x / MAP_SIZE.width) * 100}%"
+                    style:top="{(m.y / MAP_SIZE.height) * 100}%"
+                    class="pixel-box pointer-events-none absolute z-10 -translate-x-1/2 translate-y-[18px] bg-ink px-2 py-1 font-pixel text-[8px] leading-[12px] whitespace-nowrap text-paper uppercase"
+                >
+                    {m.name}
+                </span>
             {/if}
             {#if left > 0}
                 <span
                     aria-hidden="true"
                     style:left="{(m.x / MAP_SIZE.width) * 100}%"
                     style:top="{(m.y / MAP_SIZE.height) * 100}%"
-                    class="pointer-events-none absolute -translate-x-1/2 translate-y-[calc(-100%-18px)] bg-ink px-1 font-pixel text-[8px] leading-[12px] whitespace-nowrap text-paper"
+                    class="pointer-events-none absolute -translate-x-1/2 translate-y-[calc(-100%-14px)] bg-ink px-1 font-pixel text-[8px] leading-[12px] whitespace-nowrap text-paper"
                 >
                     {mmss(left)}
                 </span>
@@ -198,3 +294,29 @@
         {/each}
     </div>
 </div>
+
+<style>
+    /* A marker, looping through its sheet's frames (sheetStyle); still on
+       its first with reduced motion. */
+    .sprite {
+        width: var(--sprite-w);
+        height: var(--sprite-h);
+        background: var(--sprite-sheet) no-repeat var(--sprite-x0) var(--sprite-y) / var(--sprite-size);
+        animation: sprite-loop var(--sprite-ms) steps(var(--sprite-steps)) infinite;
+    }
+    /* Played once, then gone: it ends a stride past the last frame. */
+    .sprite.once {
+        animation-iteration-count: 1;
+        animation-fill-mode: forwards;
+    }
+    @keyframes sprite-loop {
+        to {
+            background-position-x: var(--sprite-x1);
+        }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .sprite {
+            animation: none;
+        }
+    }
+</style>

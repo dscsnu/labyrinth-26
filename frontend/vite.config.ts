@@ -22,6 +22,9 @@ export default defineConfig(({ mode }) => {
 			})
 		],
 		server: {
+			// Tailscale names (machine.tailnet.ts.net), so the dev server can be
+			// tested over HTTPS with `tailscale serve`.
+			allowedHosts: ['.ts.net'],
 			// The browser opens the event stream at /api/events on this origin,
 			// with the labyrinth_token cookie (EventSource can't send headers).
 			// In production Caddy routes it to the backend (caddy/Caddyfile);

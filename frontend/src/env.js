@@ -16,4 +16,8 @@ export const variables = defineEnvVars({
         description: 'Dev only: a labyrinth_token JWT used when the request has no session cookie, so devices that cannot sign in (e.g. a phone on the LAN) see signed-in pages',
         schema: (value) => value || undefined,
     },
+    TEST_PAGES: {
+        description: 'Set to true to open the test pages (/test-bosses) outside `bun run dev`, e.g. a build served over HTTPS on a Tailscale machine. Always open in dev',
+        schema: (value) => value === 'true',
+    },
 });

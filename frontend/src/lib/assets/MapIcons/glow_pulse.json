@@ -1,0 +1,138 @@
+{
+  "image": "spritesheet.png",
+  "imageWidth": 1948,
+  "imageHeight": 262,
+  "frameHeight": 262,
+  "note": "Use each frame's own x, y, w, h. Within one line, frame i is at x = startX + i*stride. Each sprite is centred on its own vertical axis in its frame, and keeps its original vertical position.",
+  "spacing": {
+    "gapBetweenFramesInSet": 20,
+    "gapBetweenSets": 170
+  },
+  "animations": {
+    "pulse": {
+      "event": "PULSE",
+      "loop": true,
+      "frameCount": 8,
+      "startX": 40,
+      "startY": 0,
+      "stride": 236,
+      "frameWidth": 216,
+      "frameHeight": 262,
+      "rows": [
+        {
+          "firstFrame": 0,
+          "frameCount": 8,
+          "startX": 40,
+          "startY": 0,
+          "frameHeight": 262
+        }
+      ],
+      "frames": [
+        {
+          "index": 0,
+          "x": 40,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 88,
+            "y": 74,
+            "w": 120,
+            "h": 120
+          }
+        },
+        {
+          "index": 1,
+          "x": 276,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 318,
+            "y": 62,
+            "w": 132,
+            "h": 138
+          }
+        },
+        {
+          "index": 2,
+          "x": 512,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 542,
+            "y": 44,
+            "w": 162,
+            "h": 174
+          }
+        },
+        {
+          "index": 3,
+          "x": 748,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 766,
+            "y": 26,
+            "w": 192,
+            "h": 204
+          }
+        },
+        {
+          "index": 4,
+          "x": 984,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 996,
+            "y": 20,
+            "w": 204,
+            "h": 222
+          }
+        },
+        {
+          "index": 5,
+          "x": 1220,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 1238,
+            "y": 26,
+            "w": 192,
+            "h": 204
+          }
+        },
+        {
+          "index": 6,
+          "x": 1456,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 1486,
+            "y": 44,
+            "w": 162,
+            "h": 174
+          }
+        },
+        {
+          "index": 7,
+          "x": 1692,
+          "y": 0,
+          "w": 216,
+          "h": 262,
+          "sprite": {
+            "x": 1734,
+            "y": 62,
+            "w": 132,
+            "h": 138
+          }
+        }
+      ]
+    }
+  }
+}
