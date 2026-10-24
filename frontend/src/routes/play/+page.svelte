@@ -5,7 +5,11 @@
   import SpellBook from "#lib/components/SpellBook.svelte";
   import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
   import { BANNERS } from "#lib/game/banners.ts";
-  import BossSprite from "#lib/components/BossSprite.svelte";
+  import BossSprite, { layoutUrl, preloadBoss, sheetUrl } from "#lib/components/BossSprite.svelte";
+  import { bossStillUrl } from "#lib/game/bossStills.ts";
+  import { preloadMapArt, whenIdle } from "#lib/game/preload.ts";
+  import mapUrl from "#lib/assets/map.webp";
+  import coinsUrl from "#lib/assets/MapIcons/coins.png";
   import fitText from "#lib/utils/fitText.ts";
   import { MAP_POINTS } from "#lib/game/mapPoints.ts";
   import bookIcon from "#lib/assets/UserInterfaceButtons/spellbook_64.png";
@@ -149,6 +153,50 @@
     lastDamage = damage;
   });
   let shown = $derived(dying ?? boss);
+
+  // Loads the boss being fought and then, when the browser's idle, the
+  // one after it, so it's ready the moment this one's death ends.
+  $effect(() => {
+    const serial = ts.boss?.serial;
+    if (serial === undefined) return;
+    const next = serial + 1;
+    preloadBoss(serial)
+      .catch(() => {})
+      .finally(() => {
+        if (bosses.some((b) => b.serial === next))
+          whenIdle(() => preloadBoss(next).catch(() => {}));
+      });
+  });
+
+  // The loading screen: over everything while the map's art and the
+  // boss's sheet load, so nothing pops in once play starts. Shown only
+  // if that takes over LOADING_DELAY_MS (not on a visit with them
+  // cached), and gone after LOADING_MAX_MS whatever's still missing;
+  // anything that failed falls back as it would without it.
+  const LOADING_DELAY_MS = 150;
+  const LOADING_MAX_MS = 15_000;
+  let loading = $state(false);
+  let loaded = $state(0);
+  let toLoad = $state(0);
+  onMount(() => {
+    const serial = untrack(() => ts.boss?.serial);
+    const loads: Promise<unknown>[] = [preloadMapArt()];
+    if (serial !== undefined) loads.push(preloadBoss(serial));
+    toLoad = loads.length;
+    for (const l of loads) l.catch(() => {}).finally(() => loaded++);
+    let done = false;
+    const finish = () => {
+      done = true;
+      loading = false;
+    };
+    const show = setTimeout(() => (loading = !done), LOADING_DELAY_MS);
+    const giveUp = setTimeout(finish, LOADING_MAX_MS);
+    Promise.allSettled(loads).then(finish);
+    return () => {
+      clearTimeout(show);
+      clearTimeout(giveUp);
+    };
+  });
 
   // Counts the team's health drops since the page loaded; each one
   // restarts the health's blink on the top bar (keyed on it) and shows the
@@ -599,6 +647,45 @@
     team?.members.find((m: Team["members"][number]) => m.id === id)?.name ??
     id.slice(0, 8);
 </script>
+
+<!-- Starts the boss's and the map's downloads with the page, not once
+     it's running; the sprite, MapView and preloadBoss then reuse them. -->
+<svelte:head>
+  <link rel="preload" as="image" href={mapUrl} />
+  <link rel="preload" as="image" href={coinsUrl} />
+  {#if data.state.boss}
+    {@const serial = data.state.boss.serial}
+    <link rel="preload" as="image" href={bossStillUrl(serial)} />
+    <link rel="preload" as="image" href={sheetUrl(serial)} />
+    <link rel="preload" as="fetch" href={layoutUrl(serial)} crossorigin="anonymous" />
+  {/if}
+</svelte:head>
+
+<!-- The loading screen: over everything, the menu's backdrop, a bar
+     filling as each part loads. -->
+{#if loading}
+  <div
+    out:fade={{ duration: 200 }}
+    role="status"
+    class="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-4 px-8 font-pixel text-[16px] leading-[24px] text-white uppercase"
+  >
+    <DiamondBackdrop class="absolute inset-0 -z-10" />
+    <p class="text-outline">Loading<span class="motion-safe:animate-blink">...</span></p>
+    <div
+      role="progressbar"
+      aria-label="Loading"
+      aria-valuemin={0}
+      aria-valuemax={toLoad}
+      aria-valuenow={loaded}
+      class="pixel-box relative h-4 w-full max-w-60 bg-ink"
+    >
+      <div
+        class="absolute inset-y-0 left-0 bg-pink transition-[width] duration-300 ease-out"
+        style:width="{toLoad ? (loaded / toLoad) * 100 : 0}%"
+      ></div>
+    </div>
+  </div>
+{/if}
 
 <!-- Top bar: full width, the top 25% of the screen, on the Scott Pilgrim
      menu's diamond backdrop (like /team) with a black edge above the map. A

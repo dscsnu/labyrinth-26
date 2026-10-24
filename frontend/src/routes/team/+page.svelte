@@ -2,6 +2,7 @@
     import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
     import { envelope, isNewer } from "#lib/types/Live.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
+    import { preloadMapArt, whenIdle } from "#lib/game/preload.ts";
     import { onMount } from "svelte";
     import type { PageProps } from "./$types";
 
@@ -43,6 +44,9 @@
     const menuMain = `${menuItem} bg-pink`;
 
     onMount(() => {
+        // The map's art, fetched while the party waits here, so /play
+        // opens with it ready.
+        whenIdle(() => preloadMapArt().catch(() => {}));
         // EventSource reconnects by itself; the first event after each
         // (re)connect is the full current state.
         const events = new EventSource("/api/events");
