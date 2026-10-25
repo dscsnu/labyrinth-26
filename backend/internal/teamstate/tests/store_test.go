@@ -196,6 +196,11 @@ type fixtureOptions struct {
 	// cooldown is off, so tests that cast the same waypoints minutes apart
 	// aren't refused.
 	qrCooldown bool
+	// unlocks keeps config.toml's unlock schedule (game.unlocks). Without
+	// it every pattern is unlocked from the start, so tests about something
+	// else can cast any shape at once; the schedule has its own tests here
+	// and runs in both simulations.
+	unlocks bool
 	// bossRules adjusts the boss rules (attack interval and damage).
 	bossRules func(*bosses.Rules)
 }
@@ -282,20 +287,22 @@ func started(t *testing.T, opts ...fixtureOptions) *fixtureEnv {
 		}))
 	}
 	rules := teamstate.Rules{
-		MaxPatternPoints:    set.Game.MaxPatternPoints,
-		Health:              set.Game.Health,
-		LockedPatternPoints: set.Game.LockedPatternPoints,
-		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
-		QRCooldown:          set.Game.QRCooldown.Duration,
-		PowerupMultiplier:   set.Powerups.DamageMultiplier,
-		PowerupHeart:        set.Powerups.Heart,
-		ShortQRCooldown:     set.Powerups.ShortQRCooldown.Duration,
-		ShortQRWindow:       set.Powerups.ShortQRWindow.Duration,
-		WriteTimeout:        set.Storage.WriteTimeout.Duration,
-		Epoch:               1, // a restart in a test passes another
+		MaxPatternPoints:  set.Game.MaxPatternPoints,
+		Health:            set.Game.Health,
+		Unlocks:           set.Game.UnlockSchedule(),
+		QRCooldown:        set.Game.QRCooldown.Duration,
+		PowerupMultiplier: set.Powerups.DamageMultiplier,
+		PowerupHeart:      set.Powerups.Heart,
+		ShortQRCooldown:   set.Powerups.ShortQRCooldown.Duration,
+		ShortQRWindow:     set.Powerups.ShortQRWindow.Duration,
+		WriteTimeout:      set.Storage.WriteTimeout.Duration,
+		Epoch:             1, // a restart in a test passes another
 	}
 	if !o.qrCooldown {
 		rules.QRCooldown, rules.ShortQRCooldown = 0, 0
+	}
+	if !o.unlocks {
+		rules.Unlocks = map[int]int{0: rules.MaxPatternPoints}
 	}
 	if o.rules != nil {
 		o.rules(&rules)
@@ -679,10 +686,10 @@ func TestSinglePointPattern(t *testing.T) {
 
 // TestSixPointPatternAtCapacity checks that a pattern with
 // max_pattern_points waypoints completes exactly as the stack fills (big
-// patterns unlocked from the start: unlock_after_bosses 0).
+// patterns unlocked from the start, the fixture's default).
 func TestSixPointPatternAtCapacity(t *testing.T) {
 	hex := []string{"2003", "2004", "2005", "2006", "2009", "2010"}
-	f := started(t, fixtureOptions{rules: func(r *teamstate.Rules) { r.UnlockAfterBosses = 0 }}) // a seed hexagon
+	f := started(t) // every pattern unlocked from the start: a seed hexagon
 	if f.rules.MaxPatternPoints != len(hex) {
 		t.Skipf("test assumes max_pattern_points = %d", len(hex))
 	}
@@ -1061,18 +1068,19 @@ func TestVersionAndTypes(t *testing.T) {
 	}
 }
 
-// TestBigPatternsUnlock uses a seed pentagon, and adds a shape mixing a
+// TestUnlockSchedule walks the unlock schedule (game.unlocks) with every
+// boss at 1 HP, casting only what's open from the start (triangle and line,
+// alternated for the class cooldown). Before each cast it checks that
+// unlocked_points is the schedule's value for the bosses defeated so far,
+// that locked_shapes is exactly the shapes whose patterns are all bigger,
+// and that selecting each of them is shape_locked. It adds a shape mixing a
 // 4-point and a 5-point pattern (through nowhere and a second test-only
-// waypoint, 2098, so neither repeats a seed pattern's set; 2098 is only in
-// the 5-point one), and checks the unlock: before the team has defeated
-// unlock_after_bosses bosses, unlocked_points is locked_pattern_points − 1,
-// the pentagon is in locked_shapes and can't be selected (shape_locked), and
-// in the mixed shape a scan that only fits the 5-point pattern is wrong;
-// after that many defeats (every boss at 1 HP) unlocked_points is
-// max_pattern_points and both cast.
-func TestBigPatternsUnlock(t *testing.T) {
+// waypoint, 2098, only in the 5-point one): once 4 points are unlocked but
+// not 5, it can be selected and a scan that only fits the 5-point pattern
+// is wrong. Once 5 points are unlocked, a seed pentagon casts.
+func TestUnlockSchedule(t *testing.T) {
 	pent := []string{"2003", "2004", "2005", "2006", "2009"}
-	f := started(t, fixtureOptions{sql: `
+	f := started(t, fixtureOptions{unlocks: true, sql: `
 		UPDATE boss SET hp = 1;
 		INSERT INTO waypoint (id, name, latitude, longitude) VALUES ('2098', 'Elsewhere', 0, 0);
 		INSERT INTO shape (id, name) VALUES ('mixed', 'Mixed');
@@ -1080,35 +1088,54 @@ func TestBigPatternsUnlock(t *testing.T) {
 		INSERT INTO pattern_waypoint (pattern_id, waypoint_id) VALUES
 			(1004, '2001'), (1004, '2002'), (1004, '2008'), (1004, '2099'),
 			(1005, '2003'), (1005, '2004'), (1005, '2005'), (1005, '2098'), (1005, '2099');`})
-	if f.rules.LockedPatternPoints != 5 || f.rules.MaxPatternPoints < 5 || f.rules.UnlockAfterBosses < 1 {
-		t.Skipf("test assumes locked_pattern_points = 5 and something to unlock (unlock_after_bosses %d)", f.rules.UnlockAfterBosses)
+	at4, ok4 := bossesFor(f.rules, 4)
+	at5, ok5 := bossesFor(f.rules, 5)
+	if !ok4 || !ok5 || at5 <= at4 {
+		t.Skipf("test assumes a schedule that opens quadrilaterals before pentagons (game.unlocks %v)", f.rules.Unlocks)
 	}
-	v := f.view(t)
-	if v.UnlockedPoints != 4 || !slices.Contains(v.LockedShapes, "pentagon") || slices.Contains(v.LockedShapes, "mixed") {
-		t.Fatalf("before the unlock: unlocked_points %d, locked %v", v.UnlockedPoints, v.LockedShapes)
+	ctx := context.Background()
+	for defeated := 0; ; defeated++ {
+		v := f.view(t)
+		want := 0
+		for bosses, points := range f.rules.Unlocks {
+			if bosses <= defeated && points > want {
+				want = points
+			}
+		}
+		var wantLocked []string
+		for _, sh := range f.state.Game().Shapes {
+			if len(sh.Points) > 0 && sh.Points[0] > want {
+				wantLocked = append(wantLocked, sh.ID)
+			}
+		}
+		if v.BossesDefeated != defeated || v.UnlockedPoints != want || !sameMembers(v.LockedShapes, wantLocked) {
+			t.Fatalf("after %d defeats: defeated %d, unlocked_points %d (want %d), locked %v (want %v)",
+				defeated, v.BossesDefeated, v.UnlockedPoints, want, v.LockedShapes, wantLocked)
+		}
+		for _, id := range wantLocked {
+			if _, err := f.state.Select(ctx, f.users[0], id); !errors.Is(err, teamstate.ErrShapeLocked) {
+				t.Fatalf("after %d defeats, selecting the locked %s: %v, want shape_locked", defeated, id, err)
+			}
+		}
+		// Between this round's casts: the last ended at defeated × 100 s + 3.
+		between := time.Duration(defeated)*f.tick(100) + f.tick(50)
+		if defeated == at4 {
+			f.selectAt(t, between, 0, "mixed")
+			if res := f.scanAt(t, between+f.tick(1), 0, "2098"); res.Outcome != teamstate.OutcomeWrongScan {
+				t.Fatalf("a point only in the locked 5-point pattern: %s", res.Outcome)
+			}
+		}
+		if defeated == at5 {
+			f.cast(t, defeated+1, "pentagon", pent)
+			return
+		}
+		f.castSmall(t, defeated+1)
 	}
-	if _, err := f.state.Select(context.Background(), f.users[0], "pentagon"); !errors.Is(err, teamstate.ErrShapeLocked) {
-		t.Fatalf("selecting a locked shape: %v", err)
-	}
-	f.selectAt(t, 0, 0, "mixed")
-	if res := f.scanAt(t, f.tick(1), 0, "2098"); res.Outcome != teamstate.OutcomeWrongScan {
-		t.Fatalf("a point only in the locked 5-point pattern: %s", res.Outcome)
-	}
+}
 
-	for round := range f.rules.UnlockAfterBosses {
-		f.castAlternating(t, round+1) // each defeats a 1-HP boss
-	}
-	v = f.view(t)
-	if v.BossesDefeated != f.rules.UnlockAfterBosses || v.UnlockedPoints != f.rules.MaxPatternPoints || len(v.LockedShapes) != 0 {
-		t.Fatalf("after %d defeats: unlocked_points %d, locked %v", v.BossesDefeated, v.UnlockedPoints, v.LockedShapes)
-	}
-	t0 := f.tick(1000)
-	f.selectAt(t, t0, 0, "pentagon")
-	var res teamstate.ScanResult
-	for i, w := range pent {
-		res = f.scanAt(t, t0+f.tick(float64(i+1)), i, w)
-	}
-	expectOutcome(t, "the pentagon after the unlock", res, teamstate.OutcomePatternCompleted)
+// sameMembers reports whether a and b hold the same strings, in any order.
+func sameMembers(a, b []string) bool {
+	return len(a) == len(b) && !slices.ContainsFunc(a, func(x string) bool { return !slices.Contains(b, x) })
 }
 
 // TestOnlyLeaderSelects checks that selecting and clearing are the leader's:

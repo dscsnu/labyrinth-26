@@ -447,8 +447,8 @@ type View struct {
 	// (knocked_out) and nothing attacks until an admin revives the team.
 	KnockedOut bool `json:"knocked_out"`
 	// UnlockedPoints is the most waypoints a pattern the team can cast may
-	// have: game.locked_pattern_points − 1 until it has defeated
-	// game.unlock_after_bosses bosses, then game.max_pattern_points.
+	// have, from the unlock schedule (game.unlocks) and the bosses it has
+	// defeated.
 	UnlockedPoints int `json:"unlocked_points"`
 	// LockedShapes are the shapes the team can't select yet: every one of
 	// their patterns is bigger than UnlockedPoints. In index order.
@@ -624,12 +624,9 @@ type Game struct {
 	// Health is game.health: every team's starting health, and what a
 	// revive restores.
 	Health int `json:"health"`
-	// LockedPatternPoints is game.locked_pattern_points: patterns of at
-	// least this many waypoints are locked until the team has defeated
-	// UnlockAfterBosses bosses.
-	LockedPatternPoints int `json:"locked_pattern_points"`
-	// UnlockAfterBosses is game.unlock_after_bosses.
-	UnlockAfterBosses int `json:"unlock_after_bosses"`
+	// Unlocks is the unlock schedule (game.unlocks), ascending by
+	// AfterBosses: from the first step on, the patterns a team can cast.
+	Unlocks []Unlock `json:"unlocks"`
 	// MaxPatternPoints is game.max_pattern_points.
 	MaxPatternPoints int `json:"max_pattern_points"`
 	// SpellClasses are every spell class, ascending by points: a pattern of
@@ -676,14 +673,44 @@ type GameShape struct {
 	Classes []string `json:"classes"`
 }
 
-// unlockedPoints returns the most waypoints a pattern st's team can cast may
-// have: everything (game.max_pattern_points) once it has defeated
-// game.unlock_after_bosses bosses, game.locked_pattern_points − 1 before.
-func (s *Store) unlockedPoints(st State) int {
-	if st.Boss.Defeated >= s.rules.UnlockAfterBosses {
-		return s.rules.MaxPatternPoints
+// Unlock is one step of the unlock schedule (game.unlocks): once a team has
+// defeated AfterBosses bosses, it can cast patterns of up to Points
+// waypoints.
+type Unlock struct {
+	// AfterBosses is how many bosses the team must have defeated.
+	AfterBosses int `json:"after_bosses"`
+	// Points is the most waypoints a pattern it can cast may have from then
+	// on.
+	Points int `json:"points"`
+}
+
+// unlockSchedule returns Rules.Unlocks as steps, ascending by AfterBosses;
+// an empty schedule is one step unlocking everything (maxPoints) from the
+// start.
+func unlockSchedule(unlocks map[int]int, maxPoints int) []Unlock {
+	if len(unlocks) == 0 {
+		return []Unlock{{AfterBosses: 0, Points: maxPoints}}
 	}
-	return s.rules.LockedPatternPoints - 1
+	out := make([]Unlock, 0, len(unlocks))
+	for bosses, points := range unlocks {
+		out = append(out, Unlock{AfterBosses: bosses, Points: points})
+	}
+	slices.SortFunc(out, func(a, b Unlock) int { return a.AfterBosses - b.AfterBosses })
+	return out
+}
+
+// unlockedPoints returns the most waypoints a pattern st's team can cast may
+// have: the Points of the last schedule step whose AfterBosses it has
+// reached (game.unlocks), 0 if it has reached none.
+func (s *Store) unlockedPoints(st State) int {
+	points := 0
+	for _, u := range s.game.Unlocks {
+		if st.Boss.Defeated < u.AfterBosses {
+			break
+		}
+		points = u.Points
+	}
+	return points
 }
 
 // shapeLocked reports whether every pattern of shape is bigger than
@@ -779,12 +806,11 @@ func (s *Store) Game() Game { return s.game }
 // newGame builds the Game from the atlas and rules.
 func newGame(a Atlas, r Rules) Game {
 	g := Game{
-		Shapes:              make([]GameShape, a.ShapeCount()),
-		MaxPatternPoints:    r.MaxPatternPoints,
-		Health:              r.Health,
-		LockedPatternPoints: r.LockedPatternPoints,
-		UnlockAfterBosses:   r.UnlockAfterBosses,
-		SpellClasses:        a.SpellClasses(),
+		Shapes:           make([]GameShape, a.ShapeCount()),
+		MaxPatternPoints: r.MaxPatternPoints,
+		Health:           r.Health,
+		Unlocks:          unlockSchedule(r.Unlocks, r.MaxPatternPoints),
+		SpellClasses:     a.SpellClasses(),
 		Powerups: GamePowerups{DamageMultiplier: r.PowerupMultiplier, Heart: r.PowerupHeart,
 			ShortQRCooldownS: int(r.ShortQRCooldown.Seconds()), ShortQRWindowS: int(r.ShortQRWindow.Seconds())},
 	}

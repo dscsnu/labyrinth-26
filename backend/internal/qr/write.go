@@ -9,6 +9,10 @@ import (
 // issued for it.
 var ErrUnknownWaypoint = errors.New("unknown waypoint")
 
+// ErrNotAssigned means the helper asking for their display's key has no
+// checkpoint assigned yet (an admin assigns one on /admin).
+var ErrNotAssigned = errors.New("no checkpoint is assigned to you yet")
+
 // SigningKey is what a /qr display fetches once: the waypoint-scoped HMAC key
 // and the timing rules it needs to sign its own rotating tokens, so the
 // display makes one request and then signs locally, no polling.

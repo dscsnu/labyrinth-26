@@ -124,17 +124,16 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		return nil, err
 	}
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, qteStore, hub, log, teamstate.Rules{
-		MaxPatternPoints:    set.Game.MaxPatternPoints,
-		Health:              set.Game.Health,
-		LockedPatternPoints: set.Game.LockedPatternPoints,
-		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
-		QRCooldown:          set.Game.QRCooldown.Duration,
-		PowerupMultiplier:   set.Powerups.DamageMultiplier,
-		PowerupHeart:        set.Powerups.Heart,
-		ShortQRCooldown:     set.Powerups.ShortQRCooldown.Duration,
-		ShortQRWindow:       set.Powerups.ShortQRWindow.Duration,
-		WriteTimeout:        set.Storage.WriteTimeout.Duration,
-		Epoch:               epoch,
+		MaxPatternPoints:  set.Game.MaxPatternPoints,
+		Health:            set.Game.Health,
+		Unlocks:           set.Game.UnlockSchedule(),
+		QRCooldown:        set.Game.QRCooldown.Duration,
+		PowerupMultiplier: set.Powerups.DamageMultiplier,
+		PowerupHeart:      set.Powerups.Heart,
+		ShortQRCooldown:   set.Powerups.ShortQRCooldown.Duration,
+		ShortQRWindow:     set.Powerups.ShortQRWindow.Duration,
+		WriteTimeout:      set.Storage.WriteTimeout.Duration,
+		Epoch:             epoch,
 		// A team that defeats its last boss is FINISHED (teams' write).
 		OnFinished: func(teamID string) {
 			if err := teamStore.Finish(context.Background(), teamID); err != nil {
@@ -185,12 +184,13 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	leaderboard.NewAPI(board).Routes(mux, authed)
 	qte.NewAPI(qteStore).Routes(mux, authed)
 	// Every /api/admin/… route lives in the admin use case.
-	admin.NewAPI(admin.New(teamStore, stateStore, qteStore, users, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
+	admin.NewAPI(admin.New(teamStore, stateStore, qteStore, users, theAtlas, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
 		Routes(mux, adminOnly)
 	bosses.NewAPI(theBosses).Routes(mux, authed)
-	qrAPI := qr.NewAPI(qrVerifier, log)
+	qrAPI := qr.NewAPI(qrVerifier, users, log)
 	qrAPI.Routes(mux, authed)
 	qrAPI.StaffRoutes(mux, staff)
+	qrAPI.AdminRoutes(mux, adminOnly)
 	// The one event stream. Browsers open it on the shared domain with the
 	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.
 	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(perUser(http.HandlerFunc(app.events))))

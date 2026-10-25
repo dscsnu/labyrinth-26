@@ -134,9 +134,9 @@ type league struct {
 	// elapsed is how far the fake clock is past start: each step adds
 	// simStep, and downtime adds its length.
 	elapsed time.Duration
-	// big are the patterns of at least game.locked_pattern_points
-	// waypoints (the 2026 seed's pentagons and hexagons), locked until a
-	// team has defeated game.unlock_after_bosses.
+	// big are the patterns bigger than what the unlock schedule
+	// (game.unlocks) allows from the start: locked until a team has defeated
+	// enough bosses (the 2026 seed's quadrilaterals, pentagons and hexagons).
 	big []int
 	// board is the leaderboard over the league, checked against the models.
 	board *leaderboard.Leaderboard
@@ -242,7 +242,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 	l.teams = pgtest.Must(teams.Load(ctx, db, l.hub, pgtest.Quiet, teamRules))
 	l.rules = teamstate.Rules{
 		MaxPatternPoints: set.Game.MaxPatternPoints, Health: set.Game.Health,
-		LockedPatternPoints: set.Game.LockedPatternPoints, UnlockAfterBosses: set.Game.UnlockAfterBosses,
+		Unlocks:           set.Game.UnlockSchedule(),
 		QRCooldown:        simQRCooldown,
 		PowerupMultiplier: set.Powerups.DamageMultiplier, PowerupHeart: set.Powerups.Heart,
 		ShortQRCooldown: simShortQRCooldown, ShortQRWindow: simShortQRWindow,
@@ -256,7 +256,7 @@ func newLeague(t testing.TB, attacks bool) *league {
 	}
 	l.atlas = pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: l.rules.MaxPatternPoints}))
 	for p := range l.atlas.PatternCount() {
-		if l.atlas.Pattern(p).Waypoints.Len() >= l.rules.LockedPatternPoints {
+		if l.atlas.Pattern(p).Waypoints.Len() > l.rules.Unlocks[0] {
 			l.big = append(l.big, p)
 		}
 	}
@@ -407,12 +407,16 @@ func (m *model) cast(now time.Time, damage int, factor float64, b *bosses.Bosses
 }
 
 // unlocked returns the most waypoints a pattern the team can cast may have:
-// locked − 1 until it has defeated after bosses, then max.
-func (m *model) unlocked(locked, after, maxPoints int) int {
-	if m.defeated >= after {
-		return maxPoints
+// the value of the unlock schedule's largest key (bosses defeated) the team
+// has reached. Worked out from the map directly, not as teamstate does.
+func (m *model) unlocked(unlocks map[int]int) int {
+	best, points := -1, 0
+	for bosses, p := range unlocks {
+		if bosses <= m.defeated && bosses > best {
+			best, points = bosses, p
+		}
 	}
-	return locked - 1
+	return points
 }
 
 // revive restarts the current phase at now with full health.
@@ -740,9 +744,9 @@ func (l *league) check(t *testing.T, st *simTeam, step int, counts *simCounts) {
 	if (v.QTE == nil) != (m.answer == nil) || (v.QTE != nil && !sameAnswer(*v.QTE, *m.answer)) {
 		fail("qte", v.QTE, m.answer)
 	}
-	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
-	if v.UnlockedPoints != unlocked || slices.Contains(v.LockedShapes, "pentagon") != (unlocked < 5) ||
-		slices.Contains(v.LockedShapes, "hexagon") != (unlocked < 6) {
+	unlocked := m.unlocked(l.rules.Unlocks)
+	if v.UnlockedPoints != unlocked || slices.Contains(v.LockedShapes, "quadrilateral") != (unlocked < 4) ||
+		slices.Contains(v.LockedShapes, "pentagon") != (unlocked < 5) || slices.Contains(v.LockedShapes, "hexagon") != (unlocked < 6) {
 		fail("unlocked_points / locked_shapes", fmt.Sprint(v.UnlockedPoints, v.LockedShapes), unlocked)
 	}
 	if m.defeated >= l.bosses.Count() {
@@ -942,7 +946,7 @@ func (l *league) randomPattern(st *simTeam, minPoints int, counts *simCounts) (i
 		if l.castable(st, p) {
 			return p, true
 		}
-		unlocked := st.model.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
+		unlocked := st.model.unlocked(l.rules.Unlocks)
 		if pat.Spell.Class != st.model.cooldown && pat.Waypoints.Len() <= unlocked {
 			counts.qrBlocked.Add(1)
 			return 0, false
@@ -968,7 +972,7 @@ func (l *league) randomPattern(st *simTeam, minPoints int, counts *simCounts) (i
 // when none is castable.
 func (l *league) repeated(st *simTeam) (int, bool) {
 	for p := range l.atlas.PatternCount() {
-		if l.atlas.Pattern(p).Waypoints.Len() < l.rules.LockedPatternPoints && l.castable(st, p) {
+		if l.atlas.Pattern(p).Waypoints.Len() <= l.rules.Unlocks[0] && l.castable(st, p) {
 			return p, true
 		}
 	}
@@ -983,7 +987,7 @@ func (l *league) repeated(st *simTeam) (int, bool) {
 // leader clears the attempt.
 func (l *league) tryCooldown(t *testing.T, st *simTeam, knocked bool, counts *simCounts) {
 	ctx := context.Background()
-	unlocked := st.model.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
+	unlocked := st.model.unlocked(l.rules.Unlocks)
 	var candidates []int
 	for p := range l.atlas.PatternCount() {
 		if pat := l.atlas.Pattern(p); pat.Spell.Class == st.model.cooldown && pat.Waypoints.Len() <= unlocked {
@@ -1118,7 +1122,7 @@ func (l *league) castPattern(t *testing.T, st *simTeam, p int, knocked bool, cou
 // case selecting its shape must be refused with shape_locked (or
 // knocked_out first, the check before it) and the caller stops.
 func (l *league) lockedFor(t *testing.T, st *simTeam, pat atlas.Pattern, shape string, knocked bool, counts *simCounts) bool {
-	if pat.Waypoints.Len() <= st.model.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints) {
+	if pat.Waypoints.Len() <= st.model.unlocked(l.rules.Unlocks) {
 		return false
 	}
 	_, err := l.state.Select(context.Background(), st.members[rotate(st)(0)], shape)
@@ -1186,7 +1190,7 @@ func (l *league) expectCast(t *testing.T, st *simTeam, p int, res teamstate.Scan
 	if short {
 		counts.shortCasts.Add(1)
 	}
-	if l.atlas.Pattern(p).Waypoints.Len() >= l.rules.LockedPatternPoints {
+	if l.atlas.Pattern(p).Waypoints.Len() > l.rules.Unlocks[0] {
 		counts.bigCasts.Add(1)
 	}
 	if already {
@@ -1538,9 +1542,15 @@ func (l *league) powered(t *testing.T, st *simTeam, step int, knocked bool, coun
 func (l *league) instantCast(t *testing.T, st *simTeam, leader uuid.UUID, counts *simCounts) {
 	ctx := context.Background()
 	m := &st.model
-	unlocked := m.unlocked(l.rules.LockedPatternPoints, l.rules.UnlockAfterBosses, l.rules.MaxPatternPoints)
-	if unlocked < l.rules.MaxPatternPoints && len(l.big) > 0 && st.rng.IntN(3) == 0 {
-		p := l.big[st.rng.IntN(len(l.big))]
+	unlocked := m.unlocked(l.rules.Unlocks)
+	var locked []int // the big patterns still bigger than the team's unlock
+	for _, p := range l.big {
+		if l.atlas.Pattern(p).Waypoints.Len() > unlocked {
+			locked = append(locked, p)
+		}
+	}
+	if len(locked) > 0 && st.rng.IntN(3) == 0 {
+		p := locked[st.rng.IntN(len(locked))]
 		if _, err := l.state.InstantCast(ctx, leader, l.atlas.WaypointIDs(l.atlas.Pattern(p).Waypoints)); !errors.Is(err, teamstate.ErrPatternLocked) {
 			t.Errorf("team %d: instant-casting a locked pattern: %v, want pattern_locked", st.i, err)
 		}

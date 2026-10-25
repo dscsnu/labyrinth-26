@@ -113,7 +113,7 @@ Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack 
 
 0009 also adds `team_boss` and three `team_cast` columns, and 0010 adds `team_boss.phase_health` and `phase_started_at`; those belong to teamstate: see its README.
 
-**Seed** `seeds/2026_bosses.sql`, applied by `Seed2026` after `2026.sql` and `2026_spells.sql` (and before the quiz drafts, `2026_qtes.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1), one quadrilateral defeats boss 1, 2 or 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
+**Seed** `seeds/2026_bosses.sql`, applied by `Seed2026` after `2026.sql` and `2026_spells.sql` (and before the quiz drafts, `2026_qtes.sql`). Idempotent: it first runs `DELETE FROM boss WHERE serial > 6` (so an older seed's boss 7 doesn't stop the backend starting; it fails if a cast already hit that boss: reseed a fresh database), then `INSERT … ON CONFLICT (serial) DO UPDATE`. The names are placeholders from the 2025 theme (its evil exes, the Katayanagi twins fought as one boss) until the 2026 names and art are decided. Against 2026 damage (line 25–36, triangle 64–75, quadrilateral 195–278, pentagon 395–403, hexagon 1200, at multiplier 1) and the unlock schedule (`game.unlocks`: lines, triangles and quadrilaterals from the start, pentagons after boss 4, hexagons after boss 5), boss 1 falls to any cast, boss 2 to one quadrilateral (or two triangles, or a triangle and lines), one quadrilateral defeats boss 3, and Gideon (1,500) falls to 6–8 quadrilaterals or 2 hexagons; 3,285 HP in all. The attack columns come from `config.toml`, not the seed:
 
 | Serial | Name | Asset | HP | Attacks every (`game.boss_attack.interval`) | Attack damage (`game.boss_attack.damage`) | Full health lasts |
 |---|---|---|---|---|---|---|
@@ -124,7 +124,7 @@ Migrations `0009_bosses.sql` (the table), `0010_boss_attacks.sql` (added attack 
 | 5 | Ken & Kyle Katayanagi | `bosses/5.png` | 900 | 10 min | 5 | 20 min (2) |
 | 6 | Gideon Graves | `bosses/6.png` | 1500 | 10 min | 6 | 20 min (2) |
 
-At multiplier 1, every 2026 cast deals at least 25, so any one cast defeats boss 1 (damage ranges above). 3,285 HP in all. Each boss hits as hard as its serial: "full health lasts" is for a team at **10** (`game.health`) stalled on that boss; health carries over between bosses, so a team that reaches the twins or Gideon already hurt has less. Defeating boss 5 also unlocks the big patterns (`game.unlock_after_bosses`, **5**: see teamstate's README).
+At multiplier 1, every 2026 cast deals at least 25, so any one cast defeats boss 1 (damage ranges above). 3,285 HP in all. Each boss hits as hard as its serial: "full health lasts" is for a team at **10** (`game.health`) stalled on that boss; health carries over between bosses, so a team that reaches the twins or Gideon already hurt has less. Defeats also unlock bigger patterns (`game.unlocks`: 4 points from the start, 5 after boss 4, 6 after boss 5; see teamstate's README), so bosses 1 to 4 are fought with patterns of up to 4 points.
 
 ## Memory ↔ Postgres
 | Postgres | Memory |
@@ -162,18 +162,18 @@ Applied by `teamstate` (`BossProgress.at`, `catchUp`, the attack timer). Health 
 ### 1. Loading the seed
 `game.bosses` = 6. `selectBosses` returns 6 rows, serials 1…6. `New` checks count (6 = 6), then each row: serial = index+1, name, asset, HP > 0; then the rules: the interval is whole seconds and at least 1 s (600 s), the boss has a damage entry, ≥ 0. `list[0]` is Matthew Patel (25 HP, attacks every 600 s for 1). Log: `loaded bosses bosses=6`.
 
-### 2. A team fights bosses 1–4 (quadrilateral 188 deals 274, triangle 46 deals 68, multiplier 1)
-The spell cooldown forbids two quadrilaterals in a row (teamstate's README), so the team alternates:
+### 2. A team fights bosses 1–4 (quadrilateral 188 deals 274, triangle 46 deals 68, line 1 deals 27, multiplier 1)
+Say the team plays boss 2 with lines and triangles only (quadrilaterals are open from the start too, `game.unlocks`). The spell cooldown forbids two of a class in a row (teamstate's README), so it alternates:
 
 | Cast | Before | Dealt | After | `last_cast` | Event type |
 |---|---|---|---|---|---|
-| 1 quadrilateral | boss 1, 0/25 | 274 | 274 ≥ 25: boss 2, 0/100, `bosses_defeated 1` | `dealt 274, boss 1, defeated_boss true` | `boss_defeated` |
-| 2 triangle | boss 2, 0/100 | 68 | boss 2, 68/100 | `dealt 68, boss 2, defeated_boss false` | `spell_cast` |
-| 3 quadrilateral | boss 2, 68/100 | 274 | 342 ≥ 100: boss 3, 0/250, `bosses_defeated 2` | `dealt 274, boss 2, defeated_boss true` | `boss_defeated` |
-| 4 triangle | boss 3, 0/250 | 68 | boss 3, 68/250 | `dealt 68, boss 3, defeated_boss false` | `spell_cast` |
-| 5 quadrilateral | boss 3, 68/250 | 274 | 342 ≥ 250: boss 4, 0/510, `bosses_defeated 3` | `dealt 274, boss 3, defeated_boss true` | `boss_defeated` |
+| 1 triangle | boss 1, 0/25 | 68 | 68 ≥ 25: boss 2, 0/100, `bosses_defeated 1` | `dealt 68, boss 1, defeated_boss true` | `boss_defeated` |
+| 2 line | boss 2, 0/100 | 27 | boss 2, 27/100 | `dealt 27, boss 2, defeated_boss false` | `spell_cast` |
+| 3 triangle | boss 2, 27/100 | 68 | boss 2, 95/100 | `dealt 68, boss 2, defeated_boss false` | `spell_cast` |
+| 4 line | boss 2, 95/100 | 27 | 122 ≥ 100: boss 3, 0/250, `bosses_defeated 2` (quadrilaterals unlock) | `dealt 27, boss 2, defeated_boss true` | `boss_defeated` |
+| 5 quadrilateral | boss 3, 0/250 | 274 | 274 ≥ 250: boss 4, 0/510, `bosses_defeated 3` | `dealt 274, boss 3, defeated_boss true` | `boss_defeated` |
 
-The 249 points past boss 1's 25 HP, 242 past boss 2's, and 92 past boss 3's are lost (rule 4). `team_boss` after cast 5: `defeated 3, damage 0, multiplier 1`.
+The 43 points past boss 1's 25 HP, 22 past boss 2's, and 24 past boss 3's are lost (rule 4). `team_boss` after cast 5: `defeated 3, damage 0, multiplier 1`.
 
 ### 3. Multiplier 1.5
 An admin (by SQL, for now) sets `team_boss.multiplier = 1.5`, then the backend restarts. The line `2001 2002` (pattern 1, damage 27) now deals `round(27 × 1.5)` = `round(40.5)` = **41** (halves away from zero); `last_cast.damage` is still 27, `last_cast.dealt` is 41. The quadrilateral deals 411. The cast's upsert writes `defeated` and `damage` only, so the multiplier stays 1.5.

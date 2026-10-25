@@ -81,27 +81,35 @@ This use case reads no `config.toml` keys of its own. The few numbers below that
   | `Name` | `string` | `name` | From Google, latest sign-in; may be `""` |
   | `AvatarURL` | `*string` | `avatar_url` | From Google's `picture` at the latest sign-in that sent one; `null` if none ever did |
   | `Role` | `Role` | `role` | `PLAYER`, `HELPER` or `ADMIN` |
+  | `WaypointID` | `*string` | `waypoint_id` | A helper's assigned checkpoint, whose QR their `/qr` display shows (`GET /api/qr/me`); `null` if none. Only staff have one |
   | `CreatedAt` | `time.Time` | `created_at` | First sign-in |
 
   `google_sub` and `last_login_at` are deliberately not in `User`: they're never sent to clients.
 - **`Users`** is the use case: just a `db`. **`New(pg)`** builds it from the shared pool. `server.Build` calls it first, before auth, because auth depends on it.
 - **`ErrUserNotFound`** (`user no longer exists`): no user has that ID.
 - **`Search(ctx, query, limit)`** → `db.selectByEmailLike`: up to `limit` users whose email contains `query`, case insensitive, by email (`[]` when none). An empty query matches everyone. Called by the admin use case's user search (`GET /api/admin/users`, limit **20**, `admin.user_search_limit`).
+- **`ByEmail(ctx, email)`** → `db.selectByEmail`: the user with exactly that email, ignoring case, or `ErrUserNotFound` wrapping `postgres.ErrNotFound`. Called by the admin use case's "add a helper by email" (`POST /api/admin/helpers`).
+- **`Helpers(ctx)`** → `db.selectHelpers`: every `HELPER`, by email, with their checkpoints (`[]` when none). Called by `GET /api/admin/helpers`.
 - **`Get(ctx, id)`** → `db.selectByID`. Returns the user, or `ErrUserNotFound` wrapping `postgres.ErrNotFound` (so callers may test either). Called by `me` (→ `401 user_not_found`) and by auth's `token` (which maps not found to its own `404 user_not_found`).
 
 ### `write.go`: writes
 - **`GoogleProfile`** `{Subject, Email, Name, AvatarURL string}`: what Google's verified ID token says. Auth fills it from `sub`, `email`, `name`, `picture`.
 - **`ErrEmailInUse`** (`email already belongs to another account`): a different Google account's user already has this email. Auth maps it to `reason=email_in_use`.
 - **`SignInWithGoogle(ctx, p)`** → `db.upsertGoogle(p)`. Returns the stored user (with the avatar actually stored, so a kept avatar is returned too), or `ErrEmailInUse`. Called by auth's `callback`; tests also call it directly (`newPlayer` in `internal/server`). It doesn't validate anything itself: auth has already checked that the email is verified, non-empty and in an allowed domain.
-- **`ErrInvalidRole`** (`role must be PLAYER, HELPER or ADMIN`) and **`SetRole(ctx, id, role)`**: an admin's role change (the admin use case's `PUT /api/admin/users/{user_id}/role`). Refuses a role outside the three (`ErrInvalidRole`, nothing written), then `db.updateRole`; `ErrUserNotFound` (wrapping `postgres.ErrNotFound`) if there's no such user. Returns the updated user. It applies at once to every route that reads the role from here (`RequireAdmin`, `RequireStaff`, `/api/me`); the token's copy updates at the user's next sign-in. A later sign-in never touches it. That an admin can't change their **own** role is the admin use case's rule, not this one's.
+- **`ErrInvalidRole`** (`role must be PLAYER, HELPER or ADMIN`) and **`SetRole(ctx, id, role)`**: an admin's role change (the admin use case's `PUT /api/admin/users/{user_id}/role`). Refuses a role outside the three (`ErrInvalidRole`, nothing written), then `db.updateRole`; `ErrUserNotFound` (wrapping `postgres.ErrNotFound`) if there's no such user. Returns the updated user. It applies at once to every route that reads the role from here (`RequireAdmin`, `RequireStaff`, `/api/me`); the token's copy updates at the user's next sign-in. A later sign-in never touches it. Demoting to `PLAYER` also clears the user's checkpoint, in the same statement. That an admin can't change their **own** role is the admin use case's rule, not this one's.
+- **`ErrNotHelper`** (`user is not a helper`) and **`Assign(ctx, id, waypointID)`**: an admin assigning a helper's checkpoint (`PUT /api/admin/helpers/{user_id}/waypoint`), or clearing it with `nil`. `db.updateWaypoint`; when no helper row matches, `Get` tells an unknown user (`ErrUserNotFound`) from a player or admin (`ErrNotHelper`). It doesn't check the waypoint exists (the admin use case checks the atlas; the foreign key is the backstop).
 
 ### `db.go`: SQL
 One `db` struct holding the pool. No transactions: each method is one statement on `userprofile`.
 
-- **`userColumns`** = `id, email, name, avatar_url, role, created_at`, the order `scanUser` reads.
+- **`userColumns`** = `id, email, name, avatar_url, role, waypoint_id, created_at`, the order `scanUser` reads.
+- **`collectUsers(rows)`** reads every row as a `User` (closing them); the list queries use it.
 - **`scanUser(row)`** scans one row into a `User`, mapping `pgx.ErrNoRows` to `postgres.ErrNotFound`.
 - **`selectByID(id)`**: `SELECT <userColumns> FROM userprofile WHERE id = $1`. A primary-key lookup.
-- **`updateRole(id, role)`**: `UPDATE userprofile SET role = $2 WHERE id = $1 RETURNING <userColumns>`; no row → `postgres.ErrNotFound`.
+- **`updateRole(id, role)`**: `UPDATE userprofile SET role = $2::user_role, waypoint_id = CASE WHEN $2::user_role = 'PLAYER' THEN NULL ELSE waypoint_id END WHERE id = $1 RETURNING <userColumns>`; no row → `postgres.ErrNotFound`. (The casts give `$2` one type in both places.)
+- **`updateWaypoint(id, waypointID)`**: `UPDATE userprofile SET waypoint_id = $2 WHERE id = $1 AND role = 'HELPER' RETURNING <userColumns>`; no row → `postgres.ErrNotFound`.
+- **`selectByEmail(email)`**: `SELECT <userColumns> FROM userprofile WHERE lower(email) = lower($1)`.
+- **`selectHelpers()`**: `SELECT <userColumns> FROM userprofile WHERE role = 'HELPER' ORDER BY email`.
 - **`selectByEmailLike(query, limit)`**: escapes `\`, `%` and `_` in `query` (so they match literally), then `SELECT <userColumns> FROM userprofile WHERE email ILIKE '%' || $1 || '%' ORDER BY email LIMIT $2`.
 - **`upsertGoogle(p)`**: turns an empty `AvatarURL` into SQL `NULL`, then:
   ```sql
@@ -112,7 +120,7 @@ One `db` struct holding the pool. No transactions: each method is one statement 
       name          = EXCLUDED.name,
       avatar_url    = COALESCE(EXCLUDED.avatar_url, userprofile.avatar_url),
       last_login_at = now()
-  RETURNING id, email, name, avatar_url, role, created_at
+  RETURNING id, email, name, avatar_url, role, waypoint_id, created_at
   ```
   On insert, `id`, `role`, `created_at` and `last_login_at` take their defaults. On conflict, only the four listed columns change; `avatar_url` only when the new value isn't `NULL`. A conflict on `email` (not `google_sub`) is a unique violation (`23505`) on `userprofile_email_key` (**`emailConstraint`**, Postgres's default name for 0001's `UNIQUE`): it's returned as `ErrEmailInUse`. Any other error is returned as is.
 
@@ -127,7 +135,7 @@ The package comment.
 **A consequence:** users can be edited with SQL while the backend runs (roles by hand, `cmd/loadtest` inserting players in bulk), unlike teams and team state. Teams caches members' names and avatars in memory; auth's sign-in hook refreshes that cache after every sign-in (see `internal/teams/README.md`).
 
 ## Data model: Postgres
-Migration `0001_users.sql`.
+Migrations `0001_users.sql` and `0016_helper_waypoint.sql` (`waypoint_id`).
 
 ### Enum `user_role`
 `'PLAYER'`, `'HELPER'`, `'ADMIN'`. Backs the rule that a role is one of exactly three values; any other string is refused by Postgres.
@@ -141,6 +149,7 @@ Migration `0001_users.sql`.
 | `name` | `TEXT` | `NOT NULL DEFAULT ''` | Always a string. The upsert always passes a value, so the default only matters for hand-inserted rows. |
 | `avatar_url` | `TEXT` | nullable | No avatar is `NULL`, never `""`. |
 | `role` | `user_role` | `NOT NULL DEFAULT 'PLAYER'` | Every new user is a player. The upsert never sets it. |
+| `waypoint_id` | `TEXT` | nullable, `REFERENCES waypoint (id) ON DELETE SET NULL`; `CHECK (waypoint_id IS NULL OR role <> 'PLAYER')` (`userprofile_waypoint_staff`) | A helper's checkpoint is a real waypoint (one the seed removes unassigns its helpers), and only staff hold one. No uniqueness: helpers may share a checkpoint (shifts). |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT now()` | First sign-in time. Never updated. |
 | `last_login_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT now()` | Set on insert and on every later sign-in. Written, but not read by any code. |
 
@@ -277,7 +286,23 @@ The admin use case first checks the guard, the ID's format and that it isn't the
 |---|---|
 | Role not `PLAYER`, `HELPER` or `ADMIN` | `ErrInvalidRole` → `400 invalid_role`; nothing written |
 | No such user | `ErrUserNotFound` → `404 user_not_found` (here `404`: the user acted on, not the caller) |
-| Otherwise | stored; returned; `RequireAdmin`, `RequireStaff` and `/api/me` see it on their next request |
+| Otherwise | stored; returned; `RequireAdmin`, `RequireStaff` and `/api/me` see it on their next request. To `PLAYER`: the checkpoint is cleared too |
+
+### `ByEmail` (an admin adding a helper, `POST /api/admin/helpers`)
+| Case | Result |
+|---|---|
+| The email in any case | the user |
+| A part of an email, or nobody's | `ErrUserNotFound` → `404 user_not_found` |
+
+### `Assign` (an admin's `PUT /api/admin/helpers/{user_id}/waypoint`)
+The admin use case first checks the ID's and waypoint's formats and that the waypoint is in the atlas; then:
+
+| Case | Result |
+|---|---|
+| A `HELPER` | stored (`nil` clears it); returned |
+| A `PLAYER` or `ADMIN` | `ErrNotHelper` → `409 not_helper`; nothing written |
+| No such user | `ErrUserNotFound` → `404 user_not_found` |
+| A waypoint not in the table (bypassing the admin's check) | the foreign key refuses it: `500`, logged |
 
 ### `Search` (an admin's `GET /api/admin/users?email=`)
 | Case | Result |
@@ -297,7 +322,7 @@ The admin use case first checks the guard, the ID's format and that it isn't the
 | Database error | `500 internal error`, logged |
 - `google_sub` and `last_login_at` are never sent to clients. `/api/me` sends the caller only their own email.
 
-### `RequireStaff` (the `/api/qr` mint route)
+### `RequireStaff` (`GET /api/qr/me`, a helper's display key)
 | Case | Result |
 |---|---|
 | No token, or a bad one | `401` from auth's middleware, before this runs |
@@ -337,7 +362,7 @@ No locks and no memory: Postgres settles every race.
 - **A removed avatar can't be cleared.** Since an empty `picture` keeps the stored avatar, a user who deletes their Google photo keeps the old URL (which may stop loading).
 - **Emails are case-sensitive.** Google normally sends lowercase, but nothing enforces it.
 - **Role changes aren't audited** beyond the admin use case's log line (`admin set role`, with `admin_id`).
-- **`HELPER` gates only QR minting.** `RequireStaff` (HELPER/ADMIN) is used by `GET /api/qr/{waypoint_id}`; nothing else gates on `HELPER` yet.
+- **`HELPER` gates only the QR display.** `RequireStaff` (HELPER/ADMIN) is used by `GET /api/qr/me`; nothing else gates on `HELPER` yet.
 - **No account deletion.** Deleting a user who has played is blocked by foreign keys without `ON DELETE` actions on `team`, `team_scan` and `team_selection`.
 - **`last_login_at` is written but never read.**
 
@@ -359,6 +384,15 @@ No locks and no memory: Postgres settles every race.
 | `TestSetRole` | each role is stored and returned, and `Get` sees it at once; an unknown role is `ErrInvalidRole` and changes nothing; an unknown user is `ErrUserNotFound`; a later sign-in keeps the role |
 | `TestSearch` | case insensitive, ordered by email, cut at the limit; an empty query matches everyone; `_` and `%` match literally; no match is empty |
 
+`tests/helpers_test.go`:
+
+| Test | Covers |
+|---|---|
+| `TestByEmail` | any case finds the user; a substring and an unknown email are `ErrUserNotFound` (also `postgres.ErrNotFound`) |
+| `TestAssign` | set, moved and cleared; two helpers share a checkpoint; `Helpers` lists only helpers, by email; a player and an admin are `ErrNotHelper`, unchanged; an unknown user `ErrUserNotFound` |
+| `TestDemotingClearsCheckpoint` | promoting a helper to `ADMIN` keeps the checkpoint; demoting to `PLAYER` clears it |
+| `TestCheckpointConstraints` | the CHECK refuses a player with a checkpoint; the foreign key refuses an unknown waypoint; deleting a waypoint unassigns its helpers |
+
 End to end in `internal/server` (real Postgres):
 
 | Test | Covers |
@@ -369,7 +403,8 @@ End to end in `internal/server` (real Postgres):
 | `internal/server/tests/auth_test.go` `TestSignInRefreshesTeamProfile` | A second sign-in with a new name and no picture: the team shows the new name and keeps the avatar |
 | `internal/server/tests/admin_test.go` `TestAdminGuard` | `RequireAdmin`: no token `401 missing_token`; a player `403 not_admin`; made `ADMIN` by SQL (token still says `PLAYER`) is let in; demoted by SQL is refused on the next request |
 | `internal/server/tests/admin_test.go` `TestAdminUsersAndRoles` | search by email over HTTP; setting a role (the promoted user reaches an admin route at once, token still `PLAYER`); `not_admin`, `cannot_change_own_role`, `invalid_role`, `invalid_body`, `invalid_user_id`, `user_not_found` |
-| `internal/server/tests/qr_test.go` `TestQRGuard` | `RequireStaff`: no token `401 missing_token`; a player `403 not_staff`; made `HELPER` (and `ADMIN`) by SQL is let in; demoted by SQL is refused on the next request |
+| `internal/server/tests/qr_test.go` `TestQRMine` | `RequireStaff`: a player `403 not_staff`; a helper is let in; demoted to `PLAYER` is refused on the next request |
+| `internal/server/tests/admin_test.go` `TestHelpersOverHTTP` | adding a helper by email (any case), the helpers list, assigning a checkpoint, and demotion clearing it, over HTTP |
 | `internal/server/tests/teams_test.go` `newPlayer` helper | every team and team-state test creates its users through `SignInWithGoogle` |
 
 Not covered by any test yet: `401 user_not_found` over HTTP, and a database error on `/api/me`.

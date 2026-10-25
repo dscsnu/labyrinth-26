@@ -530,6 +530,96 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `user_not_found`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `cannot_change_own_role`" }
 
+  /api/admin/helpers:
+    get:
+      tags: [admin]
+      summary: Every helper
+      description: Every `HELPER`, by email, each with `waypoint_id`, their assigned checkpoint or null.
+      responses:
+        "200":
+          description: The helpers.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { type: array, items: { $ref: "#/components/schemas/User" } }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+    post:
+      tags: [admin]
+      summary: Add a helper by email
+      description: >-
+        The account with this email (any case; surrounding spaces ignored) becomes a `HELPER`. They must have signed
+        in once, so the account exists (`user_not_found` otherwise). One already a helper is returned unchanged, so
+        a resend is harmless; an admin is refused (`already_admin`: that would demote them). Returns the user.
+        Logged with the admin's ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              additionalProperties: false
+              properties:
+                email: { type: string, format: email, example: volunteer@snu.edu.in }
+      responses:
+        "200":
+          description: The helper.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_email`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `user_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `already_admin`, `cannot_change_own_role`" }
+
+  /api/admin/helpers/{user_id}/waypoint:
+    put:
+      tags: [admin]
+      summary: Assign a helper's checkpoint
+      description: >-
+        Sets the checkpoint whose QR the helper's `/qr` display shows (`GET /api/qr/me`), or clears it with null.
+        Several helpers may share one. Demoting a helper to `PLAYER` also clears it. Returns the user. Logged with
+        the admin's ID.
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [waypoint_id]
+              additionalProperties: false
+              properties:
+                waypoint_id: { type: [string, "null"], pattern: "^[0-9]{4}$", example: "2003" }
+      responses:
+        "200":
+          description: The helper, with the checkpoint.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_user_id`, `invalid_body`, `invalid_waypoint_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `user_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_helper`" }
+
   /api/leaderboard:
     get:
       tags: [game]
@@ -683,9 +773,9 @@ paths:
       description: >-
         **Only the leader** selects (`403 not_leader`). **Always purges the team's scan stack**, reselecting the
         same type included, so reselecting is how a team restarts a poisoned attempt. A type whose patterns are all
-        bigger than the team's `unlocked_points` is refused (`409 shape_locked`): patterns of
-        `game.locked_pattern_points` (5) or more waypoints unlock once the team has defeated
-        `game.unlock_after_bosses` (5) bosses. **Spell cooldown:** the class of the team's last cast
+        bigger than the team's `unlocked_points` is refused (`409 shape_locked`): the unlock schedule
+        (`game.unlocks`) opens patterns of up to 3 waypoints from the start, 4 after 2 bosses, 5 after 4 and
+        6 after 5 (`GET /api/game/shapes` `unlocks`). **Spell cooldown:** the class of the team's last cast
         (`team_state.cooldown_class`) can't be cast again until a spell of another class is, so a type whose
         unlocked patterns are all of that class is refused (`409 shape_on_cooldown`; `team_state.cooldown_shapes`
         lists them).
@@ -858,9 +948,10 @@ paths:
   /api/qr/{waypoint_id}:
     get:
       tags: [qr]
-      summary: The waypoint's signing key and timing rules
+      summary: Any waypoint's signing key and timing rules (admins)
       description: |
-        Staff only (HELPER or ADMIN, read from the database each request). Returns the waypoint-scoped
+        Admins only (read from the database each request): picking any waypoint, to test or cover a
+        checkpoint. Helpers get only their assigned one (`GET /api/qr/me`). Returns the waypoint-scoped
         HMAC key and the timing rules; the `/qr` display signs its own rotating tokens locally (no
         polling), one per `qr.rotate`. Each token is valid for `qr.rotate` + `qr.tolerance` (10 s).
       parameters:
@@ -878,8 +969,32 @@ paths:
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_waypoint_id`" }
         "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
-        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_staff`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`" }
+
+  /api/qr/me:
+    get:
+      tags: [qr]
+      summary: Your assigned checkpoint's signing key and timing rules
+      description: |
+        Staff only (HELPER or ADMIN, read from the database each request). The key and timing rules for
+        the checkpoint an admin assigned you (`PUT /api/admin/helpers/{user_id}/waypoint`), the same JSON
+        as `GET /api/qr/{waypoint_id}`; the `/qr` display signs its rotating tokens with it.
+        `not_assigned` until one is assigned.
+      responses:
+        "200":
+          description: The signing key and timing rules.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/SigningKey" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_staff`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_assigned`" }
 
   /api/qr/verify:
     post:
@@ -1314,13 +1429,18 @@ components:
             by_option: { type: object, additionalProperties: { type: integer }, description: "Answers per option index; {} when none." }
     User:
       type: object
-      required: [id, email, name, avatar_url, role, created_at]
+      required: [id, email, name, avatar_url, role, waypoint_id, created_at]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, format: email, example: player@snu.edu.in }
         name: { type: string, example: Player One }
         avatar_url: { type: [string, "null"], format: uri }
         role: { type: string, enum: [PLAYER, HELPER, ADMIN] }
+        waypoint_id:
+          type: [string, "null"]
+          pattern: "^[0-9]{4}$"
+          description: A helper's assigned checkpoint, whose QR their `/qr` display shows (an admin assigns it); null if none. Only staff have one.
+          example: "2003"
         created_at: { type: string, format: date-time }
 
     Team:
@@ -1350,17 +1470,26 @@ components:
 
     Game:
       type: object
-      required: [shapes, health, locked_pattern_points, unlock_after_bosses, max_pattern_points, spell_classes, powerups]
+      required: [shapes, health, unlocks, max_pattern_points, spell_classes, powerups]
       properties:
         shapes:
           type: array
           items: { $ref: "#/components/schemas/GameShape" }
         health: { type: integer, description: "game.health: every team's starting health, and what a revive restores.", example: 10 }
-        locked_pattern_points:
-          type: integer
-          description: "game.locked_pattern_points: patterns of at least this many waypoints are locked until a team has defeated unlock_after_bosses bosses."
-          example: 5
-        unlock_after_bosses: { type: integer, description: "game.unlock_after_bosses.", example: 5 }
+        unlocks:
+          type: array
+          description: >-
+            The unlock schedule (`game.unlocks`), ascending by `after_bosses`: once a team has defeated
+            `after_bosses` bosses, it can cast patterns of up to `points` waypoints. The first step is always at
+            0 bosses, and the last reaches `max_pattern_points`. A team's current limit is
+            `team_state.unlocked_points`.
+          items:
+            type: object
+            required: [after_bosses, points]
+            properties:
+              after_bosses: { type: integer, minimum: 0, description: "Bosses the team must have defeated." }
+              points: { type: integer, minimum: 1, description: "The most waypoints a pattern it can cast may have from then on." }
+          example: [{ after_bosses: 0, points: 3 }, { after_bosses: 2, points: 4 }, { after_bosses: 4, points: 5 }, { after_bosses: 5, points: 6 }]
         max_pattern_points: { type: integer, description: "game.max_pattern_points: the most waypoints in any pattern.", example: 6 }
         spell_classes:
           type: array
@@ -1485,15 +1614,15 @@ components:
         unlocked_points:
           type: integer
           description: >-
-            The most waypoints a pattern the team can cast may have: `game.locked_pattern_points` − 1 (4) until it
-            has defeated `game.unlock_after_bosses` (5) bosses, then `game.max_pattern_points` (6). A scan that could
-            only grow into a bigger pattern is a wrong scan.
-          example: 4
+            The most waypoints a pattern the team can cast may have, from the unlock schedule (`game.unlocks`,
+            `GET /api/game/shapes` `unlocks`) and the bosses it has defeated: 3 at the start, 4 after 2 bosses, 5
+            after 4, 6 after 5. A scan that could only grow into a bigger pattern is a wrong scan.
+          example: 3
         locked_shapes:
           type: array
           items: { type: string }
           description: "Types the team can't select yet (`shape_locked`): every one of their patterns is bigger than `unlocked_points`."
-          example: [hexagon]
+          example: [hexagon, pentagon, quadrilateral]
         cooldown_class:
           type: [string, "null"]
           description: >-

@@ -1,6 +1,7 @@
 package qr
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -8,6 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+
+	"labyrinth/internal/user"
 )
 
 // Clock is where the verifier gets the current time, so a token's freshness
@@ -30,6 +35,14 @@ func (systemClock) Now() time.Time { return time.Now().UTC().Truncate(time.Micro
 type Atlas interface {
 	// WaypointIndex looks up a waypoint by its 4-digit ID.
 	WaypointIndex(id string) (int, bool)
+}
+
+// Assignments is what qr needs from the user use case: the caller, whose
+// waypoint_id is the checkpoint their display shows (an admin assigns it).
+// *user.Users satisfies it.
+type Assignments interface {
+	// Get reads a user by ID.
+	Get(ctx context.Context, id uuid.UUID) (user.User, error)
 }
 
 // Rules are the QR settings from config.toml.

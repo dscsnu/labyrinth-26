@@ -33,14 +33,6 @@ bosses = 6
 # [game.boss_attack.damage] entry off it; at 0 the team is knocked out (no selecting or scanning)
 # until an admin revives it, back to this. Allowed: at least 1.
 health = 10
-# Big patterns are locked: a team can't cast a pattern of at least
-# locked_pattern_points waypoints until it has defeated unlock_after_bosses
-# bosses. Until then a shape made only of big patterns can't be selected, and
-# a scan that could only grow into a big pattern is a wrong scan. Allowed:
-# locked_pattern_points 1 to max_pattern_points + 1 (+ 1 locks nothing);
-# unlock_after_bosses 0 (nothing locked) to bosses.
-locked_pattern_points = 5
-unlock_after_bosses = 5
 # After a team casts a spell, the waypoints (QR codes) of that spell are
 # disabled for the team for this long: nobody on the team can scan them
 # (409 waypoint_on_cooldown) until it has passed. Other waypoints stay open.
@@ -63,6 +55,18 @@ interval = "10m"
 4 = 4
 5 = 5
 6 = 6
+
+[game.unlocks]
+# The unlock schedule: bosses defeated = the most waypoints a pattern a team
+# can cast may have from then on. A shape whose patterns are all bigger can't
+# be selected, a scan that could only grow into a bigger pattern is a wrong
+# scan, and an instant cast can't cast one. Allowed: keys 0 to game.bosses,
+# "0" required (what a team casts from the start); values 1 to
+# game.max_pattern_points, each step more than the one before, the last
+# exactly game.max_pattern_points.
+0 = 4 # lines, triangles and quadrilaterals from the start
+4 = 5 # pentagons for the fifth boss (after 4 defeated)
+5 = 6 # hexagons for the sixth boss (after 5 defeated)
 
 [powerups]
 # Powerups are temporary effects a team holds (at most one of each kind) and

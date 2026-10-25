@@ -6,6 +6,7 @@ import type { Actions, PageServerLoad } from "./$types";
 const TeamsResponseSchema = apiResponse(TeamOverviewListSchema);
 const UsersResponseSchema = apiResponse(UserListSchema);
 const QTEsResponseSchema = apiResponse(AdminQTEListSchema);
+const HelpersResponseSchema = apiResponse(UserListSchema);
 
 // The backend decides who's an admin, from the role in the database: the
 // session's role is as of sign-in and may be stale, so it isn't trusted here.
@@ -14,27 +15,31 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     if (!locals.user || !locals.token) redirect(303, '/');
 
     const email = url.searchParams.get('email');
-    const [teamsRes, qtesRes, usersRes] = await Promise.all([
+    const [teamsRes, qtesRes, helpersRes, usersRes] = await Promise.all([
         backendFetch('/api/admin/teams', locals.token),
         backendFetch('/api/admin/qtes', locals.token),
+        backendFetch('/api/admin/helpers', locals.token),
         email === null ? null : backendFetch(`/api/admin/users?email=${encodeURIComponent(email)}`, locals.token),
     ]);
     if (teamsRes.status === 403) error(403, 'Admins only');
     if (!teamsRes.ok) throw new Error(`GET /api/admin/teams failed with ${teamsRes.status}`);
     if (!qtesRes.ok) throw new Error(`GET /api/admin/qtes failed with ${qtesRes.status}`);
+    if (!helpersRes.ok) throw new Error(`GET /api/admin/helpers failed with ${helpersRes.status}`);
     if (usersRes && !usersRes.ok) throw new Error(`GET /api/admin/users failed with ${usersRes.status}`);
 
     return {
         teams: TeamsResponseSchema.parse(await teamsRes.json()).payload ?? [],
         qtes: QTEsResponseSchema.parse(await qtesRes.json()).payload ?? [],
+        helpers: HelpersResponseSchema.parse(await helpersRes.json()).payload ?? [],
         email,
         users: usersRes ? UsersResponseSchema.parse(await usersRes.json()).payload ?? [] : null,
     };
 }
 
 // Calls an admin route; errors come back as form data with the backend's
-// code and message.
-const adminCall = async (token: string | null, path: string, method: string, body?: unknown) => {
+// code and message. section names where the page shows the result (the
+// helpers' forms show theirs beside them); unset, at the top.
+const adminCall = async (token: string | null, path: string, method: string, body?: unknown, section?: 'helpers') => {
     if (!token) redirect(303, '/');
     const response = await backendFetch(path, token, {
         method,
@@ -46,6 +51,7 @@ const adminCall = async (token: string | null, path: string, method: string, bod
     return fail(response.status, {
         code: (data.code as string | undefined) ?? 'error',
         message: (data.message as string | undefined) ?? `request failed with ${response.status}`,
+        section,
     });
 }
 
@@ -133,5 +139,26 @@ export const actions: Actions = {
         const role = field(form, 'role');
         return (await adminCall(locals.token, `/api/admin/users/${encodeURIComponent(userId)}/role`, 'PUT', { role }))
             ?? { done: `Role set to ${role}.` };
+    },
+    // Makes the account with this email a helper; they must have signed in
+    // once. The backend checks it exists.
+    addHelper: async ({ request, locals }) => {
+        const email = field(await request.formData(), 'email').trim();
+        return (await adminCall(locals.token, '/api/admin/helpers', 'POST', { email }, 'helpers'))
+            ?? { done: `${email} is a helper. Assign their checkpoint below.`, section: 'helpers' };
+    },
+    // Sets the checkpoint a helper's /qr shows; empty unassigns.
+    assignWaypoint: async ({ request, locals }) => {
+        const form = await request.formData();
+        const userId = field(form, 'user_id');
+        const waypoint = field(form, 'waypoint_id') || null;
+        return (await adminCall(locals.token, `/api/admin/helpers/${encodeURIComponent(userId)}/waypoint`, 'PUT', { waypoint_id: waypoint }, 'helpers'))
+            ?? { done: waypoint ? `Checkpoint ${waypoint} assigned.` : 'Checkpoint unassigned.', section: 'helpers' };
+    },
+    // No longer a helper: back to PLAYER, which also clears the checkpoint.
+    removeHelper: async ({ request, locals }) => {
+        const userId = field(await request.formData(), 'user_id');
+        return (await adminCall(locals.token, `/api/admin/users/${encodeURIComponent(userId)}/role`, 'PUT', { role: 'PLAYER' }, 'helpers'))
+            ?? { done: 'Helper removed.', section: 'helpers' };
     },
 };

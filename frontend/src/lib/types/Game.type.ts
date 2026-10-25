@@ -24,10 +24,10 @@ export const GameSchema = z.object({
     max_pattern_points: z.number(),
     // game.health: every team's starting health.
     health: z.number(),
-    // Patterns of at least locked_pattern_points waypoints unlock once a
-    // team has defeated unlock_after_bosses bosses.
-    locked_pattern_points: z.number(),
-    unlock_after_bosses: z.number(),
+    // The unlock schedule (game.unlocks), ascending: once a team has
+    // defeated after_bosses bosses, it can cast patterns of up to points
+    // waypoints. The team's current limit is team_state.unlocked_points.
+    unlocks: z.array(z.object({ after_bosses: z.number(), points: z.number() })),
 });
 
 // The team_state event and GET /api/teams/me/state.

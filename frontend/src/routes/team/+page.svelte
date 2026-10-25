@@ -2,7 +2,10 @@
     import DiamondBackdrop from "#lib/components/DiamondBackdrop.svelte";
     import { envelope, isNewer } from "#lib/types/Live.type.ts";
     import { TeamSchema, type Team } from "#lib/types/Team.type.ts";
+    import { z } from "zod";
     import { preloadMapArt, whenIdle } from "#lib/game/preload.ts";
+    import { replaceState } from "$app/navigation";
+    import { page } from "$app/state";
     import { onMount } from "svelte";
     import type { PageProps } from "./$types";
 
@@ -43,10 +46,31 @@
         "block w-full px-4 py-2 text-center text-[16px] leading-[24px] text-white uppercase text-outline outline-none hover:bg-pink focus-visible:bg-pink active:translate-y-[2px] disabled:pointer-events-none disabled:opacity-40";
     const menuMain = `${menuItem} bg-pink`;
 
+    // Why the player has no team, when an organiser did it: removed them
+    // ("removed"), or deleted the team ("team_deleted"). From the no_team
+    // event, here or on /play (which sends the player here with ?gone=).
+    const GONE: Record<string, { title: string; text: string }> = {
+        removed: { title: "Removed from your party", text: "An organiser removed you from your party. Create a new party or join another." },
+        team_deleted: { title: "Your party was deleted", text: "An organiser deleted your party. Create a new party or join another." },
+    };
+    let gone = $state<string | null>(null);
+    // Set while this player leaves: leaving as the last member deletes the
+    // party too (team_deleted), which they don't need telling.
+    let leaving = false;
+
     onMount(() => {
         // The map's art, fetched while the party waits here, so /play
         // opens with it ready.
         whenIdle(() => preloadMapArt().catch(() => {}));
+        // Sent here from /play: show why, and drop it from the URL so a
+        // reload doesn't show it again.
+        const reason = page.url.searchParams.get("gone");
+        if (reason && GONE[reason]) {
+            gone = reason;
+            const url = new URL(page.url.href);
+            url.searchParams.delete("gone");
+            replaceState(url, {});
+        }
         // EventSource reconnects by itself; the first event after each
         // (re)connect is the full current state.
         const events = new EventSource("/api/events");
@@ -58,7 +82,9 @@
             const next = envelope(TeamSchema).parse(JSON.parse(e.data)).message;
             if (next.id !== team?.id || isNewer(team.version, next.version)) live = next;
         });
-        events.addEventListener("no_team", () => {
+        events.addEventListener("no_team", (e) => {
+            const { type } = envelope(z.object({})).parse(JSON.parse(e.data));
+            if (GONE[type] && !leaving) gone = type;
             live = null;
         });
         return () => events.close();
@@ -73,6 +99,13 @@
     <h1 class="sr-only">Party</h1>
 
     <main class="mx-auto flex w-full max-w-md flex-col gap-8 px-5 pt-12">
+        {#if gone && !team}
+            <div role="alert" class="pixel-box bg-danger p-4">
+                <p class="uppercase text-outline">! {GONE[gone].title}</p>
+                <p class="mt-2 text-[8px] leading-[16px] uppercase">{GONE[gone].text}</p>
+                <button type="button" onclick={() => (gone = null)} class="mt-3 text-[8px] leading-[16px] uppercase underline">Okay</button>
+            </div>
+        {/if}
         {#if form?.code}
             <div role="alert" class="pixel-box bg-danger p-4">
                 <p class="uppercase text-outline">! Error</p>
@@ -211,7 +244,7 @@
                             <button class={me?.is_ready ? menuItem : menuMain}>{me?.is_ready ? "Unready" : "Ready up"}</button>
                         </form>
                     {/if}
-                    <form method="POST" action="?/leave">
+                    <form method="POST" action="?/leave" onsubmit={() => (leaving = true)}>
                         <button class="{menuItem} hover:bg-danger focus-visible:bg-danger">Leave party</button>
                     </form>
                 </nav>

@@ -132,7 +132,16 @@ func run() error {
 		overrides = append(overrides, override{"per_second", "1000000"}, override{"burst", "1000000"})
 	}
 	if *qrCooldown != "" {
+		d, err := time.ParseDuration(*qrCooldown)
+		if err != nil || d < 0 {
+			return fmt.Errorf("bad -qr-cooldown %q", *qrCooldown)
+		}
 		overrides = append(overrides, override{"qr_cooldown", strconv.Quote(*qrCooldown)})
+		// powerups.short_qr_cooldown may be at most game.qr_cooldown, or the
+		// backend refuses its config: a shorter -qr-cooldown takes it down too.
+		if d < settings.Powerups.ShortQRCooldown.Duration {
+			overrides = append(overrides, override{"short_qr_cooldown", strconv.Quote(*qrCooldown)})
+		}
 	}
 	var backendEnv []string
 	if len(overrides) > 0 {
