@@ -52,24 +52,29 @@ Apart from the event stream (`/api/events`, above), the browser never calls the 
 | `PUT /play/selection` `{"shape"}` (`src/routes/play/selection/+server.ts`) | `PUT /api/teams/me/state/selection` |
 | `DELETE /play/selection` (same file) | `DELETE /api/teams/me/state/selection` |
 | `GET /play/casts` (`src/routes/play/casts/+server.ts`) | `GET /api/teams/me/casts` (the cast log, re-fetched when `cast_count` says casts were missed) |
-| `GET /qr/{waypoint_id}` (`src/routes/qr/[waypoint]/+server.ts`) | `GET /api/qr/{waypoint_id}` |
+| `GET /qr/me` (`src/routes/qr/me/+server.ts`) | `GET /api/qr/me` (a helper's assigned checkpoint) |
+| `GET /qr/{waypoint_id}` (`src/routes/qr/[waypoint]/+server.ts`) | `GET /api/qr/{waypoint_id}` (admins only) |
 | `POST /qr/verify` `{"qr"}` (`src/routes/qr/verify/+server.ts`) | `POST /api/qr/verify` |
 
 ## The `/admin` page
 For organisers: every team at a glance, and the admin tools. The home page links to it when the session's role is `ADMIN`, but the link is only a convenience. **The backend decides who's an admin**, from the role in Postgres on every request (`403 not_admin` otherwise), because the session's role is as of sign-in and may be stale. Every route it calls is the backend's `admin` use case ([`backend/internal/admin/README.md`](../backend/internal/admin/README.md)).
 
 `src/routes/admin/+page.server.ts`:
-- **load:** no session redirects to `/`. `GET /api/admin/teams` (each team with its `game` at a glance: `TeamOverviewListSchema`); a `403` becomes SvelteKit's `error(403, 'Admins only')`. With `?email=` in the page's URL it also searches users (`GET /api/admin/users?email=`, `UserListSchema`) and returns them as `users` (`null` without a search).
+- **load:** no session redirects to `/`. `GET /api/admin/teams` (each team with its `game` at a glance: `TeamOverviewListSchema`); a `403` becomes SvelteKit's `error(403, 'Admins only')`. It also lists the helpers (`GET /api/admin/helpers`, `UserListSchema`, as `helpers`). With `?email=` in the page's URL it also searches users (`GET /api/admin/users?email=`, `UserListSchema`) and returns them as `users` (`null` without a search).
 - **Actions**, all through `adminCall` (a backend error comes back as `fail(status, {code, message})`, shown in red; success as `{done: "…"}`, shown in green):
   - `revive` (`team_id`): `POST /api/admin/teams/{team_id}/revive`
   - `reset` (`team_id`): `POST /api/admin/teams/{team_id}/cooldowns/reset`
   - `delete` (`team_id`): `DELETE /api/admin/teams/{team_id}`
   - `remove` (`team_id`, `user_id`, `new_leader`): `DELETE /api/admin/teams/{team_id}/members/{user_id}`, adding `?new_leader=` when given
   - `role` (`user_id`, `role`): `PUT /api/admin/users/{user_id}/role {"role"}`
+  - `addHelper` (`email`): `POST /api/admin/helpers {"email"}`
+  - `assignWaypoint` (`user_id`, `waypoint_id`; empty unassigns): `PUT /api/admin/helpers/{user_id}/waypoint {"waypoint_id"}`
+  - `removeHelper` (`user_id`): `PUT /api/admin/users/{user_id}/role {"role": "PLAYER"}`, which also clears the checkpoint
 
 `src/routes/admin/+page.svelte`:
 - **Teams:** every team with its code, status and members, filterable by code, team name or player name, and by a **knocked out only** checkbox (with the count). A started team shows its game: **KNOCKED OUT** in red, health, bosses defeated, the current boss and its damage, casts, the class on cooldown and the waypoints cooling.
 - **Per team:** **revive (full health)** and **reset cooldowns** (disabled when nothing is cooling) on an `IN_GAME` team; **delete team** on any. Each member has a **remove** button; the leader's has a required **new leader** picker (the backend refuses a leader's removal without one: `new_leader_required`); a team's only member shows "can't be removed" (`last_member`).
+- **Helpers:** an **add helper** form by email (the backend checks the account exists: `user_not_found` until they've signed in once; `already_admin` for an admin), then one row per helper with a checkpoint picker (no checkpoint, or `2001`–`2010` with their names from `MAP_POINTS`), **save**, and **remove** (asks first).
 - **Users and roles:** a search form (`GET` with `?email=`) and, per user found, a role picker and **set role**; your own row says another admin must change your role (the backend's `cannot_change_own_role`).
 - Every write form uses `use:enhance` with `confirmFirst(question)`, which asks `confirm()` and calls `cancel()` on "no" (the role form doesn't ask). After an action SvelteKit reloads the page's data, so the list is current. The page doesn't listen to events: it shows the teams as of the last load or action.
 
@@ -86,13 +91,13 @@ The top teams, live. The home page links to it.
 
 ## The `/qr` display page
 
-For staff: a screen at a waypoint showing its rotating QR. `src/routes/qr/+page.svelte`:
+For staff: a screen at a checkpoint showing its rotating QR. `src/routes/qr/+page.svelte`:
 
-1. Enter a 4-digit waypoint ID. The page fetches `GET /qr/{waypoint_id}` **once**, which the backend answers with the waypoint-scoped HMAC signing key and timing rules (`key`, `rotate_ms`, `window_ms`, `server_time`) — see `backend/internal/qr/README.md`.
+1. **A helper** can't pick: the page fetches `GET /qr/me`, the checkpoint an admin assigned them on `/admin`, and shows its name (from `MAP_POINTS`) and ID. With none (`not_assigned`) it says to ask an organiser. It asks again every **15 s** while unassigned and every **30 s** while showing, so an assignment, a reassignment or an unassignment reaches the screen without a reload; a failed check (no signal) keeps the current QR showing. **An admin** enters any 4-digit waypoint ID instead (`GET /qr/{waypoint_id}`). Either way the backend answers with the waypoint-scoped HMAC signing key and timing rules (`key`, `rotate_ms`, `window_ms`, `server_time`) — see `backend/internal/qr/README.md`.
 2. It signs `"<waypoint>:<unix seconds>"` locally with Web Crypto (`crypto.subtle`, HMAC-SHA256), base64url-encodes the signature, and renders the token as a QR (`qrcode`), re-signing every `rotate_ms`. `server_time` corrects the display's own clock before signing.
-3. No further requests: the QR rotates from the one key, offline except for the initial fetch.
+3. No further requests for the QR itself: it rotates from the one key, offline (a helper's page only re-checks its assignment).
 
-`src/routes/qr/+page.server.ts` gates the page to staff: it checks the backend role via `GET /api/me` (HELPER/ADMIN), matching the backend route `GET /api/qr/{waypoint_id}` (`403 not_staff`). The page is handed a signing key, so it must not be reachable by players.
+`src/routes/qr/+page.server.ts` gates the page to staff: it checks the backend role via `GET /api/me` (HELPER/ADMIN), matching the backend route `GET /api/qr/me` (`403 not_staff`), and passes the role, so only an admin gets the picker (the backend refuses a helper's pick: `403 not_admin`). The page is handed a signing key, so it must not be reachable by players.
 
 ## The `/test-scan` page
 
