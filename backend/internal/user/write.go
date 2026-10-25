@@ -34,8 +34,10 @@ var ErrInvalidRole = errors.New("role must be PLAYER, HELPER or ADMIN")
 
 // SetRole changes a user's role (an admin's action). It applies to every
 // route that reads the role from here (RequireAdmin, RequireStaff) at once;
-// the token's copy updates at the user's next sign-in. ErrInvalidRole for an
-// unknown role; ErrUserNotFound if there's no such user.
+// the token's copy updates at the user's next sign-in. Demoting to PLAYER
+// also clears their assigned checkpoint (only staff can hold one).
+// ErrInvalidRole for an unknown role; ErrUserNotFound if there's no such
+// user.
 func (u *Users) SetRole(ctx context.Context, id uuid.UUID, role Role) (User, error) {
 	switch role {
 	case RolePlayer, RoleHelper, RoleAdmin:
@@ -47,4 +49,25 @@ func (u *Users) SetRole(ctx context.Context, id uuid.UUID, role Role) (User, err
 		return usr, fmt.Errorf("%w: %w", ErrUserNotFound, err)
 	}
 	return usr, err
+}
+
+// ErrNotHelper means the user isn't a HELPER, so they can't be assigned a
+// checkpoint (an admin picks theirs on /qr; a player has no display).
+var ErrNotHelper = errors.New("user is not a helper")
+
+// Assign sets the checkpoint a helper's /qr display shows, or clears it
+// when waypointID is nil (an admin's action). It doesn't check the waypoint
+// exists: that's the caller's rule (admin checks the atlas); the foreign key
+// is the backstop. ErrNotHelper if the user isn't a HELPER; ErrUserNotFound
+// if there's no such user.
+func (u *Users) Assign(ctx context.Context, id uuid.UUID, waypointID *string) (User, error) {
+	usr, err := u.db.updateWaypoint(ctx, id, waypointID)
+	if !errors.Is(err, postgres.ErrNotFound) {
+		return usr, err
+	}
+	// No helper row matched: tell an unknown user from a non-helper.
+	if _, err := u.Get(ctx, id); err != nil {
+		return User{}, err
+	}
+	return User{}, ErrNotHelper
 }
