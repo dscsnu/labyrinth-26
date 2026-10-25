@@ -27,8 +27,14 @@ export const MAP_POINTS: MapPoint[] = [
     { name: "Canopies", x: 515, y: 528, waypoint: "2008" },
     { name: "CnD Atrium", x: 986, y: 577, waypoint: "2010" },
     { name: "Atal Incubation Center", x: 533, y: 881, waypoint: "2006" },
-    { name: "Lake", x: 991, y: 971, waypoint: "2007" },
+    { name: "Lake Road", x: 991, y: 971, waypoint: "2007" },
     { name: "Amphi", x: 768, y: 1076, waypoint: "2005" },
     { name: "Chess Garden", x: 352, y: 1273, waypoint: "2004" },
     { name: "Inner gate", x: 58, y: 924, waypoint: "2003" },
 ];
+
+// Rename rule for checkpoint names: maps raw/backend names to display names.
+export const renameCheckpoint = (name: string): string => {
+    if (name === "Lake") return "Lake Road";
+    return name;
+};
