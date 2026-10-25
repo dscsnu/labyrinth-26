@@ -187,9 +187,10 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	admin.NewAPI(admin.New(teamStore, stateStore, qteStore, users, theAtlas, admin.Rules{UserSearchLimit: set.Admin.UserSearchLimit}), log).
 		Routes(mux, adminOnly)
 	bosses.NewAPI(theBosses).Routes(mux, authed)
-	qrAPI := qr.NewAPI(qrVerifier, log)
+	qrAPI := qr.NewAPI(qrVerifier, users, log)
 	qrAPI.Routes(mux, authed)
 	qrAPI.StaffRoutes(mux, staff)
+	qrAPI.AdminRoutes(mux, adminOnly)
 	// The one event stream. Browsers open it on the shared domain with the
 	// labyrinth_token cookie (RequireStreamAuth); other clients use Bearer.
 	mux.Handle("GET /api/events", authAPI.RequireStreamAuth(perUser(http.HandlerFunc(app.events))))
