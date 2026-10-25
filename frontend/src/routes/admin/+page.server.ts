@@ -37,8 +37,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 }
 
 // Calls an admin route; errors come back as form data with the backend's
-// code and message.
-const adminCall = async (token: string | null, path: string, method: string, body?: unknown) => {
+// code and message. section names where the page shows the result (the
+// helpers' forms show theirs beside them); unset, at the top.
+const adminCall = async (token: string | null, path: string, method: string, body?: unknown, section?: 'helpers') => {
     if (!token) redirect(303, '/');
     const response = await backendFetch(path, token, {
         method,
@@ -50,6 +51,7 @@ const adminCall = async (token: string | null, path: string, method: string, bod
     return fail(response.status, {
         code: (data.code as string | undefined) ?? 'error',
         message: (data.message as string | undefined) ?? `request failed with ${response.status}`,
+        section,
     });
 }
 
@@ -142,21 +144,21 @@ export const actions: Actions = {
     // once. The backend checks it exists.
     addHelper: async ({ request, locals }) => {
         const email = field(await request.formData(), 'email').trim();
-        return (await adminCall(locals.token, '/api/admin/helpers', 'POST', { email }))
-            ?? { done: `${email} is a helper. Assign their checkpoint below.` };
+        return (await adminCall(locals.token, '/api/admin/helpers', 'POST', { email }, 'helpers'))
+            ?? { done: `${email} is a helper. Assign their checkpoint below.`, section: 'helpers' };
     },
     // Sets the checkpoint a helper's /qr shows; empty unassigns.
     assignWaypoint: async ({ request, locals }) => {
         const form = await request.formData();
         const userId = field(form, 'user_id');
         const waypoint = field(form, 'waypoint_id') || null;
-        return (await adminCall(locals.token, `/api/admin/helpers/${encodeURIComponent(userId)}/waypoint`, 'PUT', { waypoint_id: waypoint }))
-            ?? { done: waypoint ? `Checkpoint ${waypoint} assigned.` : 'Checkpoint unassigned.' };
+        return (await adminCall(locals.token, `/api/admin/helpers/${encodeURIComponent(userId)}/waypoint`, 'PUT', { waypoint_id: waypoint }, 'helpers'))
+            ?? { done: waypoint ? `Checkpoint ${waypoint} assigned.` : 'Checkpoint unassigned.', section: 'helpers' };
     },
     // No longer a helper: back to PLAYER, which also clears the checkpoint.
     removeHelper: async ({ request, locals }) => {
         const userId = field(await request.formData(), 'user_id');
-        return (await adminCall(locals.token, `/api/admin/users/${encodeURIComponent(userId)}/role`, 'PUT', { role: 'PLAYER' }))
-            ?? { done: 'Helper removed.' };
+        return (await adminCall(locals.token, `/api/admin/users/${encodeURIComponent(userId)}/role`, 'PUT', { role: 'PLAYER' }, 'helpers'))
+            ?? { done: 'Helper removed.', section: 'helpers' };
     },
 };

@@ -35,11 +35,17 @@
 
 <p><a href="/">home</a> · <a href="/leaderboard">leaderboard</a> · {user?.name} · admin</p>
 
-{#if form?.code}
-    <p style="color: red">{form.code}: {form.message}</p>
-{:else if form?.done}
-    <p style="color: green">{form.done}</p>
-{/if}
+<!-- An action's result: here, or beside its own forms for a section that
+     shows its own (the helpers', at the bottom). -->
+{#snippet result()}
+    {#if form?.code}
+        <p style="color: red">{form.code}: {form.message}</p>
+    {:else if form?.done}
+        <p style="color: green">{form.done}</p>
+    {/if}
+{/snippet}
+
+{#if !form?.section}{@render result()}{/if}
 
 <h1>Teams</h1>
 
@@ -182,7 +188,7 @@
     <button>create</button>
 </form>
 
-<h1>Helpers</h1>
+<h1 id="helpers">Helpers</h1>
 
 <p>Helpers run the QR display at a checkpoint: their <a href="/qr">/qr</a> page shows the checkpoint assigned here, and they can't pick another. Add one by the email they signed in with (they must have signed in once).</p>
 
@@ -190,6 +196,8 @@
     <input name="email" type="email" required placeholder="helper's email" size="30" />
     <button>add helper</button>
 </form>
+
+{#if form?.section === 'helpers'}{@render result()}{/if}
 
 {#if helpers.length === 0}
     <p>No helpers yet.</p>
