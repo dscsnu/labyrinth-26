@@ -64,8 +64,7 @@ var (
 	// or clears the selection.
 	ErrNotLeader = teams.ErrNotLeader
 	// ErrShapeLocked means every pattern of the shape is bigger than the
-	// team has unlocked (game.locked_pattern_points, until it has defeated
-	// game.unlock_after_bosses bosses).
+	// team has unlocked (game.unlocks: more bosses unlock bigger patterns).
 	ErrShapeLocked = errors.New("this shape's patterns are locked until your team defeats more bosses")
 	// ErrShapeOnCooldown means every pattern of the shape the team has
 	// unlocked is of the spell class of its last cast: it must cast a spell
@@ -104,8 +103,7 @@ var (
 	// pattern.
 	ErrUnknownPattern = errors.New("those waypoints make no pattern")
 	// ErrPatternLocked means an instant cast's pattern is bigger than the
-	// team has unlocked (game.locked_pattern_points, until it has defeated
-	// game.unlock_after_bosses bosses).
+	// team has unlocked (game.unlocks: more bosses unlock bigger patterns).
 	ErrPatternLocked = errors.New("this pattern is locked until your team defeats more bosses")
 	// ErrUnknownQTE is the qte use case's: no QTE has that ID (or it's a
 	// draft, which players can't see).

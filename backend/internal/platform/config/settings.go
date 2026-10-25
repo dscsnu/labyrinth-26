@@ -4,8 +4,10 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -130,12 +132,10 @@ type GameSettings struct {
 	Bosses int `toml:"bosses"`
 	// Health is every team's starting health, and what a revive restores.
 	Health int `toml:"health"`
-	// LockedPatternPoints is the size from which patterns are locked until
-	// the team has defeated UnlockAfterBosses bosses.
-	LockedPatternPoints int `toml:"locked_pattern_points"`
-	// UnlockAfterBosses is how many bosses a team must defeat to unlock
-	// patterns of LockedPatternPoints or more waypoints.
-	UnlockAfterBosses int `toml:"unlock_after_bosses"`
+	// Unlocks is the unlock schedule ([game.unlocks]): bosses defeated ("0"
+	// … game.bosses) → the most waypoints a pattern a team can cast may have
+	// from then on.
+	Unlocks map[string]int `toml:"unlocks"`
 	// QRCooldown is how long a cast's waypoints stay disabled for the team
 	// that cast it; 0 turns it off.
 	QRCooldown Duration `toml:"qr_cooldown"`
@@ -178,6 +178,10 @@ type BossAttackSettings struct {
 	Damage map[string]int `toml:"damage"`
 }
 
+// UnlockSchedule returns Unlocks keyed by bosses defeated as an int.
+// validate has checked every key is 0 to game.bosses.
+func (g GameSettings) UnlockSchedule() map[int]int { return intKeys(g.Unlocks) }
+
 // BossDamage returns Damage keyed by serial as an int. validate has checked
 // every key is a serial from 1 to game.bosses.
 func (b BossAttackSettings) BossDamage() map[int]int { return intKeys(b.Damage) }
@@ -201,6 +205,46 @@ func intKeys(m map[string]int) map[int]int {
 func intKey(k string) (int, bool) {
 	n, err := strconv.Atoi(k)
 	return n, err == nil && strconv.Itoa(n) == k
+}
+
+// validateUnlocks checks [game.unlocks]: every key is a number of bosses
+// from 0 to game.bosses, and "0" is there (what a team can cast from the
+// start); every value is 1 to game.max_pattern_points; each step unlocks
+// more than the one before; and the last reaches game.max_pattern_points,
+// so every pattern the content may have can be cast in the end.
+func (g GameSettings) validateUnlocks() []error {
+	var errs []error
+	check := func(ok bool, format string, args ...any) {
+		if !ok {
+			errs = append(errs, fmt.Errorf(format, args...))
+		}
+	}
+	check(hasKey(g.Unlocks, "0"), "game.unlocks has no entry for 0 bosses (what a team can cast from the start)")
+	valid := map[int]int{}
+	for k, v := range g.Unlocks {
+		bosses, ok := intKey(k)
+		ok = ok && bosses >= 0 && bosses <= g.Bosses
+		check(ok, "game.unlocks.%s is not a number of bosses (0-%d, game.bosses)", k, g.Bosses)
+		inRange := v >= 1 && v <= g.MaxPatternPoints
+		check(inRange, "game.unlocks.%s must be 1-%d (game.max_pattern_points)", k, g.MaxPatternPoints)
+		if ok && inRange {
+			valid[bosses] = v
+		}
+	}
+	if len(valid) < len(g.Unlocks) {
+		return errs // the order checks below only make sense on valid entries
+	}
+	keys := slices.Sorted(maps.Keys(valid))
+	for i := 1; i < len(keys); i++ {
+		check(valid[keys[i]] > valid[keys[i-1]], "game.unlocks.%d must unlock more than game.unlocks.%d (%d)",
+			keys[i], keys[i-1], valid[keys[i-1]])
+	}
+	if len(keys) > 0 {
+		last := keys[len(keys)-1]
+		check(valid[last] == g.MaxPatternPoints, "game.unlocks.%d is the last step, so must be %d (game.max_pattern_points): patterns of more waypoints could never be cast",
+			last, g.MaxPatternPoints)
+	}
+	return errs
 }
 
 // QRSettings is config.toml's [qr] table.
@@ -342,10 +386,7 @@ func (s Settings) validate() []error {
 		"game.max_pattern_points must be 1-%d", MaxPatternPoints)
 	check(s.Game.Bosses >= 1, "game.bosses must be at least 1")
 	check(s.Game.Health >= 1, "game.health must be at least 1")
-	check(s.Game.LockedPatternPoints >= 1 && s.Game.LockedPatternPoints <= s.Game.MaxPatternPoints+1,
-		"game.locked_pattern_points must be 1-%d (game.max_pattern_points + 1 locks nothing)", s.Game.MaxPatternPoints+1)
-	check(s.Game.UnlockAfterBosses >= 0 && s.Game.UnlockAfterBosses <= s.Game.Bosses,
-		"game.unlock_after_bosses must be 0-%d (game.bosses)", s.Game.Bosses)
+	errs = append(errs, s.Game.validateUnlocks()...)
 	check(s.Game.QRCooldown.Duration >= 0, "game.qr_cooldown must not be negative")
 	check(s.Game.BossAttack.Interval.Duration > 0, "game.boss_attack.interval must be positive")
 	for serial := 1; serial <= s.Game.Bosses; serial++ {

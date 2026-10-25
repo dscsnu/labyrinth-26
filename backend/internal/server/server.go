@@ -124,17 +124,16 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 		return nil, err
 	}
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, qteStore, hub, log, teamstate.Rules{
-		MaxPatternPoints:    set.Game.MaxPatternPoints,
-		Health:              set.Game.Health,
-		LockedPatternPoints: set.Game.LockedPatternPoints,
-		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
-		QRCooldown:          set.Game.QRCooldown.Duration,
-		PowerupMultiplier:   set.Powerups.DamageMultiplier,
-		PowerupHeart:        set.Powerups.Heart,
-		ShortQRCooldown:     set.Powerups.ShortQRCooldown.Duration,
-		ShortQRWindow:       set.Powerups.ShortQRWindow.Duration,
-		WriteTimeout:        set.Storage.WriteTimeout.Duration,
-		Epoch:               epoch,
+		MaxPatternPoints:  set.Game.MaxPatternPoints,
+		Health:            set.Game.Health,
+		Unlocks:           set.Game.UnlockSchedule(),
+		QRCooldown:        set.Game.QRCooldown.Duration,
+		PowerupMultiplier: set.Powerups.DamageMultiplier,
+		PowerupHeart:      set.Powerups.Heart,
+		ShortQRCooldown:   set.Powerups.ShortQRCooldown.Duration,
+		ShortQRWindow:     set.Powerups.ShortQRWindow.Duration,
+		WriteTimeout:      set.Storage.WriteTimeout.Duration,
+		Epoch:             epoch,
 		// A team that defeats its last boss is FINISHED (teams' write).
 		OnFinished: func(teamID string) {
 			if err := teamStore.Finish(context.Background(), teamID); err != nil {

@@ -148,19 +148,21 @@ func TestCooldownKnockedOutFirst(t *testing.T) {
 	}
 }
 
-// TestCooldownOnBigPatterns checks the cooldown once big patterns are
-// unlocked (every boss at 1 HP; a seed pentagon): casting the
+// TestCooldownOnBigPatterns checks the cooldown once pentagons are unlocked
+// under config.toml's schedule (every boss at 1 HP, defeated by triangles
+// and lines until then; a seed pentagon): casting the
 // pentagon puts class_5 on cooldown, the pentagon moves to cooldown_shapes
 // (not locked_shapes) and selecting it is shape_on_cooldown; a 4-point cast
 // opens it again.
 func TestCooldownOnBigPatterns(t *testing.T) {
 	pent := []string{"2003", "2004", "2005", "2006", "2009"}
-	f := started(t, fixtureOptions{sql: "UPDATE boss SET hp = 1"})
-	if f.rules.LockedPatternPoints != 5 || f.rules.MaxPatternPoints < 5 {
-		t.Skipf("test assumes locked_pattern_points = 5 (got %d)", f.rules.LockedPatternPoints)
+	f := started(t, fixtureOptions{unlocks: true, sql: "UPDATE boss SET hp = 1"})
+	need, ok := bossesFor(f.rules, 5)
+	if !ok || need < 1 {
+		t.Skipf("test assumes the unlock schedule locks pentagons at the start (game.unlocks %v)", f.rules.Unlocks)
 	}
-	for round := range f.rules.UnlockAfterBosses {
-		f.castAlternating(t, round) // each defeats a 1-HP boss
+	for round := range need {
+		f.castSmall(t, round) // each defeats a 1-HP boss
 	}
 	if v := f.view(t); v.UnlockedPoints < 5 || slices.Contains(v.LockedShapes, "pentagon") {
 		t.Fatalf("after the unlock: unlocked %d, locked %v", v.UnlockedPoints, v.LockedShapes)

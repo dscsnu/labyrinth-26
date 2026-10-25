@@ -116,6 +116,11 @@ func setup(t *testing.T, allowedDomains ...string) *env {
 		PublicURL: publicURL, FrontendURL: feURL, AllowedEmailDomains: allowedDomains,
 		QRSecret: qrTestSecret,
 	}
+	// Every pattern unlocked from the start, so tests about something else
+	// can cast any shape at once. The unlock schedule (game.unlocks) runs in
+	// TestSim100Teams, which puts config.toml's back, and has its own tests
+	// in teamstate.
+	cfg.Settings.Game.Unlocks = map[string]int{"0": cfg.Settings.Game.MaxPatternPoints}
 	e.cfg, e.log = cfg, log
 	e.endpoints = auth.GoogleEndpoints{
 		OAuth:   oauth2.Endpoint{AuthURL: google.URL + "/auth", TokenURL: google.URL + "/token", AuthStyle: oauth2.AuthStyleInParams},

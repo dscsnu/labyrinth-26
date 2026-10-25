@@ -146,12 +146,10 @@ type Rules struct {
 	// Health is every team's starting health, and what a revive restores
 	// (game.health).
 	Health int
-	// LockedPatternPoints is the size from which patterns are locked
-	// (game.locked_pattern_points) until a team has defeated
-	// UnlockAfterBosses bosses (game.unlock_after_bosses).
-	LockedPatternPoints int
-	// UnlockAfterBosses is how many bosses unlock the big patterns.
-	UnlockAfterBosses int
+	// Unlocks is the unlock schedule (game.unlocks): bosses defeated → the
+	// most waypoints a pattern the team can cast may have from then on.
+	// Empty locks nothing.
+	Unlocks map[int]int
 	// WriteTimeout bounds each write-through (storage.write_timeout).
 	WriteTimeout time.Duration
 	// QRCooldown is how long a cast's waypoints stay disabled for the team

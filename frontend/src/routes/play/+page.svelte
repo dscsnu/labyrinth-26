@@ -1338,12 +1338,16 @@
     <p><small>Your leader picks the type; you scan.</small></p>
   {/if}
   {#if ts.unlocked_points < game.max_pattern_points}
-    <p>
-      <small>
-        Patterns of {game.locked_pattern_points}+ points unlock after defeating
-        {game.unlock_after_bosses} bosses ({ts.bosses_defeated}/{game.unlock_after_bosses}).
-      </small>
-    </p>
+    <!-- The next step of the unlock schedule the team hasn't reached. -->
+    {@const next = game.unlocks.find((u) => u.after_bosses > ts.bosses_defeated)}
+    {#if next}
+      <p>
+        <small>
+          {next.points}-point patterns unlock after defeating {next.after_bosses} bosses
+          ({ts.bosses_defeated}/{next.after_bosses}).
+        </small>
+      </p>
+    {/if}
   {/if}
   <p>
     {#each game.shapes as s (s.id)}

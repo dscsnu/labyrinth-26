@@ -92,11 +92,10 @@ func BenchmarkTeamStatePublish(b *testing.B) {
 	at := pgtest.Must(atlas.Load(ctx, db, pgtest.Quiet, atlas.Rules{MaxPatternPoints: set.Game.MaxPatternPoints}))
 	bs := pgtest.Must(bosses.Load(ctx, db, pgtest.Quiet, bossRules(set, true)))
 	st := pgtest.Must(teamstate.Load(ctx, db, at, bs, ts, memQR{}, noQTEs{}, hub, pgtest.Quiet, teamstate.Rules{
-		MaxPatternPoints:    set.Game.MaxPatternPoints,
-		Health:              set.Game.Health,
-		LockedPatternPoints: set.Game.LockedPatternPoints,
-		UnlockAfterBosses:   set.Game.UnlockAfterBosses,
-		WriteTimeout:        set.Storage.WriteTimeout.Duration,
+		MaxPatternPoints: set.Game.MaxPatternPoints,
+		Health:           set.Game.Health,
+		Unlocks:          set.Game.UnlockSchedule(),
+		WriteTimeout:     set.Storage.WriteTimeout.Duration,
 	}))
 	for _, id := range ids { // warm: create each entry and cache its roster
 		st.PublishTeam(id)

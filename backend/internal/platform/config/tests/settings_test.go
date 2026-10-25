@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,8 +21,6 @@ code_attempts = 10
 max_pattern_points = 6
 bosses = 6
 health = 10
-locked_pattern_points = 5
-unlock_after_bosses = 5
 qr_cooldown = "5m"
 [game.boss_attack]
 interval = "10m"
@@ -32,6 +31,11 @@ interval = "10m"
 4 = 4
 5 = 5
 6 = 6
+[game.unlocks]
+0 = 3
+2 = 4
+4 = 5
+5 = 6
 [qr]
 rotate = "5s"
 tolerance = "5s"
@@ -111,7 +115,7 @@ func TestLoadSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || s.Game.LockedPatternPoints != 5 || s.Game.UnlockAfterBosses != 5 || s.Game.QRCooldown.Duration != 5*time.Minute ||
+	if s.Teams.Size != 6 || s.Game.MaxPatternPoints != 6 || s.Game.Bosses != 6 || s.Game.Health != 10 || !maps.Equal(s.Game.UnlockSchedule(), map[int]int{0: 3, 2: 4, 4: 5, 5: 6}) || s.Game.QRCooldown.Duration != 5*time.Minute ||
 		s.Powerups.DamageMultiplier != 2 || s.Powerups.Heart != 1 || s.Powerups.ShortQRCooldown.Duration != 2*time.Minute || s.Powerups.ShortQRWindow.Duration != 5*time.Minute ||
 		s.QTE.AnswerWindow.Duration != 30*time.Second || s.QTE.MaxAnswerWindow.Duration != 5*time.Minute ||
 		s.Game.BossAttack.Interval.Duration != 10*time.Minute || s.Game.BossAttack.BossDamage()[6] != 6 || len(s.Game.BossAttack.Damage) != 6 ||
@@ -148,10 +152,13 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"damage for a boss that isn't":        {"6 = 6\n", "6 = 6\n7 = 7\n", "game.boss_attack.damage.7 is not a boss serial (1-6, game.bosses)"},
 		"damage key not a serial":             {"6 = 6\n", "6 = 6\nboss = 1\n", "game.boss_attack.damage.boss is not a boss serial"},
 		"negative damage":                     {"3 = 3", "3 = -1", "game.boss_attack.damage.3 must not be negative"},
-		"locked size past the stack":          {"locked_pattern_points = 5", "locked_pattern_points = 8", "game.locked_pattern_points must be 1-7"},
-		"locked size zero":                    {"locked_pattern_points = 5", "locked_pattern_points = 0", "game.locked_pattern_points must be 1-7"},
-		"unlock after more bosses than exist": {"unlock_after_bosses = 5", "unlock_after_bosses = 7", "game.unlock_after_bosses must be 0-6"},
-		"negative unlock":                     {"unlock_after_bosses = 5", "unlock_after_bosses = -1", "game.unlock_after_bosses must be 0-6"},
+		"no unlock from the start":            {"0 = 3", "1 = 3", "game.unlocks has no entry for 0 bosses"},
+		"unlock after more bosses than exist": {"5 = 6", "7 = 6", "game.unlocks.7 is not a number of bosses (0-6, game.bosses)"},
+		"unlock key not a number":             {"2 = 4", "two = 4", "game.unlocks.two is not a number of bosses"},
+		"unlock past the biggest pattern":     {"5 = 6", "5 = 7", "game.unlocks.5 must be 1-6 (game.max_pattern_points)"},
+		"unlock of zero points":               {"0 = 3", "0 = 0", "game.unlocks.0 must be 1-6"},
+		"unlock that adds nothing":            {"4 = 5", "4 = 4", "game.unlocks.4 must unlock more than game.unlocks.2 (4)"},
+		"unlocks that stop short":             {"5 = 6\n", "", "game.unlocks.4 is the last step, so must be 6"},
 		"no health":                           {"health = 10", "health = 0", "game.health must be at least 1"},
 		"negative qr cooldown":                {`qr_cooldown = "5m"`, `qr_cooldown = "-1m"`, "game.qr_cooldown must not be negative"},
 		"powerup multiplier under 1":          {"damage_multiplier = 2.0", "damage_multiplier = 0.5", "powerups.damage_multiplier must be 1-100"},

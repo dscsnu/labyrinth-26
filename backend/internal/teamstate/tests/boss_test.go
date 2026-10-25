@@ -39,6 +39,34 @@ func (f *fixtureEnv) castTriangle(t *testing.T, round int) teamstate.ScanResult 
 	return f.cast(t, round, "triangle", triangle)
 }
 
+// bossesFor returns how many bosses a team must defeat before it can cast
+// patterns of points waypoints, from the unlock schedule (game.unlocks),
+// and false if no step ever reaches points.
+func bossesFor(r teamstate.Rules, points int) (int, bool) {
+	best, ok := 0, false
+	for bosses, p := range r.Unlocks {
+		if p >= points && (!ok || bosses < best) {
+			best, ok = bosses, true
+		}
+	}
+	return best, ok
+}
+
+// line is a seed line (class_2): open from the start under any unlock
+// schedule that opens triangles too.
+var line = []string{"2004", "2005"}
+
+// castSmall casts the triangle on even rounds and the line on odd ones: two
+// classes, so neither is on cooldown when cast, and both open from the start
+// of the unlock schedule. For tests that defeat bosses under the schedule.
+func (f *fixtureEnv) castSmall(t *testing.T, round int) teamstate.ScanResult {
+	t.Helper()
+	if round%2 == 0 {
+		return f.castTriangle(t, round)
+	}
+	return f.cast(t, round, "line", line)
+}
+
 // castAlternating casts the quadrilateral on even rounds and the triangle on odd
 // ones, so the spell cooldown never blocks the next cast, and returns the
 // result and the cast pattern's damage.

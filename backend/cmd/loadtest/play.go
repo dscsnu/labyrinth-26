@@ -26,9 +26,10 @@ import (
 )
 
 // The play scenario: every team plays the game loop for a while, with every
-// player's event stream open. Each team's leader selects a shape, alternating
-// the triangle and the quadrilateral (the spell cooldown forbids two casts of
-// one class in a row); its members scan the pattern's checkpoints with QR
+// player's event stream open. Each team's leader selects the biggest of the
+// quadrilateral, triangle and line that the team has unlocked (game.unlocks:
+// unlocked_points, from the state) and didn't just cast (the spell cooldown
+// forbids two casts of one class in a row); its members scan the pattern's checkpoints with QR
 // tokens signed the way a display signs them, choosing only checkpoints the
 // team's QR cooldown leaves free (from the state each response returns);
 // with too few free, the team waits for the next to open. A knocked-out or
@@ -115,7 +116,15 @@ type playState struct {
 	} `json:"qr_cooldowns"`
 	KnockedOut     bool `json:"knocked_out"`
 	BossesDefeated int  `json:"bosses_defeated"`
+	UnlockedPoints int  `json:"unlocked_points"`
 }
+
+// playShapes are the shapes the play scenario casts, biggest first, with
+// their waypoint counts.
+var playShapes = []struct {
+	name   string
+	points int
+}{{"quadrilateral", 4}, {"triangle", 3}, {"line", 2}}
 
 // playStats counts what the play scenario did.
 type playStats struct {
@@ -144,12 +153,21 @@ func play(c *client, teams []team, waypoints []string, sign func(string) string,
 func playTeam(c *client, t team, waypoints []string, sign func(string) string, deadline time.Time, stats *playStats) {
 	players := append([]player{t.leader}, t.members...)
 	var st playState
+	if env, ok := c.call("state", "GET", "/api/teams/me/state", t.leader, nil); !ok || json.Unmarshal(env.Payload, &st) != nil {
+		return
+	}
 	defeated := 0
-	quad := true
+	last := "" // the shape of the team's last cast: its class is on cooldown
 	for time.Now().Before(deadline) {
-		shape, k := "triangle", 3
-		if quad {
-			shape, k = "quadrilateral", 4
+		shape, k := "", 0
+		for _, s := range playShapes {
+			if s.points <= st.UnlockedPoints && s.name != last {
+				shape, k = s.name, s.points
+				break
+			}
+		}
+		if shape == "" { // can't happen with the 2026 content: lines are always open
+			return
 		}
 		free := slices.Clone(waypoints)
 		earliest := time.Time{}
@@ -196,7 +214,7 @@ func playTeam(c *client, t team, waypoints []string, sign func(string) string, d
 		}
 		if cast {
 			stats.casts.Add(1)
-			quad = !quad
+			last = shape
 			if st.BossesDefeated > defeated {
 				stats.bossesDefeated.Add(int64(st.BossesDefeated - defeated))
 				defeated = st.BossesDefeated

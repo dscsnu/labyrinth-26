@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"labyrinth/internal/platform/config/configtest"
 	"labyrinth/internal/platform/postgres/pgtest"
 )
 
@@ -392,6 +393,9 @@ func TestSim100Teams(t *testing.T) {
 	// rounds' ~60 requests past the burst, and the admin's grants for every
 	// powered team come from one account.
 	e.cfg.Settings.RateLimit.PerSecond, e.cfg.Settings.RateLimit.Burst = 1000, 1000
+	// But it is about the unlock schedule: config.toml's, not setup's
+	// everything-unlocked.
+	e.cfg.Settings.Game.Unlocks = configtest.Settings(t).Game.Unlocks
 	e = e.restart()
 	admin := e.newAdmin("sim-admin")
 
@@ -399,7 +403,7 @@ func TestSim100Teams(t *testing.T) {
 	rows := pgtest.Must(e.db.Pool().Query(ctx, `
 		SELECT p.shape_id, array_agg(pw.waypoint_id ORDER BY pw.waypoint_id)
 		FROM pattern p JOIN pattern_waypoint pw ON pw.pattern_id = p.id
-		GROUP BY p.id HAVING count(*) BETWEEN 2 AND 4 ORDER BY p.id -- 5+ points are locked until boss 5`))
+		GROUP BY p.id HAVING count(*) BETWEEN 2 AND 4 ORDER BY p.id -- pentagons and hexagons unlock too late for 6 rounds`))
 	for rows.Next() {
 		var p simPattern
 		if err := rows.Scan(&p.shape, &p.waypoints); err != nil {
@@ -502,8 +506,19 @@ func TestSim100Teams(t *testing.T) {
 			turns := func(k int) *simClient { a := active(); return a[k%len(a)] }
 
 			for round := range rounds {
+				// What the team has unlocked (game.unlocks): a locked shape is
+				// refused, and the round's pattern is one it can cast.
+				status, code, state := turns(0).call("GET", "/api/teams/me/state", nil)
+				if !want("state", status, code, http.StatusOK, "") {
+					return
+				}
+				unlocked := int(state["unlocked_points"].(float64))
+				if locked, _ := state["locked_shapes"].([]any); len(locked) > 0 {
+					status, code, _ := turns(0).call("PUT", "/api/teams/me/state/selection", map[string]string{"shape": locked[0].(string)})
+					want("select the locked "+locked[0].(string), status, code, http.StatusConflict, "shape_locked")
+				}
 				p := patterns[rng.IntN(len(patterns))]
-				for len(p.waypoints) == st.cooldown { // its class is on cooldown
+				for len(p.waypoints) == st.cooldown || len(p.waypoints) > unlocked { // on cooldown, or locked
 					p = patterns[rng.IntN(len(patterns))]
 				}
 				switch st.strategy {

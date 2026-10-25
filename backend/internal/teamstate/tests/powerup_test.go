@@ -334,12 +334,12 @@ func TestInstantCast(t *testing.T) {
 
 // TestInstantCastLockedPattern checks that an instant cast doesn't bypass
 // the unlock: a 5-point pentagon before the team has defeated
-// game.unlock_after_bosses bosses is pattern_locked.
+// enough bosses for the unlock schedule (game.unlocks) is pattern_locked.
 func TestInstantCastLockedPattern(t *testing.T) {
 	pent := []string{"2003", "2004", "2005", "2006", "2009"}
-	f := started(t)
-	if f.rules.LockedPatternPoints != 5 || f.rules.UnlockAfterBosses < 1 {
-		t.Skipf("test assumes locked_pattern_points = 5 and unlock_after_bosses >= 1 (got %d, %d)", f.rules.LockedPatternPoints, f.rules.UnlockAfterBosses)
+	f := started(t, fixtureOptions{unlocks: true})
+	if need, ok := bossesFor(f.rules, 5); !ok || need < 1 {
+		t.Skipf("test assumes the unlock schedule locks pentagons at the start (game.unlocks %v)", f.rules.Unlocks)
 	}
 	f.grant(t, teamstate.PowerupInstantCast)
 	if _, err := f.state.InstantCast(context.Background(), f.users[0], pent); !errors.Is(err, teamstate.ErrPatternLocked) {
