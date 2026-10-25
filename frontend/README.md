@@ -82,6 +82,16 @@ What the actions do to players: a removed player's stream gets `no_team` (`/team
 
 The types are in `src/lib/types/Admin.type.ts` (`GameOverviewSchema`, `TeamOverviewSchema`, `TeamOverviewListSchema`, `UserListSchema`).
 
+## The `/admin/live` page
+For organisers during the game: what every team does, as it happens, and the full leaderboard. Linked from `/admin` ("live view"). `+page.server.ts` checks the role through `GET /api/me` (`403 Admins only` otherwise) and loads the bosses, to name the serials in the feed.
+
+`+page.svelte` opens `EventSource("/api/events?admin=1")`: for an admin the backend adds two events to that one stream (`backend/internal/activity/README.md`):
+- **`admin_leaderboard`**: every started team, ranked (rank, team and code, bosses defeated, damage on the current boss, when its last boss fell, 🏆 when finished); a `snapshot` on connect, then `updated` when the ranking changes (checked every **5 s**, `leaderboard.publish_every`).
+- **`activity`**: every team's changes, one line each, newest first, at most 500 kept: selections, scans (with the place name from `MAP_POINTS`), wrong scans and knockouts in red, casts in purple with the damage and boss, boss defeats and revives in green, attacks, powerups, quiz answers. A `snapshot` on connect (the latest **200**, `activity.recent`) replaces the feed, so a reconnect doesn't repeat lines; then a `batch` every **1 s** (`activity.publish_every`). A batch that left some out (over **200**, `activity.batch_max`) adds "+N more not shown".
+- A filter box (team name, code or player) and **pause** (new lines wait and show on resume, with the count).
+
+No polling: the page adds nothing to the server beyond its one stream. Types are in `src/lib/types/Admin.type.ts` (`ActivityEntrySchema`, `ActivityBatchSchema`, `AdminLeaderboardSchema`).
+
 ## The `/leaderboard` page
 The top teams, live. The home page links to it.
 

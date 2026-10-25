@@ -1072,6 +1072,15 @@ paths:
         | `team_state` | team | `TeamStateEvent` | `snapshot`, `game_started`, `shape_selected`, `selection_cleared`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `qr_cooldown_ended`, `cooldowns_reset`, `revived`, `powerup_granted`, `powerup_activated`, `powerup_ended`, `qte_answered`, `resync` |
         | `qte` | game | `QTEEvent` | `snapshot`, `started`, `closed`, `resync` |
         | `leaderboard` | game | `LeaderboardEvent` | `snapshot`, `updated` |
+        | `activity` | admin's `?admin=1` stream | `ActivityEvent` | `snapshot`, `batch` |
+        | `admin_leaderboard` | admin's `?admin=1` stream | `AdminLeaderboardEvent` | `snapshot`, `updated` |
+
+        **`?admin=1`** (the `/admin/live` page): for a caller whose role is `ADMIN` in the database (read only
+        when this is asked), this stream also carries the live view, after the usual snapshots: `activity` (every
+        team's changes, batched every `activity.publish_every` (1 s), at most `activity.batch_max` (200) a batch
+        with the rest counted in `dropped`) and `admin_leaderboard` (every started team, ranked, when it changes;
+        checked every `leaderboard.publish_every`). Only that one stream gets them, not the admin's others.
+        Anyone else asking gets the normal stream.
 
         ```
         retry: 3412
@@ -1090,6 +1099,8 @@ paths:
 
         : ping
         ```
+      parameters:
+        - { name: admin, in: query, required: false, schema: { type: string, enum: ["1"] }, description: "`1`: an admin's stream also carries the live view (`activity`, `admin_leaderboard`). Ignored for anyone else." }
       responses:
         "200":
           description: The stream.
@@ -1369,6 +1380,52 @@ components:
       properties:
         type: { type: string, enum: [snapshot, updated] }
         message: { $ref: "#/components/schemas/LeaderboardBoard" }
+    ActivityEvent:
+      type: object
+      description: |
+        The data of an `activity` event, on an admin's `?admin=1` stream only. Types: `snapshot` (on connect:
+        the latest `activity.recent` (200) entries), `batch` (every `activity.publish_every` (1 s), the changes
+        since the last one, if any).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, batch] }
+        message:
+          type: object
+          required: [entries, dropped]
+          properties:
+            entries: { type: array, items: { $ref: "#/components/schemas/ActivityEntry" }, description: "Oldest first." }
+            dropped: { type: integer, description: "Changes since the last batch left out (more than `activity.batch_max`); 0 in a snapshot." }
+    ActivityEntry:
+      type: object
+      description: One change to one team's game state. Only the fields its type uses are present.
+      required: [at, team_id, team, type, by]
+      properties:
+        at: { type: string, format: date-time }
+        team_id: { type: string, pattern: "^[0-9]{6}$" }
+        team: { type: string, description: The team's name. }
+        type: { type: string, description: "The `team_state` event type that caused it (`shape_selected`, `scan_added`, `wrong_scan`, `spell_cast`, `boss_defeated`, `boss_attacked`, `knocked_out`, `revived`, `powerup_granted`, `powerup_activated`, `qte_answered`, …)." }
+        by: { type: [string, "null"], description: "The member who acted, by name; null for what the server does by itself." }
+        shape: { type: string }
+        waypoint: { type: string }
+        dealt: { type: integer }
+        boss: { type: integer, description: The boss's serial. }
+        health: { type: integer }
+        powerup: { type: string }
+        correct: { type: boolean }
+    AdminLeaderboardEvent:
+      type: object
+      description: |
+        The data of an `admin_leaderboard` event, on an admin's `?admin=1` stream only: every started or finished
+        team, ranked as the leaderboard ranks them. Types: `snapshot` (on connect), `updated` (the ranking changed;
+        checked every `leaderboard.publish_every` (5 s)).
+      required: [type, message]
+      properties:
+        type: { type: string, enum: [snapshot, updated] }
+        message:
+          type: object
+          required: [teams]
+          properties:
+            teams: { type: array, items: { $ref: "#/components/schemas/LeaderboardEntry" } }
     QTEEvent:
       type: object
       description: |

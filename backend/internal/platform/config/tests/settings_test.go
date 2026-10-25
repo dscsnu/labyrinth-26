@@ -83,6 +83,10 @@ instance_lock_check = "5s"
 [leaderboard]
 size = 10
 publish_every = "5s"
+[activity]
+publish_every = "1s"
+batch_max = 200
+recent = 200
 [admin]
 user_search_limit = 20
 [ratelimit]
@@ -197,6 +201,9 @@ func TestLoadSettingsRejects(t *testing.T) {
 		"zero instance lock check":            {`instance_lock_check = "5s"`, `instance_lock_check = "0s"`, "storage.instance_lock_check must be positive"},
 		"zero leaderboard size":               {"size = 10", "size = 0", "leaderboard.size must be at least 1"},
 		"leaderboard under a second":          {`publish_every = "5s"`, `publish_every = "500ms"`, "leaderboard.publish_every must be at least 1s"},
+		"activity flush too fast":             {`publish_every = "1s"`, `publish_every = "50ms"`, "activity.publish_every must be 100ms-1m"},
+		"activity zero batch":                 {"batch_max = 200", "batch_max = 0", "activity.batch_max must be 1-10000"},
+		"activity negative recent":            {"recent = 200", "recent = -1", "activity.recent must be 0-10000"},
 		"zero user search limit":              {"user_search_limit = 20", "user_search_limit = 0", "admin.user_search_limit must be at least 1"},
 		"zero rate":                           {"per_second = 10", "per_second = 0", "ratelimit.per_second must be positive"},
 		"zero burst":                          {"burst = 40", "burst = 0", "ratelimit.burst must be at least 1"},

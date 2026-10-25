@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"labyrinth/internal/activity"
 	"labyrinth/internal/admin"
 	"labyrinth/internal/atlas"
 	"labyrinth/internal/auth"
@@ -42,6 +43,11 @@ type App struct {
 	Leaderboard *leaderboard.Leaderboard
 	// QTEs holds the quick-time events and broadcasts the open one.
 	QTEs *qte.Store
+	// Activity is the admin live view's feed; main runs its loop (Run).
+	Activity *activity.Feed
+
+	// users reads a stream's role when it asks for the admin feed.
+	users *user.Users
 
 	db     *postgres.DB
 	stream *live.Streamer
@@ -123,6 +129,11 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	if err != nil {
 		return nil, err
 	}
+	// The admin live view's feed: every team state change, batched to the
+	// admins watching (activity), and their full leaderboard.
+	feed := activity.New(teamStore, log, activity.Rules{
+		PublishEvery: set.Activity.PublishEvery.Duration, BatchMax: set.Activity.BatchMax, Recent: set.Activity.Recent,
+	})
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, qteStore, hub, log, teamstate.Rules{
 		MaxPatternPoints:  set.Game.MaxPatternPoints,
 		Health:            set.Game.Health,
@@ -140,6 +151,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 				log.Error("mark team finished", "team_id", teamID, "error", err)
 			}
 		},
+		OnPublish: feed.Record,
 	})
 	if err != nil {
 		return nil, err
@@ -147,10 +159,11 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 
 	board := leaderboard.New(stateStore, teamStore, hub, log, leaderboard.Rules{
 		Size: set.Leaderboard.Size, PublishEvery: set.Leaderboard.PublishEvery.Duration,
+		SendAdmins: feed.SendAdmins,
 	})
 
 	app := &App{Hub: hub, Atlas: theAtlas, Tokens: tokens, LoginCodes: codes, Teams: teamStore, TeamState: stateStore,
-		Leaderboard: board, QTEs: qteStore, db: db, startedAt: time.Now(),
+		Leaderboard: board, QTEs: qteStore, Activity: feed, users: users, db: db, startedAt: time.Now(),
 		stream: &live.Streamer{
 			Heartbeat:    set.Live.Heartbeat.Duration,
 			WriteTimeout: set.Live.WriteTimeout.Duration,
@@ -284,7 +297,32 @@ func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	userID := identity.UserID(r)
 	sub := a.Hub.Subscribe(userID) // before reading snapshots, so no change slips between
 	defer sub.Close()
-	a.stream.Serve(w, r, sub, a.snapshot(userID))
+	initial := a.snapshot(userID)
+	// ?admin=1, from /admin/live: an ADMIN's stream also carries the live
+	// view (activity, admin_leaderboard). The role is read only then, from
+	// Postgres as RequireAdmin does, so players' streams cost no query.
+	// Anyone else asking gets the normal stream.
+	if r.URL.Query().Get("admin") == "1" {
+		if u, err := a.users.Get(r.Context(), userID); err == nil && u.Role == user.RoleAdmin {
+			stop := a.Activity.Watch(sub) // before its snapshots, like Subscribe
+			defer stop()
+			initial = append(initial, a.adminSnapshot()...)
+		}
+	}
+	a.stream.Serve(w, r, sub, initial)
+}
+
+// adminSnapshot is what a watching admin's stream starts with, after the
+// usual snapshot: the recent activity, then the full leaderboard.
+func (a *App) adminSnapshot() []live.Event {
+	var evs []live.Event
+	if ev, err := a.Activity.SnapshotEvent(); err == nil {
+		evs = append(evs, ev)
+	}
+	if ev, err := a.Leaderboard.AdminSnapshot(); err == nil {
+		evs = append(evs, ev)
+	}
+	return evs
 }
 
 // snapshot is everything a new stream starts with, in order: hello, then the

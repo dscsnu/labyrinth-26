@@ -58,6 +58,8 @@ type Settings struct {
 	Storage StorageSettings `toml:"storage"`
 	// Leaderboard is the leaderboard's size and publishing rate.
 	Leaderboard LeaderboardSettings `toml:"leaderboard"`
+	// Activity is the admin live view's feed.
+	Activity ActivitySettings `toml:"activity"`
 	// Admin are the admin tools' limits.
 	Admin AdminSettings `toml:"admin"`
 	// RateLimit is the per-user request rate limit.
@@ -93,6 +95,19 @@ type LeaderboardSettings struct {
 	// PublishEvery is how often the server checks whether the top changed,
 	// and so the most often it broadcasts the leaderboard.
 	PublishEvery Duration `toml:"publish_every"`
+}
+
+// ActivitySettings is config.toml's [activity] table: the admin live view's
+// feed of every team's changes.
+type ActivitySettings struct {
+	// PublishEvery is how often the queued entries go to watching admins.
+	PublishEvery Duration `toml:"publish_every"`
+	// BatchMax is the most entries queued between flushes; older ones are
+	// dropped and counted.
+	BatchMax int `toml:"batch_max"`
+	// Recent is how many of the latest entries a newly opened view starts
+	// with.
+	Recent int `toml:"recent"`
 }
 
 // RateLimitSettings is config.toml's [ratelimit] table: a token bucket per
@@ -423,6 +438,10 @@ func (s Settings) validate() []error {
 	check(s.QTE.MaxAnswerWindow.Duration >= s.QTE.AnswerWindow.Duration, "qte.max_answer_window must be at least qte.answer_window")
 	check(s.Leaderboard.Size >= 1, "leaderboard.size must be at least 1")
 	check(s.Leaderboard.PublishEvery.Duration >= time.Second, "leaderboard.publish_every must be at least 1s")
+	check(s.Activity.PublishEvery.Duration >= 100*time.Millisecond && s.Activity.PublishEvery.Duration <= time.Minute,
+		"activity.publish_every must be 100ms-1m")
+	check(s.Activity.BatchMax >= 1 && s.Activity.BatchMax <= 10000, "activity.batch_max must be 1-10000")
+	check(s.Activity.Recent >= 0 && s.Activity.Recent <= 10000, "activity.recent must be 0-10000")
 	check(s.Admin.UserSearchLimit >= 1, "admin.user_search_limit must be at least 1")
 	check(s.RateLimit.PerSecond > 0, "ratelimit.per_second must be positive")
 	check(s.RateLimit.Burst >= 1, "ratelimit.burst must be at least 1")

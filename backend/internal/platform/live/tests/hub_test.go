@@ -205,3 +205,27 @@ func BenchmarkHubBroadcast(b *testing.B) {
 		h.Broadcast(ev)
 	}
 }
+
+// TestSubscriptionSendReachesOnlyThatStream checks Subscription.Send: it
+// reaches that one stream, not the same user's other streams, and does
+// nothing once the stream is closed.
+func TestSubscriptionSendReachesOnlyThatStream(t *testing.T) {
+	h, _ := newHub(t)
+	alice := uuid.New()
+	tab1, tab2 := h.Subscribe(alice), h.Subscribe(alice)
+
+	tab1.Send(event("activity", "{}"))
+	if ev := <-tab1.C; ev.Name() != "activity" {
+		t.Fatalf("tab 1 got %v", ev)
+	}
+	select {
+	case ev := <-tab2.C:
+		t.Fatalf("the user's other stream got %v", ev)
+	default:
+	}
+	tab1.Close()
+	tab1.Send(event("activity", "{}")) // closed: a no-op, no panic
+	if _, ok := <-tab1.C; ok {
+		t.Fatal("a closed stream got an event")
+	}
+}

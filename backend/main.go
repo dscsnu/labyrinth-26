@@ -127,6 +127,7 @@ func run(log *slog.Logger, args []string) error {
 
 	go cleanupLoginCodes(ctx, app.LoginCodes, set.Auth.LoginCodeSweep.Duration, log)
 	go app.Leaderboard.Run(ctx) // broadcasts the top teams whenever it changes
+	go app.Activity.Run(ctx)    // sends the admin live view its batches
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

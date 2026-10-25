@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { TeamSchema } from '#lib/types/Team.type.ts';
 import { UserSchema } from '#lib/types/User.type.ts';
+import { LeaderboardEntrySchema } from '#lib/types/Leaderboard.type.ts';
 
 // GET /api/admin/teams: each team, and for a started one its game at a
 // glance: who needs a revive, where it is, what's cooling down.
@@ -44,3 +45,32 @@ export const AdminQTEListSchema = z.array(AdminQTESchema);
 export type GameOverview = z.infer<typeof GameOverviewSchema>;
 export type TeamOverview = z.infer<typeof TeamOverviewSchema>;
 export type AdminQTE = z.infer<typeof AdminQTESchema>;
+
+// The admin live view (/admin/live), on GET /api/events?admin=1.
+// One change to one team's game state; only its type's fields are set.
+export const ActivityEntrySchema = z.object({
+    at: z.string(),
+    team_id: z.string(),
+    team: z.string(),
+    type: z.string(),
+    by: z.string().nullable(),
+    shape: z.string().optional(),
+    waypoint: z.string().optional(),
+    dealt: z.number().optional(),
+    boss: z.number().optional(),
+    health: z.number().optional(),
+    powerup: z.string().optional(),
+    correct: z.boolean().optional(),
+});
+// The "activity" event's message: entries oldest first, and how many more
+// the server left out of a batch.
+export const ActivityBatchSchema = z.object({
+    entries: z.array(ActivityEntrySchema),
+    dropped: z.number(),
+});
+// The "admin_leaderboard" event's message: every started team, ranked.
+export const AdminLeaderboardSchema = z.object({
+    teams: z.array(LeaderboardEntrySchema),
+});
+
+export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;

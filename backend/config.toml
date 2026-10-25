@@ -200,6 +200,18 @@ size = 10
 # it broadcasts the leaderboard to every stream. Allowed: at least 1s.
 publish_every = "5s"
 
+[activity]
+# The admin live view (/admin/live): what every team does, as it happens.
+# Entries queue between flushes in a ring of batch_max: past it the oldest
+# are dropped (and counted), so a spike can't grow memory. Every
+# publish_every the queue goes to every admin watching, as one event.
+# Allowed: publish_every 100ms to 1m; batch_max 1 to 10000.
+publish_every = "1s"
+batch_max = 200
+# How many of the latest entries a newly opened live view starts with.
+# Allowed: 0 to 10000.
+recent = 200
+
 [admin]
 # The most users an admin's user search (GET /api/admin/users) returns.
 # Allowed: at least 1.

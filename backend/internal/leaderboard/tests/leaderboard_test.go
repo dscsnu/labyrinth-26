@@ -138,3 +138,42 @@ func TestRefreshBroadcastsOnChange(t *testing.T) {
 		t.Fatalf("snapshot: %v %s", err, snap.Type())
 	}
 }
+
+// TestFullRankingForAdmins checks Rules.SendAdmins: Refresh sends every
+// started team (past leaderboard.size) as "admin_leaderboard" of type
+// updated, not again while unchanged, and again on a change below the top
+// that the players' board ignores; AdminSnapshot carries the full ranking.
+func TestFullRankingForAdmins(t *testing.T) {
+	fs, ft := league()
+	var sent []live.Event
+	b := leaderboard.New(fs, ft, live.NewHub(1, 16), slog.New(slog.NewTextHandler(io.Discard, nil)), leaderboard.Rules{
+		Size: 2, PublishEvery: time.Second, SendAdmins: func(ev live.Event) { sent = append(sent, ev) },
+	})
+	full := func(ev live.Event) leaderboard.Full {
+		t.Helper()
+		var env struct {
+			Type    string           `json:"type"`
+			Message leaderboard.Full `json:"message"`
+		}
+		if err := json.Unmarshal(ev.Data(), &env); err != nil || ev.Name() != "admin_leaderboard" {
+			t.Fatalf("event %s: %s (%v)", ev.Name(), ev.Data(), err)
+		}
+		return env.Message
+	}
+	b.Refresh()
+	if len(sent) != 1 || sent[0].Type() != leaderboard.Updated || len(full(sent[0]).Teams) != 7 || full(sent[0]).Teams[6].TeamID != "100007" {
+		t.Fatalf("first refresh sent %d", len(sent))
+	}
+	b.Refresh()
+	if len(sent) != 1 {
+		t.Fatal("an unchanged ranking was sent again")
+	}
+	fs.list[3].Damage = 41 // 100004, below the players' top two
+	if b.Refresh() || len(sent) != 2 {
+		t.Fatalf("a change below the top: players' broadcast or admins' %d", len(sent))
+	}
+	snap, err := b.AdminSnapshot()
+	if err != nil || snap.Type() != live.Snapshot || len(full(snap).Teams) != 7 {
+		t.Fatalf("admin snapshot: %v %s", err, snap.Type())
+	}
+}

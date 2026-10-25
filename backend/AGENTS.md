@@ -112,6 +112,7 @@ Every feature belongs to exactly one **use case**: one package under `internal/`
 | `qr` | rotating waypoint QR tokens: mint (staff) and verify | none (stateless; derived from the secret and the clock) |
 | `qte` | quick-time events (quizzes): their content, start and close, and the game-wide `qte` event; each team's answer is teamstate's | memory, written through |
 | `leaderboard` | the ranking of started teams; the game-wide `leaderboard` event | none (derived from teamstate's and teams' memory on demand; only the last broadcast is kept, to detect a change) |
+| `activity` | the admin live view's feed (`/admin/live`): every team's changes, batched to the admins watching | none (memory only: a bounded queue and recent list; derived from team state's publishes) |
 | `admin` | every `/api/admin/…` route: the organisers' tools over teams, teamstate, qte and user | none: a **facade** (see below) |
 
 **Files**, the same in every use case:

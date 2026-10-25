@@ -26,6 +26,17 @@ func (s *Subscription) Close() {
 	s.shard.dropLocked(s)
 }
 
+// Send delivers ev to this stream alone (not the user's other streams), if
+// it's still open. Like Hub.Send it never blocks: a full buffer drops it.
+// For events only one stream asked for (the admin live view's).
+func (s *Subscription) Send(ev Event) {
+	s.shard.mu.Lock()
+	defer s.shard.mu.Unlock()
+	if _, ok := s.shard.subs[s.id][s]; ok {
+		s.shard.deliverLocked(s, ev)
+	}
+}
+
 // Hub fans events out to open streams, keyed by user, so a stream follows its
 // user from team to team. Streams are spread over shards by user ID, each
 // with its own lock: a Send locks one shard, and a Broadcast locks one shard
