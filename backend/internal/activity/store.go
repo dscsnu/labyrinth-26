@@ -9,8 +9,9 @@ import (
 	"labyrinth/internal/platform/live"
 )
 
-// The layout. One mutex guards everything; every operation under it is a
-// few slice writes, never I/O or encoding.
+// Feed is the activity use case: the admin live view's queue, its recent
+// entries and the streams watching. One mutex guards everything; every
+// operation under it is a few slice writes, never I/O or encoding.
 //
 //	Feed
 //	  mu        Mutex
