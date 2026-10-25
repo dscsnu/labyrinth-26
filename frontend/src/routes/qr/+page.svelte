@@ -1,11 +1,23 @@
 <script lang="ts">
     import QRCode from 'qrcode';
     import { SigningKeySchema, type SigningKey } from '#lib/types/Qr.type.ts';
+    import { MAP_POINTS } from '#lib/game/mapPoints.ts';
     import { onMount } from 'svelte';
     import type { PageProps } from './$types';
 
     let { data }: PageProps = $props();
-    let { user } = $derived(data);
+    let { user, role } = $derived(data);
+    // An admin picks any waypoint; a helper shows only the checkpoint an
+    // admin assigned them (GET /qr/me), re-checked while the page is open.
+    let isAdmin = $derived(role === 'ADMIN');
+    // Unassigned: no checkpoint yet, so there's nothing to show.
+    let unassigned = $state(false);
+
+    // How often a helper's page asks for its assignment: soon while it has
+    // none, less often once it's showing one.
+    const RECHECK_UNASSIGNED_MS = 15_000;
+    const RECHECK_ASSIGNED_MS = 30_000;
+    let recheck: ReturnType<typeof setTimeout> | null = null;
 
     let waypoint = $state('');
     let info = $state<SigningKey | null>(null);
@@ -23,9 +35,11 @@
 
     onMount(() => {
         tick = setInterval(() => (now = Date.now()), 500);
+        if (!isAdmin) void checkAssignment();
         return () => {
             if (tick) clearInterval(tick);
             if (rotator) clearInterval(rotator);
+            if (recheck) clearTimeout(recheck);
         };
     });
 
@@ -60,6 +74,35 @@
         tokenStr = `${payload}.${await sign(hmacKey, payload)}`;
     };
 
+    // Starts showing a waypoint from its signing key (a GET /qr/… payload).
+    const show = async (payload: unknown) => {
+        let next: SigningKey;
+        try {
+            next = SigningKeySchema.parse(payload);
+        } catch {
+            message = { ok: false, text: 'unexpected response from the backend; is it the current build?' };
+            return;
+        }
+        message = null;
+        offset = next.server_time - Math.floor(Date.now() / 1000);
+        hmacKey = await importKey(next.key);
+        info = next;
+
+        if (rotator) clearInterval(rotator);
+        await renderNext();
+        rotator = setInterval(renderNext, Math.max(500, next.rotate_ms));
+    };
+
+    // Stops showing a QR (a helper unassigned).
+    const hide = () => {
+        if (rotator) clearInterval(rotator);
+        rotator = null;
+        info = null;
+        hmacKey = null;
+        tokenStr = '';
+    };
+
+    // An admin's picker: any waypoint by its 4-digit ID.
     const start = async (e: SubmitEvent) => {
         e.preventDefault();
         const id = waypoint.trim();
@@ -68,20 +111,34 @@
         const res = await fetch(`/qr/${encodeURIComponent(id)}`);
         const json = await res.json().catch(() => ({}));
         if (!res.ok) return (message = { ok: false, text: `${json.code}: ${json.message}` });
-
-        try {
-            info = SigningKeySchema.parse(json.payload);
-        } catch {
-            return (message = { ok: false, text: 'unexpected response from the backend; is it the current build?' });
-        }
-        message = null;
-        offset = info.server_time - Math.floor(Date.now() / 1000);
-        hmacKey = await importKey(info.key);
-
-        if (rotator) clearInterval(rotator);
-        await renderNext();
-        rotator = setInterval(renderNext, Math.max(500, info.rotate_ms));
+        await show(json.payload);
     };
+
+    // A helper's checkpoint: shown when assigned, switched when it changes,
+    // hidden when it's taken away. A failed check (no signal) keeps the QR
+    // showing: it signs locally, so it keeps working offline.
+    const checkAssignment = async () => {
+        const res = await fetch('/qr/me').catch(() => null);
+        const json = res ? await res.json().catch(() => ({})) : null;
+        if (res?.ok) {
+            unassigned = false;
+            if (json.payload?.waypoint_id !== info?.waypoint_id) await show(json.payload);
+        } else if (json?.code === 'not_assigned') {
+            unassigned = true;
+            message = null;
+            hide();
+        } else if (json?.code === 'not_staff') {
+            hide();
+            message = { ok: false, text: "You're no longer a helper." };
+            return;
+        } else if (!info) {
+            message = { ok: false, text: res ? `${json?.code}: ${json?.message}` : 'No connection: retrying.' };
+        }
+        recheck = setTimeout(checkAssignment, info ? RECHECK_ASSIGNED_MS : RECHECK_UNASSIGNED_MS);
+    };
+
+    // The waypoint's place name on the map, if it has one.
+    const placeName = (id: string) => MAP_POINTS.find((p) => p.waypoint === id)?.name;
 
     $effect(() => {
         if (canvas && tokenStr) QRCode.toCanvas(canvas, tokenStr, { width: 320, margin: 2 });
@@ -95,15 +152,22 @@
 <p><a href="/">home</a> · {user?.name} · qr display</p>
 
 <h1>QR display</h1>
-<p><small>Enter a waypoint's 4-digit ID to show its rotating QR.</small></p>
+{#if isAdmin}
+    <p><small>Enter a waypoint's 4-digit ID to show its rotating QR.</small></p>
 
-<form onsubmit={start}>
-    <input bind:value={waypoint} inputmode="numeric" maxlength="4" placeholder="2001" />
-    <button>Show</button>
-</form>
+    <form onsubmit={start}>
+        <input bind:value={waypoint} inputmode="numeric" maxlength="4" placeholder="2001" />
+        <button>Show</button>
+    </form>
+{:else if unassigned}
+    <p>No checkpoint assigned yet: ask an organiser. This page checks again by itself.</p>
+{/if}
 
 {#if info}
-    <p>Waypoint <b>{info.waypoint_id}</b> · rotates every {info.rotate_ms / 1000} s · {secondsLeft} s left</p>
+    <p>
+        Checkpoint <b>{placeName(info.waypoint_id) ?? info.waypoint_id}</b> ({info.waypoint_id}) · rotates every
+        {info.rotate_ms / 1000} s · {secondsLeft} s left
+    </p>
     <canvas bind:this={canvas}></canvas>
 {/if}
 
