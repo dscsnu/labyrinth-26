@@ -88,3 +88,43 @@ func (a *Admin) SetRole(ctx context.Context, adminID, userID uuid.UUID, role use
 	}
 	return a.users.SetRole(ctx, userID, role)
 }
+
+// ErrAlreadyAdmin means the account added as a helper is an admin: making
+// them a helper would demote them, so it's refused (change the role itself
+// for that).
+var ErrAlreadyAdmin = errors.New("that account is an admin")
+
+// ErrUnknownWaypoint means no waypoint has the ID a helper was assigned.
+var ErrUnknownWaypoint = errors.New("unknown waypoint")
+
+// AddHelper makes the account with this email (ignoring case) a HELPER
+// (user.ByEmail, then user.SetRole), acting as adminID. One already a
+// helper is returned unchanged, so a resend is harmless. user.ErrUserNotFound
+// if nobody with that email has signed in; ErrAlreadyAdmin for an admin
+// (which also covers an admin adding themselves).
+func (a *Admin) AddHelper(ctx context.Context, adminID uuid.UUID, email string) (user.User, error) {
+	u, err := a.users.ByEmail(ctx, email)
+	if err != nil {
+		return user.User{}, err
+	}
+	switch u.Role {
+	case user.RoleHelper:
+		return u, nil
+	case user.RoleAdmin:
+		return user.User{}, ErrAlreadyAdmin
+	}
+	return a.SetRole(ctx, adminID, u.ID, user.RoleHelper)
+}
+
+// AssignWaypoint sets the checkpoint helper userID's /qr display shows, or
+// clears it when waypointID is nil (user.Assign). ErrUnknownWaypoint if the
+// atlas has no such waypoint; user.ErrNotHelper or user.ErrUserNotFound from
+// the user use case.
+func (a *Admin) AssignWaypoint(ctx context.Context, userID uuid.UUID, waypointID *string) (user.User, error) {
+	if waypointID != nil {
+		if _, ok := a.atlas.WaypointIndex(*waypointID); !ok {
+			return user.User{}, ErrUnknownWaypoint
+		}
+	}
+	return a.users.Assign(ctx, userID, waypointID)
+}
