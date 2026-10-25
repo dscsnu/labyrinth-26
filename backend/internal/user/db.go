@@ -74,8 +74,8 @@ func (d db) upsertGoogle(ctx context.Context, p GoogleProfile) (User, error) {
 // postgres.ErrNotFound if there's no such user.
 func (d db) updateRole(ctx context.Context, id uuid.UUID, role Role) (User, error) {
 	return scanUser(d.pool.QueryRow(ctx, `
-		UPDATE userprofile SET role = $2,
-			waypoint_id = CASE WHEN $2 = 'PLAYER' THEN NULL ELSE waypoint_id END
+		UPDATE userprofile SET role = $2::user_role,
+			waypoint_id = CASE WHEN $2::user_role = 'PLAYER' THEN NULL ELSE waypoint_id END
 		WHERE id = $1 RETURNING `+userColumns, id, role))
 }
 
