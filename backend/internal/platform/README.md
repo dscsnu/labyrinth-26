@@ -493,6 +493,7 @@ The migrations:
 | `0013_cooldowns_reset.sql` | Adds `team_boss.cooldowns_reset_casts` INTEGER `NOT NULL DEFAULT 0 CHECK (>= 0)`: the team's cast log length at an admin's last cooldown reset (a position, not a time); casts before it don't count for the spell and QR cooldowns |
 | `0014_powerups.sql` | `team_powerup` (`team_id`, `kind` CHECK in the four kinds, `held`, `activated_at`, `activated_casts`; PK `(team_id, kind)`: at most one of each kind held), and `team_cast` gains `instant`, `boosted`, `short_qr_cooldown` (`DEFAULT false`). Belongs to teamstate |
 | `0015_qte.sql` | `qte` (game-wide quick-time events, belongs to qte: `kind` CHECK `quiz`, `powerup`, the quiz columns with a per-kind CHECK, `window_s`, `created_by`, `started_at`/`ends_at`; an exclusion constraint on `tstzrange(started_at, ends_at)` backs "one at a time") and `team_qte_answer` (belongs to teamstate: PK `(team_id, qte_id)`, one answer per team; `correct`, `granted` with `CHECK (correct OR NOT granted)`) |
+| `0016_helper_waypoint.sql` | `userprofile.waypoint_id` (a helper's assigned checkpoint, belongs to user: `REFERENCES waypoint ON DELETE SET NULL`; `CHECK (waypoint_id IS NULL OR role <> 'PLAYER')`) |
 
 Each use case's README documents its tables and constraints.
 
