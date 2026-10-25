@@ -132,7 +132,7 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `game.max_pattern_points` | 6 | `atlas.Rules.MaxPatternPoints` and `teamstate.Rules.MaxPatternPoints` |
 | `game.bosses` | 6 | `bosses.Rules.Count` |
 | `game.health` | 10 | `teamstate.Rules.Health` |
-| `game.unlocks` | `0 = 3`, `2 = 4`, `4 = 5`, `5 = 6` | `teamstate.Rules.Unlocks` (`UnlockSchedule()`) |
+| `game.unlocks` | `0 = 4`, `4 = 5`, `5 = 6` | `teamstate.Rules.Unlocks` (`UnlockSchedule()`) |
 | `game.qr_cooldown` | 5 m | `teamstate.Rules.QRCooldown` |
 | `powerups.damage_multiplier`, `powerups.heart` | 2, 1 | `teamstate.Rules.PowerupMultiplier`, `PowerupHeart` |
 | `powerups.short_qr_cooldown`, `powerups.short_qr_window` | 2 m, 5 m | `teamstate.Rules.ShortQRCooldown`, `ShortQRWindow` |
@@ -400,8 +400,8 @@ The leader can't set `is_ready`, and start ignores the leader's flag. Emails are
 | `damage_multiplier` | what each cast's damage is multiplied by (rounded) before it's dealt; 1 unless something sets it |
 | `health` | the team's health: **10** (`game.health`) at the start, less every boss attack. Derived from the phase and the clock, so it drops with nobody acting |
 | `knocked_out` | `health` is 0: selecting and scanning are refused (`409 knocked_out`) and nothing attacks until an admin revives the team |
-| `unlocked_points` | the most waypoints a pattern the team can cast may have, by the unlock schedule (`game.unlocks`): **3** at the start, **4** after boss 2, **5** after boss 4, **6** (`game.max_pattern_points`) after boss 5. Changes in the `boss_defeated` event of the cast that crosses a step |
-| `locked_shapes` | the shapes the team can't select yet (`409 shape_locked`): every one of their patterns is bigger than `unlocked_points`. With the 2026 seed `["hexagon", "pentagon", "quadrilateral"]` at the start, `["hexagon", "pentagon"]` after boss 2, `["hexagon"]` after boss 4, `[]` after boss 5 |
+| `unlocked_points` | the most waypoints a pattern the team can cast may have, by the unlock schedule (`game.unlocks`): **4** at the start, **5** after boss 4, **6** (`game.max_pattern_points`) after boss 5. Changes in the `boss_defeated` event of the cast that crosses a step |
+| `locked_shapes` | the shapes the team can't select yet (`409 shape_locked`): every one of their patterns is bigger than `unlocked_points`. With the 2026 seed `["hexagon", "pentagon"]` at the start, `["hexagon"]` after boss 4, `[]` after boss 5 |
 | `cooldown_class` | the spell class the team can't cast now: its last cast's (`class_4` after a 4-point spell), until it casts a spell of another class. `null` before the first cast |
 | `cooldown_shapes` | the shapes the team can't select because of the cooldown (`409 shape_on_cooldown`): every one of their unlocked patterns is of `cooldown_class`. With the 2026 seed (one size per shape), after a 4-point cast: `["quadrilateral"]` |
 | `qr_cooldowns` | the waypoints the team can't scan now (`409 waypoint_on_cooldown`), each `{"waypoint_id", "until"}`: every waypoint of a spell it cast less than **5 min** (`game.qr_cooldown`) ago, until that cast's `cast_at` + `game.qr_cooldown`, sorted by `until`, then ID. After the quadrilateral at 12:00:12: `[{"waypoint_id": "2001", "until": "2026-10-17T12:05:12Z"}, …]` for 2001, 2002, 2007, 2008. Other waypoints stay open and selecting isn't affected. An entry leaves at its `until` with nobody acting (`qr_cooldown_ended`). `[]` when none |
