@@ -84,44 +84,43 @@ func firstMissing(a, b []string) string {
 	return ""
 }
 
-// Watch adds userID to the admins the feed and the full leaderboard go to,
-// until the returned stop is called (once per stream: an admin with two
-// live views open is counted twice). The caller has checked the role.
-func (f *Feed) Watch(userID uuid.UUID) (stop func()) {
+// Watch adds sub, an admin's ?admin=1 stream, to the streams the feed and
+// the full leaderboard go to, until the returned stop is called. Only that
+// stream gets them, not the admin's other streams. The caller has checked
+// the role.
+func (f *Feed) Watch(sub *live.Subscription) (stop func()) {
 	f.mu.Lock()
-	f.watchers[userID]++
+	f.watchers[sub] = struct{}{}
 	f.mu.Unlock()
 	return func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if f.watchers[userID]--; f.watchers[userID] <= 0 {
-			delete(f.watchers, userID)
-		}
+		delete(f.watchers, sub)
 	}
 }
 
-// Watching reports how many admins are watching.
+// Watching reports how many streams are watching.
 func (f *Feed) Watching() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.watchers)
 }
 
-// SendAdmins sends ev to every watching admin's streams. The leaderboard
-// sends its full ranking through it.
+// SendAdmins sends ev to every watching stream. The leaderboard sends its
+// full ranking through it.
 func (f *Feed) SendAdmins(ev live.Event) {
-	for _, id := range f.admins() {
-		f.hub.Send(id, ev)
+	for _, sub := range f.streams() {
+		sub.Send(ev)
 	}
 }
 
-// admins returns the watching admins' IDs.
-func (f *Feed) admins() []uuid.UUID {
+// streams returns the watching streams.
+func (f *Feed) streams() []*live.Subscription {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]uuid.UUID, 0, len(f.watchers))
-	for id := range f.watchers {
-		out = append(out, id)
+	out := make([]*live.Subscription, 0, len(f.watchers))
+	for sub := range f.watchers {
+		out = append(out, sub)
 	}
 	return out
 }
@@ -143,8 +142,8 @@ func (f *Feed) Flush() bool {
 	if len(b.Entries) == 0 && b.Dropped == 0 {
 		return false
 	}
-	admins := f.admins()
-	if len(admins) == 0 {
+	streams := f.streams()
+	if len(streams) == 0 {
 		return false
 	}
 	ev, err := live.NewEvent("activity", Batched, b)
@@ -152,8 +151,8 @@ func (f *Feed) Flush() bool {
 		f.log.Error("encode activity batch", "error", err)
 		return false
 	}
-	for _, id := range admins {
-		f.hub.Send(id, ev)
+	for _, sub := range streams {
+		sub.Send(ev)
 	}
 	return true
 }

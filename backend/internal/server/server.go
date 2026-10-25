@@ -131,7 +131,7 @@ func Build(ctx context.Context, cfg *config.Config, db *postgres.DB, google auth
 	}
 	// The admin live view's feed: every team state change, batched to the
 	// admins watching (activity), and their full leaderboard.
-	feed := activity.New(teamStore, hub, log, activity.Rules{
+	feed := activity.New(teamStore, log, activity.Rules{
 		PublishEvery: set.Activity.PublishEvery.Duration, BatchMax: set.Activity.BatchMax, Recent: set.Activity.Recent,
 	})
 	stateStore, err = teamstate.Load(ctx, db, theAtlas, theBosses, teamStore, qrVerifier, qteStore, hub, log, teamstate.Rules{
@@ -304,7 +304,7 @@ func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	// Anyone else asking gets the normal stream.
 	if r.URL.Query().Get("admin") == "1" {
 		if u, err := a.users.Get(r.Context(), userID); err == nil && u.Role == user.RoleAdmin {
-			stop := a.Activity.Watch(userID) // before its snapshots, like Subscribe
+			stop := a.Activity.Watch(sub) // before its snapshots, like Subscribe
 			defer stop()
 			initial = append(initial, a.adminSnapshot()...)
 		}

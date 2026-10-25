@@ -6,8 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"labyrinth/internal/platform/live"
 )
 
@@ -21,10 +19,9 @@ import (
 //	  recent    ring  the latest flushed entries (activity.recent)
 //	  held      map[team ID][]string  each team's held powerups, to name
 //	                  the one granted or activated
-//	  watchers  map[user ID]int  admins watching, by open streams
+//	  watchers  set of *live.Subscription  the admins' ?admin=1 streams
 type Feed struct {
 	teams Teams
-	hub   *live.Hub
 	log   *slog.Logger
 	rules Rules
 	now   func() time.Time
@@ -34,19 +31,19 @@ type Feed struct {
 	dropped  int
 	recent   ring
 	held     map[string][]string
-	watchers map[uuid.UUID]int
+	watchers map[*live.Subscription]struct{}
 }
 
-// New returns a feed reading names from t, sending through hub.
-func New(t Teams, hub *live.Hub, log *slog.Logger, rules Rules) *Feed {
+// New returns a feed reading names from t.
+func New(t Teams, log *slog.Logger, rules Rules) *Feed {
 	now := rules.Now
 	if now == nil {
 		now = time.Now
 	}
 	return &Feed{
-		teams: t, hub: hub, log: log, rules: rules, now: now,
+		teams: t, log: log, rules: rules, now: now,
 		pending: newRing(rules.BatchMax), recent: newRing(rules.Recent),
-		held: map[string][]string{}, watchers: map[uuid.UUID]int{},
+		held: map[string][]string{}, watchers: map[*live.Subscription]struct{}{},
 	}
 }
 

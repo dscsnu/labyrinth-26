@@ -30,6 +30,7 @@ type stream struct {
 	states chan sseEvent // team_state
 	boards chan sseEvent // leaderboard (game-wide)
 	qtes   chan sseEvent // qte (game-wide)
+	admin  chan sseEvent // activity / admin_leaderboard (an admin's ?admin=1 stream)
 	cancel context.CancelFunc
 
 	mu    sync.Mutex
@@ -55,10 +56,18 @@ func (e *env) openStream(p player) *stream {
 // auth add the credentials, and parses events in the background.
 func (e *env) openStreamWith(auth func(*http.Request)) *stream {
 	e.t.Helper()
+	return e.openStreamAt("/api/events", auth)
+}
+
+// openStreamAt connects to path (GET /api/events, with or without
+// ?admin=1), letting auth add the credentials, and parses events in the
+// background.
+func (e *env) openStreamAt(path string, auth func(*http.Request)) *stream {
+	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	e.t.Cleanup(cancel)
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", e.backend.URL+"/api/events", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", e.backend.URL+path, nil)
 	auth(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -68,13 +77,14 @@ func (e *env) openStreamWith(auth func(*http.Request)) *stream {
 		e.t.Fatalf("stream: %d %s", res.StatusCode, res.Header.Get("Content-Type"))
 	}
 
-	s := &stream{hellos: make(chan sseEvent, 64), events: make(chan sseEvent, 64), states: make(chan sseEvent, 64), boards: make(chan sseEvent, 64), qtes: make(chan sseEvent, 64), cancel: cancel}
+	s := &stream{hellos: make(chan sseEvent, 64), events: make(chan sseEvent, 64), states: make(chan sseEvent, 64), boards: make(chan sseEvent, 64), qtes: make(chan sseEvent, 64), admin: make(chan sseEvent, 64), cancel: cancel}
 	go func() {
 		defer close(s.hellos)
 		defer close(s.events)
 		defer close(s.states)
 		defer close(s.boards)
 		defer close(s.qtes)
+		defer close(s.admin)
 		defer res.Body.Close()
 		sc := bufio.NewScanner(res.Body)
 		var name string
@@ -102,6 +112,8 @@ func (e *env) openStreamWith(auth func(*http.Request)) *stream {
 					s.boards <- ev
 				case "qte":
 					s.qtes <- ev
+				case "activity", "admin_leaderboard":
+					s.admin <- ev
 				default:
 					s.events <- ev
 				}
