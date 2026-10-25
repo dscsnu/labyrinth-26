@@ -1090,8 +1090,8 @@ func TestUnlockSchedule(t *testing.T) {
 			(1005, '2003'), (1005, '2004'), (1005, '2005'), (1005, '2098'), (1005, '2099');`})
 	at4, ok4 := bossesFor(f.rules, 4)
 	at5, ok5 := bossesFor(f.rules, 5)
-	if !ok4 || !ok5 || at5 <= at4 || f.rules.Unlocks[0] > 3 {
-		t.Skipf("test assumes a schedule that opens with at most triangles, then quadrilaterals, then pentagons (game.unlocks %v)", f.rules.Unlocks)
+	if !ok4 || !ok5 || at5 <= at4 {
+		t.Skipf("test assumes a schedule that opens quadrilaterals before pentagons (game.unlocks %v)", f.rules.Unlocks)
 	}
 	ctx := context.Background()
 	for defeated := 0; ; defeated++ {
