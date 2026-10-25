@@ -33,7 +33,7 @@
 
 <main>
 
-<p><a href="/">home</a> · <a href="/leaderboard">leaderboard</a> · {user?.name} · admin</p>
+<p><a href="/">home</a> · <a href="/leaderboard">leaderboard</a> · <a href="/admin/live">live view</a> · {user?.name} · admin</p>
 
 <!-- An action's result: here, or beside its own forms for a section that
      shows its own (the helpers', at the bottom). -->
