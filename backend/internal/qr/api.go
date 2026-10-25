@@ -7,22 +7,26 @@ import (
 	"regexp"
 
 	"labyrinth/internal/platform/httpx"
+	"labyrinth/internal/platform/identity"
 )
 
 // waypointIDPattern matches a waypoint ID: exactly 4 digits. A format, not a
 // tunable; it matches the waypoint.id CHECK in migration 0003.
 var waypointIDPattern = regexp.MustCompile(`^[0-9]{4}$`)
 
-// API serves the QR routes: minting a display token (staff) and verifying one
-// (any signed-in user).
+// API serves the QR routes: a display's signing key (a helper's assigned
+// checkpoint, or any waypoint for an admin) and verifying a token (any
+// signed-in user).
 type API struct {
 	verifier *Verifier
+	users    Assignments
 	log      *slog.Logger
 }
 
-// NewAPI returns the QR API backed by verifier.
-func NewAPI(verifier *Verifier, log *slog.Logger) *API {
-	return &API{verifier: verifier, log: log}
+// NewAPI returns the QR API backed by verifier, reading helpers'
+// assignments from users.
+func NewAPI(verifier *Verifier, users Assignments, log *slog.Logger) *API {
+	return &API{verifier: verifier, users: users, log: log}
 }
 
 // Routes registers the QR routes any signed-in user may use; authed wraps a
@@ -34,7 +38,14 @@ func (a *API) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Hand
 // StaffRoutes registers the QR routes only a HELPER or ADMIN may use; staff
 // wraps a handler in the auth middleware plus the staff-role check.
 func (a *API) StaffRoutes(mux *http.ServeMux, staff func(http.HandlerFunc) http.Handler) {
-	mux.Handle("GET /api/qr/{waypoint_id}", staff(a.issue))
+	mux.Handle("GET /api/qr/me", staff(a.mine))
+}
+
+// AdminRoutes registers the QR routes only an ADMIN may use: picking any
+// waypoint (helpers get only their assigned one, /api/qr/me). admin wraps a
+// handler in the auth middleware plus the admin-role check.
+func (a *API) AdminRoutes(mux *http.ServeMux, admin func(http.HandlerFunc) http.Handler) {
+	mux.Handle("GET /api/qr/{waypoint_id}", admin(a.issue))
 }
 
 // errorCodes maps rule violations to an HTTP status and a stable code the
@@ -45,6 +56,7 @@ var errorCodes = []struct {
 	code   string
 }{
 	{ErrUnknownWaypoint, http.StatusNotFound, "unknown_waypoint"},
+	{ErrNotAssigned, http.StatusNotFound, "not_assigned"},
 	{ErrInvalid, http.StatusBadRequest, "invalid_qr"},
 	{ErrExpired, http.StatusConflict, "qr_expired"},
 }
@@ -62,9 +74,32 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 	httpx.Error(w, http.StatusInternalServerError, "internal error")
 }
 
+// mine handles GET /api/qr/me: the signing key and timing rules for the
+// caller's assigned checkpoint, which their display signs its rotating
+// tokens with. Staff only (checked by the staff middleware); 404
+// not_assigned until an admin assigns one.
+func (a *API) mine(w http.ResponseWriter, r *http.Request) {
+	u, err := a.users.Get(r.Context(), identity.UserID(r))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if u.WaypointID == nil {
+		a.fail(w, ErrNotAssigned)
+		return
+	}
+	key, err := a.verifier.SigningKey(*u.WaypointID)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	httpx.OK(w, key)
+}
+
 // issue handles GET /api/qr/{waypoint_id}: the waypoint's signing key and
 // timing rules, which the display uses to sign its own rotating tokens.
-// Staff only (the caller's role was checked by the staff middleware).
+// Admins only (checked by the admin middleware): helpers show their
+// assigned checkpoint (mine).
 func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 	waypointID := r.PathValue("waypoint_id")
 	if !waypointIDPattern.MatchString(waypointID) {

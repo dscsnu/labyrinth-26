@@ -46,13 +46,15 @@ The package comment.
   - `Teams`: `All`, `ByID`, `RemoveMember`, `Delete` (`*teams.Store`)
   - `TeamState`: `TeamView`, `Revive`, `ResetCooldowns`, `GrantPowerup`, `QTEStats` (`*teamstate.Store`)
   - `QTEs`: `List`, `Status`, `Create`, `Start`, `End` (`*qte.Store`)
-  - `Users`: `Search`, `SetRole` (`*user.Users`)
+  - `Users`: `Search`, `SetRole`, `ByEmail`, `Helpers`, `Assign` (`*user.Users`)
+  - `Atlas`: `WaypointIndex` (`*atlas.Atlas`), to check a helper's checkpoint exists
 - **`Rules`**: `UserSearchLimit` (`admin.user_search_limit`).
-- **`Admin`**, **`New(t, st, q, u, rules)`**.
+- **`Admin`**, **`New(t, st, q, u, at, rules)`**.
 - **`TeamOverview`** `{team, game}` and **`GameOverview`** (see [Data model](#data-model)).
 - **`Teams()`**: `teams.All()` in ID order; for each team not in the `LOBBY`, `TeamState.TeamView(id)` copied into a `GameOverview`. All from memory.
 - **`QTEOverview`** (the `qte.QTE` flattened, plus `status` and `stats`) and **`QTEs()`**: `QTEs.List()` (newest first), each with `QTEs.Status` (the store's clock) and its `TeamState.QTEStats()` entry (`by_option` `{}` when nobody answered). All from memory.
 - **`SearchUsers(ctx, query)`**: `Users.Search(ctx, query, UserSearchLimit)` (one Postgres query in `user`).
+- **`Helpers(ctx)`**: `Users.Helpers` (every helper, by email, with their checkpoints).
 
 ### `write.go`
 Each write is one call to the owner:
@@ -68,6 +70,8 @@ Each write is one call to the owner:
 | `StartQTE(ctx, id)` | `qte.Start` | nothing |
 | `EndQTE(ctx, id)` | `qte.End` | the answers so far in its row |
 | `SetRole(ctx, adminID, userID, role)` | `user.SetRole` | `ErrCannotChangeOwnRole` when `adminID == userID`, checked first (the user use case isn't called) |
+| `AddHelper(ctx, adminID, email)` | `user.ByEmail`, then `SetRole(HELPER)` | a helper is returned as is (no write: a resend is harmless); an admin is `ErrAlreadyAdmin` (it would demote them) |
+| `AssignWaypoint(ctx, userID, waypointID)` | `user.Assign` | `ErrUnknownWaypoint` when the atlas has no such waypoint, checked first; `nil` unassigns |
 
 ### `api.go`
 - **`Routes(mux, admin)`** registers the twelve routes behind `admin`.
@@ -100,7 +104,7 @@ Each write is one call to the owner:
 - **`teamID(w, r)`**: `{team_id}` must match `teamIDPattern` (6 digits, teams' format), else `400 invalid_team_id`. Every team route checks it first.
 - **`userID(w, raw, what)`**: a UUID, else `400 invalid_user_id` naming the field.
 - **`qteID(w, r)`**: `{qte_id}` a positive integer, else `400 invalid_qte_id`.
-- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `grantPowerup` (`{kind}` through `teamstate.PowerupByID`, else `404 unknown_powerup`), `qtes`, `createQTE` (the body has a `qte.Draft`'s fields plus `start`, with `correct_option` a pointer so a missing one isn't option 0; one that doesn't decode, or a quiz without `correct_option`, is `400 invalid_body`), `startQTE`, `endQTE`, `searchUsers`, `setRole`. **Every write is logged** at info with `admin_id` and what it acted on.
+- Handlers `teams`, `deleteTeam`, `removeMember`, `revive`, `resetCooldowns`, `grantPowerup` (`{kind}` through `teamstate.PowerupByID`, else `404 unknown_powerup`), `qtes`, `createQTE` (the body has a `qte.Draft`'s fields plus `start`, with `correct_option` a pointer so a missing one isn't option 0; one that doesn't decode, or a quiz without `correct_option`, is `400 invalid_body`), `startQTE`, `endQTE`, `searchUsers`, `setRole`, `helpers`, `addHelper` (trims the email; `400 invalid_email` when empty; `404 user_not_found` with "they must sign in once first"), `assignWaypoint` (reads `waypoint_id` raw, so a missing field, `400 invalid_body`, differs from `null`, unassign). **Every write is logged** at info with `admin_id` and what it acted on.
 
 ## Data model
 **Memory:** none. **Postgres:** none of its own; the owners' tables (see their READMEs).
@@ -119,7 +123,7 @@ Each write is one call to the owner:
 | `powerups` | object | the powerups it holds and the ones running, as `team_state.powerups` |
 
 ## The write-through
-Doesn't apply: admin persists nothing. Each owner runs its own write-through (teams' `RemoveMember` and `Delete`, teamstate's `Revive`, `ResetCooldowns` and `GrantPowerup`, qte's `Create`, `Start` and `End`; user's `SetRole` writes Postgres directly).
+Doesn't apply: admin persists nothing. Each owner runs its own write-through (teams' `RemoveMember` and `Delete`, teamstate's `Revive`, `ResetCooldowns` and `GrantPowerup`, qte's `Create`, `Start` and `End`; user's `SetRole` and `Assign` write Postgres directly).
 
 ## API
 | Method | Path | Body | Response |
@@ -136,6 +140,9 @@ Doesn't apply: admin persists nothing. Each owner runs its own write-through (te
 | POST | `/api/admin/qtes/{qte_id}/end` | none | `200` its `QTEOverview`, with the answers so far |
 | GET | `/api/admin/users[?email=<part>]` | none | `200` `[User]`, at most **20** (`admin.user_search_limit`), by email |
 | PUT | `/api/admin/users/{user_id}/role` | `{"role": "PLAYER" \| "HELPER" \| "ADMIN"}` | `200` the user |
+| GET | `/api/admin/helpers` | none | `200` `[User]`: every helper, by email, each with `waypoint_id` |
+| POST | `/api/admin/helpers` | `{"email"}` | `200` the user, now a helper |
+| PUT | `/api/admin/helpers/{user_id}/waypoint` | `{"waypoint_id": "2003" \| null}` | `200` the user |
 
 Every route: `401 missing_token` / `invalid_token` / `user_not_found` (the caller's own account), `403 not_admin`.
 
@@ -159,7 +166,9 @@ Every route: `401 missing_token` / `invalid_token` / `user_not_found` (the calle
 ]}
 ```
 
-`PUT /api/admin/users/9a2b…/role` `{"role": "HELPER"}` → `{"success": true, "payload": {"id": "9a2b…", "email": "…", "role": "HELPER", …}}`.
+`PUT /api/admin/users/9a2b…/role` `{"role": "HELPER"}` → `{"success": true, "payload": {"id": "9a2b…", "email": "…", "role": "HELPER", "waypoint_id": null, …}}`.
+
+`POST /api/admin/helpers` `{"email": "Asha.Rao@snu.edu.in"}` → `{"success": true, "payload": {"id": "9a2b…", "email": "asha.rao@snu.edu.in", "role": "HELPER", "waypoint_id": null, …}}`; then `PUT /api/admin/helpers/9a2b…/waypoint` `{"waypoint_id": "2003"}` → the same with `"waypoint_id": "2003"`, and Asha's `/qr` shows Inner gate (`GET /api/qr/me`).
 
 Events: whatever the owner publishes (see [`internal/server/README.md`, "What publishes what"](../server/README.md#what-publishes-what)): removal and deletion publish `team` / `no_team`; revive and reset publish `team_state` (`revived`, `cooldowns_reset`); starting and ending a QTE publish `qte` to every stream (`started`, `closed`); a role change publishes nothing.
 
@@ -202,7 +211,25 @@ In validation order, per route (after the guard: `401`, then `403 not_admin`).
 | role: the admin's own ID | `409 cannot_change_own_role` (nothing changed) |
 | role: not `PLAYER` / `HELPER` / `ADMIN` | `400 invalid_role` |
 | role: no such user | `404 user_not_found` |
-| role: set | applies to `RequireAdmin` / `RequireStaff` at once; the token's copy updates at the next sign-in |
+| role: set | applies to `RequireAdmin` / `RequireStaff` at once; the token's copy updates at the next sign-in. To `PLAYER`: the checkpoint is cleared too (removing a helper) |
+
+**Helpers:**
+
+| Case | Result |
+|---|---|
+| add: body isn't `{"email": string}` | `400 invalid_body` |
+| add: email empty after trimming | `400 invalid_email` |
+| add: nobody with that email (any case) | `404 user_not_found` ("they must sign in once first") |
+| add: an admin (the caller included) | `409 already_admin`; nothing changed |
+| add: already a helper | `200`, unchanged |
+| add: a player | `200`, now a `HELPER` |
+| assign: `user_id` not a UUID | `400 invalid_user_id` |
+| assign: no `waypoint_id` field, or not a string or null | `400 invalid_body` |
+| assign: `waypoint_id` not 4 digits | `400 invalid_waypoint_id` |
+| assign: not in the atlas | `404 unknown_waypoint` |
+| assign: no such user | `404 user_not_found` |
+| assign: a player or an admin | `409 not_helper` |
+| assign: a helper | `200`; `null` unassigns. Their `/qr` shows it when they next load or refresh the page (it doesn't poll) |
 
 ## Concurrency and locking
 Admin holds no locks. Every race is the owner's, and its README says who wins: a removal against a scan (teams), a deletion against a write in flight (teamstate's `TeamDeleted`), a revive or reset against a timer (teamstate, under the team's entry lock). Two admins changing the same role: the last write wins.
@@ -228,5 +255,7 @@ Nothing to recover: a failed owner write reconciles in the owner. Postgres down:
 | `TestSearchLimit` | `tests/admin_test.go` | a search passes `admin.user_search_limit` |
 | `TestAPIInternalErrors` | `tests/admin_test.go` | an unmapped error (a QTE start, a user search, over failing fakes) is a logged `500`; revive's `invalid_team_id` |
 | `TestQTEsOverview` | `tests/admin_test.go` | the QTE list in the store's order, each with its status and stats; `by_option` `{}` for a QTE nobody answered |
+| `TestAddHelper` | `tests/admin_test.go` | a player becomes a helper through `SetRole`; a helper is returned without a write; an admin `ErrAlreadyAdmin`; an unknown email `user.ErrUserNotFound` |
+| `TestAssignWaypoint` | `tests/admin_test.go` | a waypoint the atlas lacks is `ErrUnknownWaypoint` before the user use case is called; a known one and `nil` reach it |
 
-End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestPowerupsOverHTTP`, `TestQTEsOverHTTP` (`qte_test.go`), `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles` (see the server README's Tests).
+End to end over HTTP, against the real use cases, in `internal/server/tests/admin_test.go`: `TestPowerupsOverHTTP`, `TestQTEsOverHTTP` (`qte_test.go`), `TestAdminGuard`, `TestAdminRemoveFromLobby`, `TestAdminRemoveFromStartedTeam`, `TestAdminRemoveRacesScan`, `TestAdminRevive`, `TestAdminTeamsOverview`, `TestAdminDeleteTeam`, `TestAdminResetCooldownsOverHTTP`, `TestAdminUsersAndRoles`, `TestHelpersOverHTTP` (see the server README's Tests).

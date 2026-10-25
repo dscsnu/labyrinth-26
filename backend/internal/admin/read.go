@@ -41,6 +41,16 @@ type QTEs interface {
 type Users interface {
 	Search(ctx context.Context, query string, limit int) ([]user.User, error)
 	SetRole(ctx context.Context, id uuid.UUID, role user.Role) (user.User, error)
+	ByEmail(ctx context.Context, email string) (user.User, error)
+	Helpers(ctx context.Context) ([]user.User, error)
+	Assign(ctx context.Context, id uuid.UUID, waypointID *string) (user.User, error)
+}
+
+// Atlas is what admin needs from the atlas use case: whether a waypoint
+// exists, so a helper can't be assigned a made-up checkpoint. The atlas never
+// changes after startup, so reading it needs no lock.
+type Atlas interface {
+	WaypointIndex(id string) (int, bool)
 }
 
 // Rules are admin's settings from config.toml.
@@ -57,12 +67,13 @@ type Admin struct {
 	state TeamState
 	qtes  QTEs
 	users Users
+	atlas Atlas
 	rules Rules
 }
 
 // New returns the admin use case over the given use cases.
-func New(t Teams, st TeamState, q QTEs, u Users, rules Rules) *Admin {
-	return &Admin{teams: t, state: st, qtes: q, users: u, rules: rules}
+func New(t Teams, st TeamState, q QTEs, u Users, at Atlas, rules Rules) *Admin {
+	return &Admin{teams: t, state: st, qtes: q, users: u, atlas: at, rules: rules}
 }
 
 // TeamOverview is one team as the admin's teams list shows it: the team, and
@@ -148,4 +159,10 @@ func (a *Admin) overview(q qte.QTE, stats map[int64]teamstate.QTEStat) QTEOvervi
 // contains query, case insensitive, by email.
 func (a *Admin) SearchUsers(ctx context.Context, query string) ([]user.User, error) {
 	return a.users.Search(ctx, query, a.rules.UserSearchLimit)
+}
+
+// Helpers returns every helper, by email, with their assigned checkpoints
+// (user.Helpers).
+func (a *Admin) Helpers(ctx context.Context) ([]user.User, error) {
+	return a.users.Helpers(ctx)
 }

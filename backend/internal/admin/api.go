@@ -1,11 +1,13 @@
 package admin
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -19,6 +21,10 @@ import (
 
 // teamIDPattern matches a team code: exactly 6 digits (teams' format).
 var teamIDPattern = regexp.MustCompile(`^[0-9]{6}$`)
+
+// waypointIDPattern matches a waypoint ID: exactly 4 digits (the
+// waypoint.id CHECK in migration 0003).
+var waypointIDPattern = regexp.MustCompile(`^[0-9]{4}$`)
 
 // API serves the admin routes.
 type API struct {
@@ -44,6 +50,9 @@ func (a *API) Routes(mux *http.ServeMux, admin func(http.HandlerFunc) http.Handl
 	mux.Handle("POST /api/admin/qtes/{qte_id}/end", admin(a.endQTE))
 	mux.Handle("GET /api/admin/users", admin(a.searchUsers))
 	mux.Handle("PUT /api/admin/users/{user_id}/role", admin(a.setRole))
+	mux.Handle("GET /api/admin/helpers", admin(a.helpers))
+	mux.Handle("POST /api/admin/helpers", admin(a.addHelper))
+	mux.Handle("PUT /api/admin/helpers/{user_id}/waypoint", admin(a.assignWaypoint))
 }
 
 // errorCodes maps the rule errors these routes can meet, from admin and the
@@ -74,6 +83,9 @@ var errorCodes = []struct {
 	{user.ErrUserNotFound, http.StatusNotFound, "user_not_found"},
 	{user.ErrInvalidRole, http.StatusBadRequest, "invalid_role"},
 	{ErrCannotChangeOwnRole, http.StatusConflict, "cannot_change_own_role"},
+	{ErrAlreadyAdmin, http.StatusConflict, "already_admin"},
+	{ErrUnknownWaypoint, http.StatusNotFound, "unknown_waypoint"},
+	{user.ErrNotHelper, http.StatusConflict, "not_helper"},
 }
 
 // fail writes the response for err: its status and code from errorCodes, or
@@ -333,5 +345,80 @@ func (a *API) setRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log.Info("admin set role", "admin_id", identity.UserID(r), "user_id", uid, "role", req.Role)
+	httpx.OK(w, u)
+}
+
+// helpers handles GET /api/admin/helpers: every helper, by email, each with
+// waypoint_id, their assigned checkpoint or null.
+func (a *API) helpers(w http.ResponseWriter, r *http.Request) {
+	hs, err := a.admin.Helpers(r.Context())
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	httpx.OK(w, hs)
+}
+
+// addHelper handles POST /api/admin/helpers {"email"}: the account with
+// that email (they must have signed in once) becomes a HELPER. Returns the
+// user; one already a helper is returned unchanged.
+func (a *API) addHelper(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body", `body must be {"email": string}`)
+		return
+	}
+	email := strings.TrimSpace(req.Email)
+	if email == "" {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_email", "email must not be empty")
+		return
+	}
+	u, err := a.admin.AddHelper(r.Context(), identity.UserID(r), email)
+	if errors.Is(err, user.ErrUserNotFound) {
+		httpx.ErrorCode(w, http.StatusNotFound, "user_not_found", "nobody with that email has signed in; they must sign in once first")
+		return
+	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin added helper", "admin_id", identity.UserID(r), "user_id", u.ID)
+	httpx.OK(w, u)
+}
+
+// assignWaypoint handles PUT /api/admin/helpers/{user_id}/waypoint
+// {"waypoint_id"}: the checkpoint the helper's /qr display shows, or null to
+// unassign. Returns the user.
+func (a *API) assignWaypoint(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userID(w, r.PathValue("user_id"), "user id")
+	if !ok {
+		return
+	}
+	// Raw, so a missing field (a bad body) differs from an explicit null
+	// (unassign): decoding into a pointer can't tell them apart.
+	var req struct {
+		WaypointID json.RawMessage `json:"waypoint_id"`
+	}
+	var waypoint *string
+	err := httpx.DecodeJSON(w, r, &req)
+	if err == nil && len(req.WaypointID) > 0 {
+		err = json.Unmarshal(req.WaypointID, &waypoint)
+	}
+	if err != nil || len(req.WaypointID) == 0 {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_body", `body must be {"waypoint_id": string | null}`)
+		return
+	}
+	if waypoint != nil && !waypointIDPattern.MatchString(*waypoint) {
+		httpx.ErrorCode(w, http.StatusBadRequest, "invalid_waypoint_id", "waypoint id must be 4 digits")
+		return
+	}
+	u, err := a.admin.AssignWaypoint(r.Context(), uid, waypoint)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("admin assigned helper", "admin_id", identity.UserID(r), "user_id", uid, "waypoint_id", waypoint)
 	httpx.OK(w, u)
 }

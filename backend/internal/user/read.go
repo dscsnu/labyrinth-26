@@ -30,7 +30,10 @@ type User struct {
 	Name      string    `json:"name"`
 	AvatarURL *string   `json:"avatar_url"`
 	Role      Role      `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	// WaypointID is the checkpoint a helper's /qr display shows, assigned by
+	// an admin (Assign); nil if none. Only staff can have one.
+	WaypointID *string   `json:"waypoint_id"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Users is the user use case. Users aren't held in memory (sign-ins are rare),
@@ -56,6 +59,23 @@ func (u *Users) Get(ctx context.Context, id uuid.UUID) (User, error) {
 		return usr, fmt.Errorf("%w: %w", ErrUserNotFound, err)
 	}
 	return usr, err
+}
+
+// ByEmail reads the user with exactly this email, ignoring case: an admin
+// adding a helper by their address. Returns ErrUserNotFound, wrapping
+// postgres.ErrNotFound, if there's none (they've never signed in).
+func (u *Users) ByEmail(ctx context.Context, email string) (User, error) {
+	usr, err := u.db.selectByEmail(ctx, email)
+	if errors.Is(err, postgres.ErrNotFound) {
+		return usr, fmt.Errorf("%w: %w", ErrUserNotFound, err)
+	}
+	return usr, err
+}
+
+// Helpers returns every HELPER, ordered by email, with their assigned
+// checkpoints: the admin's list of helpers.
+func (u *Users) Helpers(ctx context.Context) ([]User, error) {
+	return u.db.selectHelpers(ctx)
 }
 
 // Search returns up to limit users whose email contains query (case

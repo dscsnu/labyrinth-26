@@ -8,6 +8,8 @@ export const UserSchema = z.object({
     name: z.string(),
     avatar_url: z.string().nullable(),
     role: UserRoleSchema,
+    // A helper's assigned checkpoint, whose QR their /qr shows; null if none.
+    waypoint_id: z.string().nullable(),
     created_at: z.string(),
 });
 

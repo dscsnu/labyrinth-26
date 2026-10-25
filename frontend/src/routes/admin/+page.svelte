@@ -1,10 +1,13 @@
 <script lang="ts">
     import { enhance, type SubmitFunction } from "$app/forms";
     import type { TeamOverview } from "#lib/types/Admin.type.ts";
+    import { MAP_POINTS } from "#lib/game/mapPoints.ts";
     import type { PageProps } from "./$types";
 
     let { data, form }: PageProps = $props();
-    let { user, teams, qtes, email, users } = $derived(data);
+    let { user, teams, qtes, helpers, email, users } = $derived(data);
+    // The checkpoints a helper can be given, by waypoint ID, with their names.
+    const CHECKPOINTS = [...MAP_POINTS].sort((a, b) => a.waypoint.localeCompare(b.waypoint));
     const POWERUPS = ["damage_multiplier", "heart", "short_qr_cooldown", "instant_cast"];
 
     let filter = $state("");
@@ -32,11 +35,17 @@
 
 <p><a href="/">home</a> · <a href="/leaderboard">leaderboard</a> · {user?.name} · admin</p>
 
-{#if form?.code}
-    <p style="color: red">{form.code}: {form.message}</p>
-{:else if form?.done}
-    <p style="color: green">{form.done}</p>
-{/if}
+<!-- An action's result: here, or beside its own forms for a section that
+     shows its own (the helpers', at the bottom). -->
+{#snippet result()}
+    {#if form?.code}
+        <p style="color: red">{form.code}: {form.message}</p>
+    {:else if form?.done}
+        <p style="color: green">{form.done}</p>
+    {/if}
+{/snippet}
+
+{#if !form?.section}{@render result()}{/if}
 
 <h1>Teams</h1>
 
@@ -178,6 +187,43 @@
     <p><label><input type="checkbox" name="start" /> start now (otherwise save as a draft)</label></p>
     <button>create</button>
 </form>
+
+<h1 id="helpers">Helpers</h1>
+
+<p>Helpers run the QR display at a checkpoint: their <a href="/qr">/qr</a> page shows the checkpoint assigned here, and they can't pick another. Add one by the email they signed in with (they must have signed in once).</p>
+
+<form method="POST" action="?/addHelper" use:enhance>
+    <input name="email" type="email" required placeholder="helper's email" size="30" />
+    <button>add helper</button>
+</form>
+
+{#if form?.section === 'helpers'}{@render result()}{/if}
+
+{#if helpers.length === 0}
+    <p>No helpers yet.</p>
+{:else}
+    <ul>
+        {#each helpers as h (h.id)}
+            <li>
+                {h.name} &lt;{h.email}&gt;
+                <form method="POST" action="?/assignWaypoint" use:enhance style="display: inline">
+                    <input type="hidden" name="user_id" value={h.id} />
+                    <select name="waypoint_id">
+                        <option value="" selected={h.waypoint_id === null}>no checkpoint</option>
+                        {#each CHECKPOINTS as c (c.waypoint)}
+                            <option value={c.waypoint} selected={c.waypoint === h.waypoint_id}>{c.waypoint} {c.name}</option>
+                        {/each}
+                    </select>
+                    <button>save</button>
+                </form>
+                <form method="POST" action="?/removeHelper" use:enhance={confirmFirst(`Remove ${h.name} as a helper? Their /qr stops showing a checkpoint.`)} style="display: inline">
+                    <input type="hidden" name="user_id" value={h.id} />
+                    <button>remove</button>
+                </form>
+            </li>
+        {/each}
+    </ul>
+{/if}
 
 <h1>Users and roles</h1>
 

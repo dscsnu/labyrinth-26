@@ -25,9 +25,10 @@ func qrToken(waypoint string, secs int64) string {
 	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// TestQRGuard checks the mint route needs a token and a HELPER or ADMIN role
-// as stored now (the token's role is ignored), that the ID must be 4 digits,
-// and that an unknown waypoint is refused.
+// TestQRGuard checks the pick-any-waypoint route is for admins only, as
+// stored now (the token's role is ignored): a player and a helper are
+// 403 not_admin (helpers show their assigned checkpoint instead,
+// TestQRMine); for an admin the ID must be 4 digits and the waypoint known.
 func TestQRGuard(t *testing.T) {
 	e := setup(t)
 	if err := e.db.Seed2026(context.Background()); err != nil {
@@ -37,24 +38,62 @@ func TestQRGuard(t *testing.T) {
 	p := e.newPlayer("p")
 
 	expect(t, "no token", e.call("GET", "/api/qr/2001", player{}, nil), http.StatusUnauthorized, "missing_token")
-	expect(t, "player", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_staff")
-	expect(t, "bad id", e.call("GET", "/api/qr/10", p, nil), http.StatusForbidden, "not_staff") // role checked first
+	expect(t, "player", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_admin")
+	expect(t, "bad id", e.call("GET", "/api/qr/10", p, nil), http.StatusForbidden, "not_admin") // role checked first
 
 	e.setRole(p, "HELPER") // the token still says PLAYER
-	expect(t, "bad id as helper", e.call("GET", "/api/qr/10", p, nil), http.StatusBadRequest, "invalid_waypoint_id")
-	expect(t, "unknown waypoint", e.call("GET", "/api/qr/9999", p, nil), http.StatusNotFound, "unknown_waypoint")
+	expect(t, "helper picks", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_admin")
 
+	e.setRole(p, "ADMIN")
+	expect(t, "bad id as admin", e.call("GET", "/api/qr/10", p, nil), http.StatusBadRequest, "invalid_waypoint_id")
+	expect(t, "unknown waypoint", e.call("GET", "/api/qr/9999", p, nil), http.StatusNotFound, "unknown_waypoint")
 	r := e.call("GET", "/api/qr/2001", p, nil)
-	expect(t, "helper mints", r, http.StatusOK, "")
+	expect(t, "admin mints", r, http.StatusOK, "")
 	if r.payload["waypoint_id"] != "2001" || r.payload["key"] == "" {
 		t.Fatalf("mint payload: %v", r.payload)
 	}
 
-	e.setRole(p, "ADMIN")
-	expect(t, "admin mints", e.call("GET", "/api/qr/2001", p, nil), http.StatusOK, "")
-
 	e.setRole(p, "PLAYER")
-	expect(t, "demoted", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_staff")
+	expect(t, "demoted", e.call("GET", "/api/qr/2001", p, nil), http.StatusForbidden, "not_admin")
+}
+
+// TestQRMine checks GET /api/qr/me: staff only (a player is 403 not_staff);
+// a helper with no checkpoint is 404 not_assigned; once an admin assigns
+// one, the helper gets that waypoint's key (the same an admin gets for it),
+// a reassignment switches it, and unassigning or demoting the helper ends
+// it.
+func TestQRMine(t *testing.T) {
+	e := setup(t)
+	if err := e.db.Seed2026(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart()
+	admin := e.newAdmin("admin")
+	h := e.newPlayer("h")
+	assign := func(waypoint any) apiResult {
+		return e.call("PUT", "/api/admin/helpers/"+h.id+"/waypoint", admin, map[string]any{"waypoint_id": waypoint})
+	}
+
+	expect(t, "no token", e.call("GET", "/api/qr/me", player{}, nil), http.StatusUnauthorized, "missing_token")
+	expect(t, "player", e.call("GET", "/api/qr/me", h, nil), http.StatusForbidden, "not_staff")
+	expect(t, "add the helper", e.call("POST", "/api/admin/helpers", admin, map[string]string{"email": "h@snu.edu.in"}), http.StatusOK, "")
+	expect(t, "unassigned", e.call("GET", "/api/qr/me", h, nil), http.StatusNotFound, "not_assigned")
+
+	for _, w := range []string{"2003", "2007"} {
+		expect(t, "assign "+w, assign(w), http.StatusOK, "")
+		mine := e.call("GET", "/api/qr/me", h, nil)
+		expect(t, "helper's key for "+w, mine, http.StatusOK, "")
+		picked := e.call("GET", "/api/qr/"+w, admin, nil)
+		if mine.payload["waypoint_id"] != w || mine.payload["key"] != picked.payload["key"] {
+			t.Fatalf("%s: helper %v, admin %v", w, mine.payload, picked.payload)
+		}
+	}
+
+	expect(t, "unassign", assign(nil), http.StatusOK, "")
+	expect(t, "unassigned again", e.call("GET", "/api/qr/me", h, nil), http.StatusNotFound, "not_assigned")
+	expect(t, "reassign", assign("2001"), http.StatusOK, "")
+	expect(t, "demote", e.call("PUT", "/api/admin/users/"+h.id+"/role", admin, map[string]string{"role": "PLAYER"}), http.StatusOK, "")
+	expect(t, "demoted", e.call("GET", "/api/qr/me", h, nil), http.StatusForbidden, "not_staff")
 }
 
 // TestQRVerify checks POST /api/qr/verify over HTTP: a fresh token returns its
