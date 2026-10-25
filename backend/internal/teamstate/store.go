@@ -176,6 +176,12 @@ type Rules struct {
 	// own lock; holding both the other way round could deadlock. Not in
 	// config.toml.
 	OnFinished func(teamID string)
+	// OnPublish, when set, is called with every team_state publish: the
+	// team, the cause and the state sent (server.Build points it at the
+	// admin live view's feed, activity.Feed.Record). Called holding the
+	// team's entry lock, after the members' events are sent, so it must be
+	// quick and must not call back into team state. Not in config.toml.
+	OnPublish func(teamID string, typ live.EventType, v View)
 	// Clock is the store's time source; nil means the real one
 	// (systemClock). Tests pass a fake. Not in config.toml.
 	Clock Clock
@@ -479,13 +485,17 @@ func (s *Store) publish(e *entry, teamID string, st *State, typ live.EventType) 
 			e.members = members
 		}
 	}
-	ev, err := s.event(teamID, st, typ)
+	v := s.view(teamID, *st)
+	ev, err := live.NewEvent("team_state", typ, v)
 	if err != nil {
 		s.log.Error("encode team state event", "team_id", teamID, "error", err)
 		return
 	}
 	for _, id := range members {
 		s.hub.Send(id, ev)
+	}
+	if s.rules.OnPublish != nil {
+		s.rules.OnPublish(teamID, typ, v)
 	}
 }
 
