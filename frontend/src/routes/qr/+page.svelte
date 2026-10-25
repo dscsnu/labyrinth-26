@@ -8,16 +8,10 @@
     let { data }: PageProps = $props();
     let { user, role } = $derived(data);
     // An admin picks any waypoint; a helper shows only the checkpoint an
-    // admin assigned them (GET /qr/me), re-checked while the page is open.
+    // admin assigned them, read once by the page load (refresh to see a new
+    // one).
     let isAdmin = $derived(role === 'ADMIN');
-    // Unassigned: no checkpoint yet, so there's nothing to show.
-    let unassigned = $state(false);
-
-    // How often a helper's page asks for its assignment: soon while it has
-    // none, less often once it's showing one.
-    const RECHECK_UNASSIGNED_MS = 15_000;
-    const RECHECK_ASSIGNED_MS = 30_000;
-    let recheck: ReturnType<typeof setTimeout> | null = null;
+    let unassigned = $derived(!isAdmin && !data.assigned);
 
     let waypoint = $state('');
     let info = $state<SigningKey | null>(null);
@@ -35,11 +29,10 @@
 
     onMount(() => {
         tick = setInterval(() => (now = Date.now()), 500);
-        if (!isAdmin) void checkAssignment();
+        if (data.assigned) void show(data.assigned);
         return () => {
             if (tick) clearInterval(tick);
             if (rotator) clearInterval(rotator);
-            if (recheck) clearTimeout(recheck);
         };
     });
 
@@ -74,7 +67,8 @@
         tokenStr = `${payload}.${await sign(hmacKey, payload)}`;
     };
 
-    // Starts showing a waypoint from its signing key (a GET /qr/… payload).
+    // Starts showing a waypoint from its signing key (the page load's, or a
+    // GET /qr/{waypoint_id} payload).
     const show = async (payload: unknown) => {
         let next: SigningKey;
         try {
@@ -93,15 +87,6 @@
         rotator = setInterval(renderNext, Math.max(500, next.rotate_ms));
     };
 
-    // Stops showing a QR (a helper unassigned).
-    const hide = () => {
-        if (rotator) clearInterval(rotator);
-        rotator = null;
-        info = null;
-        hmacKey = null;
-        tokenStr = '';
-    };
-
     // An admin's picker: any waypoint by its 4-digit ID.
     const start = async (e: SubmitEvent) => {
         e.preventDefault();
@@ -112,29 +97,6 @@
         const json = await res.json().catch(() => ({}));
         if (!res.ok) return (message = { ok: false, text: `${json.code}: ${json.message}` });
         await show(json.payload);
-    };
-
-    // A helper's checkpoint: shown when assigned, switched when it changes,
-    // hidden when it's taken away. A failed check (no signal) keeps the QR
-    // showing: it signs locally, so it keeps working offline.
-    const checkAssignment = async () => {
-        const res = await fetch('/qr/me').catch(() => null);
-        const json = res ? await res.json().catch(() => ({})) : null;
-        if (res?.ok) {
-            unassigned = false;
-            if (json.payload?.waypoint_id !== info?.waypoint_id) await show(json.payload);
-        } else if (json?.code === 'not_assigned') {
-            unassigned = true;
-            message = null;
-            hide();
-        } else if (json?.code === 'not_staff') {
-            hide();
-            message = { ok: false, text: "You're no longer a helper." };
-            return;
-        } else if (!info) {
-            message = { ok: false, text: res ? `${json?.code}: ${json?.message}` : 'No connection: retrying.' };
-        }
-        recheck = setTimeout(checkAssignment, info ? RECHECK_ASSIGNED_MS : RECHECK_UNASSIGNED_MS);
     };
 
     // The waypoint's place name on the map, if it has one.
@@ -160,7 +122,7 @@
         <button>Show</button>
     </form>
 {:else if unassigned}
-    <p>No checkpoint assigned yet: ask an organiser. This page checks again by itself.</p>
+    <p>No checkpoint assigned yet: ask an organiser, then refresh this page.</p>
 {/if}
 
 {#if info}
@@ -168,6 +130,7 @@
         Checkpoint <b>{placeName(info.waypoint_id) ?? info.waypoint_id}</b> ({info.waypoint_id}) · rotates every
         {info.rotate_ms / 1000} s · {secondsLeft} s left
     </p>
+    {#if !isAdmin}<p><small>Moved to another checkpoint? Refresh this page.</small></p>{/if}
     <canvas bind:this={canvas}></canvas>
 {/if}
 

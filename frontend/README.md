@@ -52,7 +52,6 @@ Apart from the event stream (`/api/events`, above), the browser never calls the 
 | `PUT /play/selection` `{"shape"}` (`src/routes/play/selection/+server.ts`) | `PUT /api/teams/me/state/selection` |
 | `DELETE /play/selection` (same file) | `DELETE /api/teams/me/state/selection` |
 | `GET /play/casts` (`src/routes/play/casts/+server.ts`) | `GET /api/teams/me/casts` (the cast log, re-fetched when `cast_count` says casts were missed) |
-| `GET /qr/me` (`src/routes/qr/me/+server.ts`) | `GET /api/qr/me` (a helper's assigned checkpoint) |
 | `GET /qr/{waypoint_id}` (`src/routes/qr/[waypoint]/+server.ts`) | `GET /api/qr/{waypoint_id}` (admins only) |
 | `POST /qr/verify` `{"qr"}` (`src/routes/qr/verify/+server.ts`) | `POST /api/qr/verify` |
 
@@ -93,11 +92,11 @@ The top teams, live. The home page links to it.
 
 For staff: a screen at a checkpoint showing its rotating QR. `src/routes/qr/+page.svelte`:
 
-1. **A helper** can't pick: the page fetches `GET /qr/me`, the checkpoint an admin assigned them on `/admin`, and shows its name (from `MAP_POINTS`) and ID. With none (`not_assigned`) it says to ask an organiser. It asks again every **15 s** while unassigned and every **30 s** while showing, so an assignment, a reassignment or an unassignment reaches the screen without a reload; a failed check (no signal) keeps the current QR showing. **An admin** enters any 4-digit waypoint ID instead (`GET /qr/{waypoint_id}`). Either way the backend answers with the waypoint-scoped HMAC signing key and timing rules (`key`, `rotate_ms`, `window_ms`, `server_time`) — see `backend/internal/qr/README.md`.
+1. **A helper** can't pick: the page load (`+page.server.ts`) reads the checkpoint an admin assigned them on `/admin` (`GET /api/qr/me`), once, and the page shows its name (from `MAP_POINTS`) and ID. With none (`not_assigned`) it says to ask an organiser and refresh. **There's no polling**: a new, changed or removed assignment reaches the screen only when the helper refreshes the page, so helpers add no load while the game runs. **An admin** enters any 4-digit waypoint ID instead (`GET /qr/{waypoint_id}`). Either way the backend answers with the waypoint-scoped HMAC signing key and timing rules (`key`, `rotate_ms`, `window_ms`, `server_time`) — see `backend/internal/qr/README.md`.
 2. It signs `"<waypoint>:<unix seconds>"` locally with Web Crypto (`crypto.subtle`, HMAC-SHA256), base64url-encodes the signature, and renders the token as a QR (`qrcode`), re-signing every `rotate_ms`. `server_time` corrects the display's own clock before signing.
-3. No further requests for the QR itself: it rotates from the one key, offline (a helper's page only re-checks its assignment).
+3. No further requests: the QR rotates from the one key, offline.
 
-`src/routes/qr/+page.server.ts` gates the page to staff: it checks the backend role via `GET /api/me` (HELPER/ADMIN), matching the backend route `GET /api/qr/me` (`403 not_staff`), and passes the role, so only an admin gets the picker (the backend refuses a helper's pick: `403 not_admin`). The page is handed a signing key, so it must not be reachable by players.
+`src/routes/qr/+page.server.ts` gates the page to staff: it checks the backend role via `GET /api/me` (HELPER/ADMIN), matching the backend route `GET /api/qr/me` (`403 not_staff`); for a helper it also reads their checkpoint there. It passes the role, so only an admin gets the picker (the backend refuses a helper's pick: `403 not_admin`). The page is handed a signing key, so it must not be reachable by players.
 
 ## The `/test-scan` page
 

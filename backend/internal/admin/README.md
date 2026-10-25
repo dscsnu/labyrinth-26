@@ -229,7 +229,7 @@ In validation order, per route (after the guard: `401`, then `403 not_admin`).
 | assign: not in the atlas | `404 unknown_waypoint` |
 | assign: no such user | `404 user_not_found` |
 | assign: a player or an admin | `409 not_helper` |
-| assign: a helper | `200`; `null` unassigns. Their `/qr` switches on its next check (within 30 s) |
+| assign: a helper | `200`; `null` unassigns. Their `/qr` shows it when they next load or refresh the page (it doesn't poll) |
 
 ## Concurrency and locking
 Admin holds no locks. Every race is the owner's, and its README says who wins: a removal against a scan (teams), a deletion against a write in flight (teamstate's `TeamDeleted`), a revive or reset against a timer (teamstate, under the team's entry lock). Two admins changing the same role: the last write wins.
