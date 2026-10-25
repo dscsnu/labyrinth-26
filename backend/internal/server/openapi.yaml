@@ -530,6 +530,96 @@ paths:
         "404": { $ref: "#/components/responses/Error", description: "Codes: `user_not_found`" }
         "409": { $ref: "#/components/responses/Error", description: "Codes: `cannot_change_own_role`" }
 
+  /api/admin/helpers:
+    get:
+      tags: [admin]
+      summary: Every helper
+      description: Every `HELPER`, by email, each with `waypoint_id`, their assigned checkpoint or null.
+      responses:
+        "200":
+          description: The helpers.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { type: array, items: { $ref: "#/components/schemas/User" } }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+    post:
+      tags: [admin]
+      summary: Add a helper by email
+      description: >-
+        The account with this email (any case; surrounding spaces ignored) becomes a `HELPER`. They must have signed
+        in once, so the account exists (`user_not_found` otherwise). One already a helper is returned unchanged, so
+        a resend is harmless; an admin is refused (`already_admin`: that would demote them). Returns the user.
+        Logged with the admin's ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              additionalProperties: false
+              properties:
+                email: { type: string, format: email, example: volunteer@snu.edu.in }
+      responses:
+        "200":
+          description: The helper.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_body`, `invalid_email`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `user_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `already_admin`, `cannot_change_own_role`" }
+
+  /api/admin/helpers/{user_id}/waypoint:
+    put:
+      tags: [admin]
+      summary: Assign a helper's checkpoint
+      description: >-
+        Sets the checkpoint whose QR the helper's `/qr` display shows (`GET /api/qr/me`), or clears it with null.
+        Several helpers may share one. Demoting a helper to `PLAYER` also clears it. Returns the user. Logged with
+        the admin's ID.
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [waypoint_id]
+              additionalProperties: false
+              properties:
+                waypoint_id: { type: [string, "null"], pattern: "^[0-9]{4}$", example: "2003" }
+      responses:
+        "200":
+          description: The helper, with the checkpoint.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_user_id`, `invalid_body`, `invalid_waypoint_id`" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`, `user_not_found`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`, `user_not_found`" }
+        "409": { $ref: "#/components/responses/Error", description: "Codes: `not_helper`" }
+
   /api/leaderboard:
     get:
       tags: [game]
@@ -858,9 +948,10 @@ paths:
   /api/qr/{waypoint_id}:
     get:
       tags: [qr]
-      summary: The waypoint's signing key and timing rules
+      summary: Any waypoint's signing key and timing rules (admins)
       description: |
-        Staff only (HELPER or ADMIN, read from the database each request). Returns the waypoint-scoped
+        Admins only (read from the database each request): picking any waypoint, to test or cover a
+        checkpoint. Helpers get only their assigned one (`GET /api/qr/me`). Returns the waypoint-scoped
         HMAC key and the timing rules; the `/qr` display signs its own rotating tokens locally (no
         polling), one per `qr.rotate`. Each token is valid for `qr.rotate` + `qr.tolerance` (10 s).
       parameters:
@@ -878,8 +969,32 @@ paths:
         "400": { $ref: "#/components/responses/Error", description: "Codes: `invalid_waypoint_id`" }
         "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
         "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
-        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_staff`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_admin`" }
         "404": { $ref: "#/components/responses/Error", description: "Codes: `unknown_waypoint`" }
+
+  /api/qr/me:
+    get:
+      tags: [qr]
+      summary: Your assigned checkpoint's signing key and timing rules
+      description: |
+        Staff only (HELPER or ADMIN, read from the database each request). The key and timing rules for
+        the checkpoint an admin assigned you (`PUT /api/admin/helpers/{user_id}/waypoint`), the same JSON
+        as `GET /api/qr/{waypoint_id}`; the `/qr` display signs its rotating tokens with it.
+        `not_assigned` until one is assigned.
+      responses:
+        "200":
+          description: The signing key and timing rules.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Success"
+                  - properties:
+                      payload: { $ref: "#/components/schemas/SigningKey" }
+        "429": { $ref: "#/components/responses/RateLimited", description: "Codes: `rate_limited`" }
+        "401": { $ref: "#/components/responses/Unauthorized", description: "Codes: `missing_token`, `invalid_token`" }
+        "403": { $ref: "#/components/responses/Error", description: "Codes: `not_staff`" }
+        "404": { $ref: "#/components/responses/Error", description: "Codes: `not_assigned`" }
 
   /api/qr/verify:
     post:
@@ -1314,13 +1429,18 @@ components:
             by_option: { type: object, additionalProperties: { type: integer }, description: "Answers per option index; {} when none." }
     User:
       type: object
-      required: [id, email, name, avatar_url, role, created_at]
+      required: [id, email, name, avatar_url, role, waypoint_id, created_at]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, format: email, example: player@snu.edu.in }
         name: { type: string, example: Player One }
         avatar_url: { type: [string, "null"], format: uri }
         role: { type: string, enum: [PLAYER, HELPER, ADMIN] }
+        waypoint_id:
+          type: [string, "null"]
+          pattern: "^[0-9]{4}$"
+          description: A helper's assigned checkpoint, whose QR their `/qr` display shows (an admin assigns it); null if none. Only staff have one.
+          example: "2003"
         created_at: { type: string, format: date-time }
 
     Team:
