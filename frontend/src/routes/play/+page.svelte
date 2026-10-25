@@ -320,27 +320,24 @@
       );
       const fresh = isNewer(latest().version, next.version);
       const heldBefore = ts.powerups.held;
+      const lockedBefore = latest().locked_shapes;
       observe(next);
-      // Moments, on every phone: a teammate's cast that finished a boss,
-      // and the boss's attacks.
+      // Moments, on every phone, as toasts over the map: a boss falling
+      // (and the spells that unlocks), the team knocked out or revived. An
+      // attack has its own popup (attack, from the health dropping).
       if (!fresh) return;
       if (type === "boss_defeated" && next.last_cast) {
-        message = {
-          ok: true,
-          text: `${bossName(next.last_cast.boss)} defeated!`,
-        };
-      } else if (type === "boss_attacked" && next.boss) {
-        message = {
-          ok: false,
-          text: `${bossName(next.boss.serial)} attacked! Health ${next.health}/${game.health}`,
-        };
+        const unlocked = lockedBefore
+          .filter((id) => !next.locked_shapes.includes(id))
+          .map((id) => game.shapes.find((s) => s.id === id)?.name ?? id);
+        showToast(
+          `${bossName(next.last_cast.boss)} defeated!` +
+            (unlocked.length ? ` Unlocked: ${unlocked.join(", ")}` : ""),
+        );
       } else if (type === "knocked_out") {
-        message = {
-          ok: false,
-          text: "Knocked out! Ask an organiser to revive your team.",
-        };
+        showToast("Knocked out! Ask an organiser to revive your team.", false);
       } else if (type === "revived") {
-        message = { ok: true, text: "Revived: full health" };
+        showToast("Revived: full health. Back in the game!");
       } else if (type === "powerup_granted") {
         const got = next.powerups.held.find((k) => !heldBefore.includes(k));
         if (got) showToast(`Powerup: ${powerupName(got)}!`);
@@ -352,10 +349,13 @@
       qte = envelope(QTESchema.nullable()).parse(JSON.parse(e.data)).message;
     });
     // /play needs a team: without one (never had one, or it's gone) the
-    // player belongs on /team, where they can create or join one.
-    events.addEventListener("no_team", () => {
+    // player belongs on /team, where they can create or join one. Removed by
+    // an organiser, or the team deleted (a started team's roster is locked,
+    // so that's an organiser too): /team says which.
+    events.addEventListener("no_team", (e) => {
+      const { type } = envelope(z.object({})).parse(JSON.parse(e.data));
       events.close();
-      goto("/team");
+      goto(type === "removed" || type === "team_deleted" ? `/team?gone=${type}` : "/team");
     });
     return () => {
       clearInterval(ticker);
@@ -830,6 +830,17 @@
 
 <!-- The map: the rest of the screen, below the bar. -->
 <div class="fixed inset-x-0 top-[25dvh] bottom-0">
+  <!-- Knocked out: a red strip across the top of the map for as long as it
+       lasts (on every phone, and after a reload), till an organiser revives
+       the team. -->
+  {#if ts.knocked_out}
+    <p
+      role="alert"
+      class="absolute inset-x-0 top-0 z-20 border-b-4 border-black bg-danger px-4 py-2 text-center font-pixel text-[8px] leading-[16px] text-white uppercase text-outline"
+    >
+      Knocked out! Your team can't cast or scan. Ask an organiser to revive you.
+    </p>
+  {/if}
   <MapView
     bind:level={zoomLevel}
     markers={MAP_POINTS}
@@ -1138,7 +1149,7 @@
 {#if toast}
   <p
     role="status"
-    class="pixel-box pointer-events-none fixed inset-x-4 top-[calc(25dvh+1rem)] z-50 mx-auto max-w-sm bg-ink px-3 py-2 text-center font-pixel text-[8px] leading-[16px] uppercase {toast.ok
+    class="pixel-box pointer-events-none fixed inset-x-4 z-50 {ts.knocked_out ? 'top-[calc(25dvh+4rem)]' : 'top-[calc(25dvh+1rem)]'} mx-auto max-w-sm bg-ink px-3 py-2 text-center font-pixel text-[8px] leading-[16px] uppercase {toast.ok
       ? 'text-gold-light'
       : 'text-pink'}"
     transition:fade={{ duration: 150 }}
