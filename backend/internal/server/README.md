@@ -55,7 +55,8 @@ Every number below that comes from `config.toml` is shown with its current value
 | 11 | `seed` subcommand | `db.Seed2026` (`seeds/2026.sql`, `2026_spells.sql`, `2026_bosses.sql`), logs `seeded 2026 content`, exits. Content is read at startup, which is why seeding needs the lock. |
 | 12 | `server.Build` | Loads memory from Postgres and builds the routes (see [`server.go`](#servergo)). |
 | 13 | Login code sweep | `go cleanupLoginCodes(...)`: every **10 m** (`auth.login_code_sweep`) deletes expired, unredeemed login codes. The first sweep is one interval after startup, not at startup. |
-| 13b | Leaderboard loop | `go app.Leaderboard.Run(ctx)`: every **5 s** (`leaderboard.publish_every`) ranks the teams and broadcasts the top (`leaderboard`, type `updated`) if it changed. Ends with `ctx` (the signal or a lost instance lock). |
+| 13b | Leaderboard loop | `go app.Leaderboard.Run(ctx)`: every **5 s** (`leaderboard.publish_every`) ranks the teams and broadcasts the top (`leaderboard`, type `updated`) if it changed, and sends the full ranking to the admins watching the live view (`admin_leaderboard`) if that changed. Ends with `ctx` (the signal or a lost instance lock). |
+| 13c | Activity loop | `go app.Activity.Run(ctx)`: every **1 s** (`activity.publish_every`) sends the admin live view's queued entries to the admins watching (`activity`, type `batch`). Ends with `ctx`. |
 | 14 | `http.Server` | `Addr ":" + PORT` (default `3000`), `ReadHeaderTimeout` **10 s** (`server.read_header_timeout`), `ReadTimeout` **30 s** (`server.read_timeout`), `IdleTimeout` **2 m** (`server.idle_timeout`). No `WriteTimeout`: event streams are long-lived. `live.Serve` clears the read deadline once a stream starts. |
 | 15 | Shutdown hooks | `srv.RegisterOnShutdown(app.Hub.Close)`, then `app.TeamState.Close` and `app.QTEs.Close`: no boss attack or QTE close timer fires once shutting down (it would publish to closed streams). |
 | 16 | Serve | `ListenAndServe` in a goroutine, logging `listening addr=:3000`. |
@@ -118,6 +119,7 @@ Every number below that comes from `config.toml` is shown with its current value
 - **`health`** handles `GET /health`: `db.Ping`; on error `503` `database unreachable`; otherwise `200` with the uptime, the open stream count and the process's runtime and resource stats (see [API](#api)).
 - **`events`** handles `GET /api/events`: see [The event stream](#the-event-stream). It lives here because it carries events from every use case.
 - **`snapshot(userID)`** is the initial snapshots, in order: `hello`, the user's `team` or `no_team`, their team's `team_state` (if any), then the game-wide ones: `qte` (`QTEs.Snapshot()`: the open QTE without its answer, or `null`) and the `leaderboard` (`Leaderboard.Snapshot()`), both of type `snapshot`.
+- **`?admin=1`** (`events`): only when the stream asks, `events` reads the caller's role (`users.Get`); for an `ADMIN` it calls `Activity.Watch(sub)` (stopped when the stream ends) and appends `adminSnapshot()`: `activity` (the recent entries) then `admin_leaderboard` (the full ranking), both of type `snapshot`. Anyone else gets the normal stream; players' streams make no extra query. `server.Build` builds the feed (`activity.New`) before team state, wires `teamstate.Rules.OnPublish` to `Feed.Record` and `leaderboard.Rules.SendAdmins` to `Feed.SendAdmins` (see `internal/activity/README.md`).
 - **`hello(now)`** is the `hello` event: `{"server_time": now}` in UTC. Clients measure their clock offset from it; it carries nothing else (game rules come from `GET /api/game/shapes`).
 
 ### `*_test.go`
@@ -155,6 +157,7 @@ End-to-end tests for every use case, because they need the whole app. See [The t
 | `storage.write_timeout` | 5 s | `teams.Rules.WriteTimeout` and `teamstate.Rules.WriteTimeout` |
 | `storage.instance_lock_check` | 5 s | `db.AcquireInstanceLock` (`main`) |
 | `leaderboard.size`, `leaderboard.publish_every` | 10, 5 s | `leaderboard.Rules.Size`, `PublishEvery` |
+| `activity.publish_every`, `activity.batch_max`, `activity.recent` | 1 s, 200, 200 | `activity.Rules` |
 | `admin.user_search_limit` | 20 | `admin.Rules.UserSearchLimit` |
 | `ratelimit.per_second`, `ratelimit.burst`, `ratelimit.idle` | 10, 40, 10 m | `httpx.NewLimiter`, the `perUser` wrapper |
 
@@ -309,6 +312,10 @@ data: {"type":"snapshot","message":{"team_id":"482913","waypoints":[],"patterns"
 | | `resync` | reloaded after a failed write: the open QTE or `null` | every stream | render |
 | `leaderboard` | `snapshot` | connect, last (after the user's own events) | that stream | render the top |
 | | `updated` | the top `leaderboard.size` (10) changed, checked every **5 s** (`leaderboard.publish_every`) | **every stream** (game scope, `Hub.Broadcast`) | re-render the top |
+| `activity` | `snapshot` | connect with `?admin=1`, as an `ADMIN`, after `leaderboard` | that stream | show the recent entries |
+| | `batch` | every **1 s** (`activity.publish_every`) when any team changed: at most **200** (`activity.batch_max`) entries, oldest first, the rest counted in `dropped` | each watching admin stream (`Subscription.Send`), not the admin's others | append |
+| `admin_leaderboard` | `snapshot` | connect with `?admin=1`, as an `ADMIN`, last | that stream | render every team |
+| | `updated` | the full ranking changed, checked every **5 s** (`leaderboard.publish_every`) | each watching admin stream | re-render |
 
 `no_team` of any type means: clear both the team and its team state.
 
@@ -784,6 +791,7 @@ Calls `server.Build` again on the same database and config, and swaps the handle
 | `TestAdminRemoveFromLobby` | `tests/admin_test.go` | `invalid_team_id`, `invalid_user_id` (path and `new_leader`), `team_not_found`, `not_a_member`, `new_leader_required`, `invalid_new_leader` (self, outsider, non-leader with one); a removal sends `no_team` to the removed and `team` to a member; removing the leader with a new leader; `GET /api/admin/teams`; `last_member` with and without `new_leader`; the removed player creates a team |
 | `TestAdminRemoveFromStartedTeam` | `tests/admin_test.go` | seed + `restart`; removing a started team's member: `no_team` and no more `team_state` for them; their scan, select and state read `404 not_in_team`; the rest complete a quadrilateral using the removed player's earlier scan; the removed player joins a lobby team; after `restart` the roster is still smaller and the removed player's scan gets `not_in_game` (they're in a lobby team) |
 | `TestAdminRemoveRacesScan` | `tests/admin_test.go` | each non-leader's scan racing their removal: removal `200`; the scan `200` with a one-scan stack or `404 not_in_team` with an empty one, never accepted after the removal |
+| `TestAdminLiveView` | `tests/activity_test.go` | seed + `restart`; an admin's `?admin=1` stream opens with `activity:snapshot` and `admin_leaderboard:snapshot` (both teams); after a quadrilateral cast and `Activity.Flush()`, one `activity:batch` holding both teams' `game_started`, the selection (by `lv0`), the scans and the cast with `dealt`; a second flush sends nothing; after `Leaderboard.Refresh()`, `admin_leaderboard:updated` with the casting team first; an admin's plain stream and a player's `?admin=1` stream get neither |
 | `TestAdminTeamsOverview` | `tests/admin_test.go` | seed + `restart`; `GET /api/admin/teams`: a lobby team's `game` is null; a started team's has `health` = `game.health`, `cast_count` 1 and `cooldown_class` `class_4` after the quadrilateral, `knocked_out` false and a `boss` |
 | `TestAdminDeleteTeam` | `tests/admin_test.go` | `not_admin`, `invalid_team_id`; deleting a started team: a member's stream gets `no_team: team_deleted`, their state is `404 not_in_team`, the list is empty, a member creates a team at once, deleting again is `404 team_not_found` |
 | `TestAdminResetCooldownsOverHTTP` | `tests/admin_test.go` | the quadrilateral cools `class_4` and its waypoints (`waypoint_on_cooldown`); `not_admin`, `invalid_team_id`, `team_not_found`, `not_in_game` (a lobby team); the reset empties `cooldown_class` and `qr_cooldowns`, a member's stream gets `team_state: cooldowns_reset`, and the waypoint scans again |

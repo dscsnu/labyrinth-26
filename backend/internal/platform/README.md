@@ -131,6 +131,9 @@ Both are read **once at startup**. A change needs a restart.
 | `storage.instance_lock_check` | `Duration` | `"5s"` | > 0 | How often the backend checks it still holds the single-instance lock; also the timeout of each check |
 | `leaderboard.size` | `int` | `10` | ≥ 1 (`leaderboard.size must be at least 1`) | How many teams the leaderboard event and `GET /api/leaderboard` carry |
 | `leaderboard.publish_every` | `Duration` | `"5s"` | ≥ 1 s (`leaderboard.publish_every must be at least 1s`) | How often the server checks whether the top changed, and so the most often it broadcasts it |
+| `activity.publish_every` | `Duration` | `"1s"` | 100 ms–1 min (`activity.publish_every must be 100ms-1m`) | How often the admin live view's queued entries go to the admins watching |
+| `activity.batch_max` | `int` | `200` | 1–10,000 (`activity.batch_max must be 1-10000`) | The queue's size between flushes; past it the oldest entries are dropped and counted |
+| `activity.recent` | `int` | `200` | 0–10,000 (`activity.recent must be 0-10000`) | How many of the latest entries a newly opened live view starts with |
 | `admin.user_search_limit` | `int` | `20` | ≥ 1 (`admin.user_search_limit must be at least 1`) | Most users an admin's user search returns |
 | `ratelimit.per_second` | `float64` | `10` | > 0 (`ratelimit.per_second must be positive`) | Average requests a second each signed-in user may make |
 | `ratelimit.burst` | `int` | `40` | ≥ 1 (`ratelimit.burst must be at least 1`) | Requests a user may make at once before the average applies |

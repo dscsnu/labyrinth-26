@@ -60,7 +60,8 @@ The package comment.
 ### `store.go`
 - **`Rules`**: `Size` (`leaderboard.size`), `PublishEvery` (`leaderboard.publish_every`).
 - **`Leaderboard`**, **`New(standings, teams, hub, log, rules)`**.
-- **`Refresh()`**: ranks, encodes the top; if it differs from `last`, builds the event (`live.NewEvent("leaderboard", Updated, board)`), stores `last` and broadcasts, all under `mu` (so broadcasts go out in order). Reports whether it broadcast.
+- **`Refresh()`**: ranks; first `refreshFull`, then encodes the top; if it differs from `last`, builds the event (`live.NewEvent("leaderboard", Updated, board)`), stores `last` and broadcasts, all under `mu` (so broadcasts go out in order). Reports whether it broadcast the top.
+- **`refreshFull(ranked)`**: with `Rules.SendAdmins` set (`server.Build` points it at the admin live view's `activity.Feed.SendAdmins`), encodes every ranked team as `Full {teams}`; if it differs from `lastFull`, sends `admin_leaderboard` of type `updated` to the watching admins, under `mu`. Without `SendAdmins` it encodes nothing. **`AdminSnapshot()`**: the same, type `snapshot`, for a watching admin's stream on connect.
 - **`Run(ctx)`**: a ticker every `PublishEvery` calling `Refresh`, until `ctx` ends. `main` starts it (`go app.Leaderboard.Run(ctx)`).
 - **`Snapshot()`**: the current top as a `snapshot` event, for `server.snapshot`.
 
@@ -68,7 +69,7 @@ The package comment.
 - **`Routes(mux, authed)`**: `GET /api/leaderboard` → `ForUser(identity.UserID(r))`.
 
 ## Data model
-**Memory:** `last []byte`, the last broadcast `Board` as JSON (guarded by `mu`), only to tell whether the top changed. Memory-only: after a restart the first `Refresh` broadcasts (every stream got a fresh snapshot anyway). **Postgres:** none.
+**Memory:** `last []byte`, the last broadcast `Board` as JSON, and `lastFull []byte`, the last full ranking sent to admins (both guarded by `mu`), only to tell whether either changed. Memory-only: after a restart the first `Refresh` broadcasts (every stream got a fresh snapshot anyway). **Postgres:** none.
 
 `Entry` (JSON):
 
@@ -135,6 +136,7 @@ Nothing to fail but encoding (logged, nothing broadcast). A restart: `last` is e
 | Test | File | Covers |
 |---|---|---|
 | `TestRanking` | `tests/leaderboard_test.go` | every key and tie-break, ranks from 1, finished, lobby left out, a team with no standing, the top cut at size, the caller's entry below the top, null without a team (fakes) |
+| `TestFullRankingForAdmins` | `tests/leaderboard_test.go` | with `SendAdmins` set, `Refresh` sends every started team (past `size`) as `admin_leaderboard:updated`, not again while unchanged, again on a change below the top (which the players' board ignores); `AdminSnapshot` is the full ranking |
 | `TestRefreshBroadcastsOnChange` | `tests/leaderboard_test.go` | the first refresh broadcasts `updated`; unchanged and below-the-top changes don't; a change in the top does; `Snapshot` is a `snapshot` |
 
 End to end in `internal/server/tests`: `TestLeaderboardAndFinish` (the route, the finished team first, `me`, the stream's opening snapshot, a refresh's broadcast); the game-loop simulation's `checkLeaderboard` compares every team's rank with its model (teamstate README, Tests).
