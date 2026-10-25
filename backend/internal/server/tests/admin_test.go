@@ -665,3 +665,64 @@ func TestPowerupsOverHTTP(t *testing.T) {
 		t.Fatalf("the admin overview: %d %v", status, game)
 	}
 }
+
+// TestHelpersOverHTTP checks the admin's helper routes: adding by email (any
+// case; a player becomes HELPER, a resend changes nothing, an admin is 409
+// already_admin, an unknown email 404 user_not_found, an empty one 400
+// invalid_email, a player calling 403 not_admin); the list; assigning a
+// checkpoint with every refusal; and demoting a helper clearing it.
+func TestHelpersOverHTTP(t *testing.T) {
+	e := setup(t)
+	if err := e.db.Seed2026(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e = e.restart() // content is read at startup
+	admin := e.newAdmin("admin")
+	h := e.newPlayer("helper")
+	p := e.newPlayer("plain")
+	add := func(caller player, body any) apiResult { return e.call("POST", "/api/admin/helpers", caller, body) }
+	assign := func(userID string, body any) apiResult {
+		return e.call("PUT", "/api/admin/helpers/"+userID+"/waypoint", admin, body)
+	}
+
+	expect(t, "a player adds", add(p, map[string]string{"email": "helper@snu.edu.in"}), http.StatusForbidden, "not_admin")
+	expect(t, "empty email", add(admin, map[string]string{"email": "  "}), http.StatusBadRequest, "invalid_email")
+	expect(t, "no body", add(admin, map[string]int{"email": 1}), http.StatusBadRequest, "invalid_body")
+	expect(t, "nobody with it", add(admin, map[string]string{"email": "ghost@snu.edu.in"}), http.StatusNotFound, "user_not_found")
+	expect(t, "an admin", add(admin, map[string]string{"email": "admin@snu.edu.in"}), http.StatusConflict, "already_admin")
+	r := add(admin, map[string]string{"email": " HELPER@snu.edu.in "})
+	expect(t, "add, any case", r, http.StatusOK, "")
+	if r.payload["id"] != h.id || r.payload["role"] != "HELPER" || r.payload["waypoint_id"] != nil {
+		t.Fatalf("added helper: %v", r.payload)
+	}
+	expect(t, "added again", add(admin, map[string]string{"email": "helper@snu.edu.in"}), http.StatusOK, "")
+
+	expect(t, "bad user id", assign("nope", map[string]any{"waypoint_id": "2001"}), http.StatusBadRequest, "invalid_user_id")
+	expect(t, "missing field", assign(h.id, map[string]any{}), http.StatusBadRequest, "invalid_body")
+	expect(t, "not a string", assign(h.id, map[string]any{"waypoint_id": 2001}), http.StatusBadRequest, "invalid_body")
+	expect(t, "bad waypoint", assign(h.id, map[string]any{"waypoint_id": "20"}), http.StatusBadRequest, "invalid_waypoint_id")
+	expect(t, "unknown waypoint", assign(h.id, map[string]any{"waypoint_id": "9999"}), http.StatusNotFound, "unknown_waypoint")
+	expect(t, "unknown user", assign(uuid.NewString(), map[string]any{"waypoint_id": "2001"}), http.StatusNotFound, "user_not_found")
+	expect(t, "a player", assign(p.id, map[string]any{"waypoint_id": "2001"}), http.StatusConflict, "not_helper")
+	expect(t, "an admin", assign(admin.id, map[string]any{"waypoint_id": "2001"}), http.StatusConflict, "not_helper")
+	r = assign(h.id, map[string]any{"waypoint_id": "2004"})
+	expect(t, "assign", r, http.StatusOK, "")
+	if r.payload["waypoint_id"] != "2004" {
+		t.Fatalf("assigned: %v", r.payload)
+	}
+
+	status, rows := e.callList("GET", "/api/admin/helpers", admin)
+	if status != http.StatusOK || len(rows) != 1 || rows[0].(map[string]any)["id"] != h.id || rows[0].(map[string]any)["waypoint_id"] != "2004" {
+		t.Fatalf("helpers: %d %v", status, rows)
+	}
+	expect(t, "a player lists", e.call("GET", "/api/admin/helpers", p, nil), http.StatusForbidden, "not_admin")
+
+	r = e.call("PUT", "/api/admin/users/"+h.id+"/role", admin, map[string]string{"role": "PLAYER"})
+	expect(t, "demote", r, http.StatusOK, "")
+	if r.payload["waypoint_id"] != nil {
+		t.Fatalf("demoted helper keeps a checkpoint: %v", r.payload)
+	}
+	if status, rows := e.callList("GET", "/api/admin/helpers", admin); status != http.StatusOK || len(rows) != 0 {
+		t.Fatalf("helpers after the demotion: %d %v", status, rows)
+	}
+}
